@@ -2,6 +2,8 @@
 
 [English manual](README.en.md)
 
+当前固件版本：`0.0.1`
+
 本项目是基于 ESP32-S3 + ES8311 的 NRL 网络语音电台桥接固件，用于把电台音频、PTT、SQL、频道选择、串口透明传输和网络配置集中到一个嵌入式应用中。当前工程主要面向 Moto3188/NRL 分支硬件。
 
 ## 支持功能
@@ -15,7 +17,14 @@
   - 设备启动后提供配置 AP 和 Web 页面。
   - 默认配置入口 IP 为 `192.168.4.1`。
   - 支持扫描附近 WiFi、配置 WiFi SSID/密码、服务器地址、端口、频道、呼号、音量等参数。
+  - 支持在 `/update` 页面通过 WiFi 上传 `firmware.bin` 进行 OTA 刷机。
   - 长按 BOOT 键 5 秒可重置网络相关配置。
+
+- BLE 蓝牙配置
+  - 设备启动后广播 BLE 设备名 `NRL-ESP32-CFG`。
+  - 使用 Nordic UART 风格的 BLE 服务，通过手机或电脑 BLE 工具写入文本命令。
+  - 支持配置 WiFi SSID/密码、服务器地址、端口、频道和呼号。
+  - 配置保存后会自动重启 WiFi/UDP 连接。
 
 - 电台控制 IO
   - PTT 输出控制电台发射。
@@ -58,6 +67,35 @@
 | 设备模式 | `55` |
 | 下行语音超时 | `120 ms` |
 | 心跳间隔 | `2000 ms` |
+
+## BLE 配置命令
+
+可使用 nRF Connect、LightBlue 等 BLE 工具连接 `NRL-ESP32-CFG`。
+
+| 项目 | UUID |
+| --- | --- |
+| Service | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` |
+| RX Write | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` |
+| TX Notify | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` |
+
+向 RX 特征写入以换行结尾的文本命令：
+
+```text
+HELP
+GET
+SET WIFI_SSID=your_ssid
+SET WIFI_PASS=your_password
+SET SERVER_HOST=110.42.107.105
+SET SERVER_PORT=60050
+SET CHANNEL=0
+SET CALLSIGN=NOCALL
+SAVE
+APPLY
+RESET_NET
+REBOOT
+```
+
+`SET` 命令会立即保存配置；如果改动了 WiFi 或服务器参数，会自动让网络桥重新连接。`GET` 会通过 TX Notify 返回当前主要配置。
 
 ## 主要管脚
 
@@ -118,6 +156,34 @@ platformio device monitor -b 115200
 ```
 
 分区表使用 `part.csv`，当前应用分区为 `app0`。
+构建时 `scripts/fix_size_per_env.py` 会把 PlatformIO 的固件大小限制调整为 `part.csv` 中 `app0` 的实际大小。
+
+GitHub Actions 会在每次 push、pull request 或手动触发时自动构建固件，并上传 `firmware.bin`、分区表、bootloader 和 USB 网页刷机文件作为构建产物。
+
+## 固件刷机
+
+### USB 网页刷机
+
+工程提供 `web-flasher/` 页面，适合首次烧录或恢复设备。它会写入 bootloader、分区表、OTA data 和 `app0` 固件。
+
+```powershell
+platformio run -e app0_main
+python scripts/stage_web_flasher.py
+python -m http.server 8000 -d web-flasher
+```
+
+然后用 Chrome 或 Edge 打开 `http://localhost:8000`，通过 USB 串口安装固件。
+
+### WiFi 网页刷机
+
+设备已经运行双 OTA 分区表后，可通过配置门户刷机：
+
+1. 连接设备配置 AP，或访问设备在局域网中的 IP。
+2. 打开 `http://192.168.4.1/update`，或从配置首页点击 `Firmware update`。
+3. 上传 `.pio/build/app0_main/firmware.bin`。
+4. 上传完成后设备会自动重启到新固件。
+
+注意：WiFi OTA 需要 `part.csv` 中的 `app0/app1` 双 OTA 分区布局。旧分区布局设备应先用 USB 网页刷机或串口刷机更新分区表。
 
 ## 目录结构
 
@@ -130,8 +196,10 @@ src/app/driver/es8311.*           ES8311/I2S 音频驱动
 src/app/driver/sci_serial.*       SCI 串口
 src/lib/nrl_audio_bridge.*        NRL UDP 音频桥接
 src/lib/nrl_at_commands.*         远程 AT 命令
+src/lib/ble_config.*              BLE 蓝牙配置
 src/lib/wifi_config_portal.*      Web 配置门户
 src/lib/nrl_audio_config.h        默认网络和音频参数
+web-flasher/                      USB 网页刷机页面
 scripts/                          构建辅助脚本
 ```
 

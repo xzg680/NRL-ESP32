@@ -4,8 +4,8 @@ import os
 env = DefaultEnvironment()
 platform = env.PioPlatform()
 
-# 你的 app0 起始地址（务必与 part.csv 一致！）
-APP0_OFFSET = 0x0F0000
+# app0 flash offset. Keep this in sync with part.csv.
+APP0_OFFSET = 0x010000
 
 # ESP32 partition table offset (standard)
 PARTITIONS_OFFSET = 0x8000

@@ -1,6 +1,7 @@
 #include "wifi_config_portal.h"
 #include "wifi_config_portal_page.generated.h"
 #include "nrl_audio_bridge.h"
+#include "nrl_version.h"
 
 #include "../app/driver/es8311.h"
 #include "../app/driver/external_radio.h"
@@ -8,6 +9,7 @@
 
 #include <Arduino.h>
 #include <DNSServer.h>
+#include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 
@@ -23,7 +25,9 @@ bool s_server_started = false;
 bool s_dns_started = false;
 bool s_ap_started = false;
 bool s_boot_pressed = false;
+bool s_update_reboot_pending = false;
 unsigned long s_boot_press_started_ms = 0UL;
+unsigned long s_update_reboot_at_ms = 0UL;
 
 constexpr byte kDnsPort = 53;
 constexpr unsigned long kBootResetHoldMs = 5000UL;
@@ -223,8 +227,8 @@ static void handleRoot()
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     String html = String(kWifiConfigPortalHtmlTemplate);
-    replaceToken(html, "{{TITLE}}", "NRL3188-ESP32 Config");
-    replaceToken(html, "{{HEADLINE}}", "NRL3188-ESP32 Setup");
+    replaceToken(html, "{{TITLE}}", String(NRL_FIRMWARE_NAME) + " Config");
+    replaceToken(html, "{{HEADLINE}}", String(NRL_FIRMWARE_NAME) + " Setup");
     replaceToken(html, "{{INTRO}}", "Connect to this open hotspot for first-time setup. Save applies immediately.");
     replaceToken(html, "{{AP_IP}}", WiFi.softAPIP().toString());
     replaceToken(html, "{{STA_IP}}", (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("not connected"));
@@ -241,6 +245,7 @@ static void handleRoot()
     replaceToken(html, "{{HP_DRIVE_CHECKED}}", config->hp_drive_enabled ? "checked" : "");
     replaceToken(html, "{{SUBMIT_LABEL}}", "Save and Apply");
     replaceToken(html, "{{FOOTER}}", "");
+    replaceToken(html, "{{VERSION}}", NRL_FIRMWARE_VERSION);
     s_server.send(200, "text/html; charset=utf-8", html);
 }
 
@@ -409,7 +414,117 @@ static void handleSave()
     replaceToken(html, "{{HP_DRIVE_CHECKED}}", "");
     replaceToken(html, "{{SUBMIT_LABEL}}", "Save and Apply");
     replaceToken(html, "{{FOOTER}}", "<p><a href=\"/\">Back to setup page</a></p>");
+    replaceToken(html, "{{VERSION}}", NRL_FIRMWARE_VERSION);
     s_server.send(ok ? 200 : 400, "text/html; charset=utf-8", html);
+}
+
+static String buildUpdatePage(const char *headline, const char *intro)
+{
+    String html = F("<!doctype html><html><head><meta charset=\"utf-8\">"
+                    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                    "<title>Firmware Update</title>"
+                    "<style>"
+                    ":root{color-scheme:light;--bg:#eef2f5;--panel:#fff;--ink:#17202a;--muted:#5d6875;--line:#d8e0e8;--accent:#0f766e;--accent-2:#2457a6;}"
+                    "*{box-sizing:border-box;}"
+                    "body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif;font-size:15px;}"
+                    ".shell{max-width:1040px;margin:0 auto;padding:20px;}"
+                    ".topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px;}"
+                    "h1{margin:0;font-size:26px;line-height:1.18;letter-spacing:0;}"
+                    ".sub{margin:6px 0 0;color:var(--muted);font-size:14px;}"
+                    ".status{display:grid;grid-template-columns:repeat(2,minmax(150px,1fr));gap:8px;min-width:320px;}"
+                    ".status div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;}"
+                    ".status span{display:block;color:var(--muted);font-size:12px;margin-bottom:3px;}"
+                    ".mono{font-family:Consolas,monospace;}"
+                    ".nav{display:flex;gap:8px;margin:0 0 14px;border-bottom:1px solid var(--line);}"
+                    ".nav a{display:inline-block;padding:10px 12px;text-decoration:none;color:var(--muted);border-bottom:3px solid transparent;font-weight:700;}"
+                    ".nav a.active{color:var(--accent);border-bottom-color:var(--accent);}"
+                    ".panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:14px;}"
+                    "h2{margin:0 0 12px;font-size:17px;letter-spacing:0;}"
+                    ".hint{color:var(--muted);font-size:13px;}"
+                    "input{width:100%;min-height:40px;padding:9px 10px;border:1px solid #c5ced8;border-radius:6px;font-size:15px;background:#fff;color:var(--ink);}"
+                    ".actions{display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap;margin-top:16px;}"
+                    "button,.button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:10px 14px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;font-weight:700;text-decoration:none;cursor:pointer;}"
+                    ".button.secondary{background:#e8edf3;color:#17202a;border:1px solid var(--line);}"
+                    ".notice{border-left:4px solid var(--accent-2);padding:10px 12px;background:#edf4ff;color:#25364c;border-radius:4px;margin:0 0 14px;}"
+                    "@media(max-width:760px){.shell{padding:14px;}.topbar{display:block;}.status{grid-template-columns:1fr;min-width:0;margin-top:12px;}.actions{justify-content:stretch;}button,.button{width:100%;}}"
+                    "</style></head><body><main class=\"shell\"><div class=\"topbar\"><div><h1>");
+    html += headline;
+    html += F("</h1><p class=\"sub\">");
+    html += intro;
+    html += F("</p></div><div class=\"status\"><div><span>Config AP</span><strong class=\"mono\">");
+    html += WiFi.softAPIP().toString();
+    html += F("</strong></div><div><span>Station IP</span><strong class=\"mono\">");
+    html += (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("not connected");
+    html += F("</strong></div></div></div>"
+              "<nav class=\"nav\"><a href=\"/\">Settings</a><a class=\"active\" href=\"/update\">Firmware</a></nav>"
+              "<p class=\"notice\">Firmware version ");
+    html += NRL_FIRMWARE_VERSION;
+    html += F("</p>"
+              "<p class=\"notice\">Upload the PlatformIO <span class=\"mono\">firmware.bin</span> file. "
+              "The device will reboot after a successful update.</p>"
+              "<section class=\"panel\"><h2>WiFi OTA Update</h2>"
+              "<form method=\"post\" action=\"/update\" enctype=\"multipart/form-data\">"
+              "<input type=\"file\" name=\"firmware\" accept=\".bin,application/octet-stream\" required>"
+              "<div class=\"actions\"><a class=\"button secondary\" href=\"/\">Back to settings</a>"
+              "<button type=\"submit\">Upload firmware</button></div>"
+              "</form></section></main></body></html>");
+    return html;
+}
+
+static void handleUpdatePage()
+{
+    s_server.send(200,
+                  "text/html; charset=utf-8",
+                  buildUpdatePage("WiFi Firmware Update", "Flash a new firmware image over this web connection."));
+}
+
+static void handleUpdateFinished()
+{
+    const bool ok = !Update.hasError();
+    if (ok) {
+        s_update_reboot_pending = true;
+        s_update_reboot_at_ms = millis() + 1000UL;
+    }
+
+    s_server.send(ok ? 200 : 500,
+                  "text/html; charset=utf-8",
+                  buildUpdatePage(ok ? "Update Complete" : "Update Failed",
+                                  ok ? "Firmware was written successfully. Rebooting shortly."
+                                     : "Firmware upload failed. Check that the file is a valid firmware.bin."));
+}
+
+static void handleUpdateUpload()
+{
+    HTTPUpload &upload = s_server.upload();
+
+    if (upload.status == UPLOAD_FILE_START) {
+        Serial.printf("[OTA] upload start: %s\n", upload.filename.c_str());
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+            Update.printError(Serial);
+        }
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Update.printError(Serial);
+        }
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) {
+            Serial.printf("[OTA] update complete: %u bytes\n", static_cast<unsigned>(upload.totalSize));
+        } else {
+            Update.printError(Serial);
+        }
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_ABORTED) {
+        Update.abort();
+        Serial.println("[OTA] upload aborted");
+    }
 }
 
 static void handleGenerate204()
@@ -446,6 +561,8 @@ static void ensureServerRunning()
     s_server.on("/", HTTP_GET, handleRoot);
     s_server.on("/scan", HTTP_GET, handleScan);
     s_server.on("/save", HTTP_POST, handleSave);
+    s_server.on("/update", HTTP_GET, handleUpdatePage);
+    s_server.on("/update", HTTP_POST, handleUpdateFinished, handleUpdateUpload);
     s_server.on("/generate_204", HTTP_GET, handleGenerate204);
     s_server.on("/hotspot-detect.html", HTTP_GET, handleHotspotDetect);
     s_server.on("/connecttest.txt", HTTP_GET, handleConnectTest);
@@ -476,6 +593,11 @@ void WifiConfigPortal_Poll(void)
     pollBootResetGesture();
     s_dns.processNextRequest();
     s_server.handleClient();
+    if (s_update_reboot_pending && (millis() - s_update_reboot_at_ms) < 0x80000000UL) {
+        Serial.println("[OTA] reboot now");
+        Serial.flush();
+        ESP.restart();
+    }
 }
 
 void WifiConfigPortal_EnterFallbackMode(void)

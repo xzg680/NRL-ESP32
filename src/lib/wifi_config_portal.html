@@ -5,83 +5,152 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{TITLE}}</title>
   <style>
-    body{font-family:Arial,Helvetica,sans-serif;margin:24px;background:#f3f6f9;color:#1f2937;}
-    .card{max-width:760px;margin:0 auto;background:#fff;padding:24px;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.08);}
-    h1{margin-top:0;font-size:28px;}
-    label{display:block;margin:14px 0 6px;font-weight:600;}
-    input,select{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:15px;background:#fff;}
-    button{margin-top:18px;padding:12px 18px;border:0;border-radius:10px;background:#0f766e;color:#fff;font-size:15px;font-weight:700;}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
-    .hint{color:#475569;font-size:14px;}
-    .hint input[type=checkbox]{width:auto;margin-right:8px;}
+    :root{color-scheme:light;--bg:#eef2f5;--panel:#fff;--ink:#17202a;--muted:#5d6875;--line:#d8e0e8;--accent:#0f766e;--accent-2:#2457a6;--danger:#b42318;}
+    *{box-sizing:border-box;}
+    body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif;font-size:15px;}
+    .shell{max-width:1040px;margin:0 auto;padding:20px;}
+    .topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px;}
+    h1{margin:0;font-size:26px;line-height:1.18;letter-spacing:0;}
+    .sub{margin:6px 0 0;color:var(--muted);font-size:14px;}
+    .status{display:grid;grid-template-columns:repeat(2,minmax(150px,1fr));gap:8px;min-width:320px;}
+    .status div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;}
+    .status span{display:block;color:var(--muted);font-size:12px;margin-bottom:3px;}
     .mono{font-family:Consolas,monospace;}
+    .nav{display:flex;gap:8px;margin:0 0 14px;border-bottom:1px solid var(--line);}
+    .nav a{display:inline-block;padding:10px 12px;text-decoration:none;color:var(--muted);border-bottom:3px solid transparent;font-weight:700;}
+    .nav a.active{color:var(--accent);border-bottom-color:var(--accent);}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:14px;}
+    .section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;}
+    h2{margin:0;font-size:17px;letter-spacing:0;}
+    .hint{color:var(--muted);font-size:13px;}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px;}
+    label{display:block;margin:0 0 6px;font-weight:700;font-size:13px;}
+    input,select{width:100%;min-height:40px;padding:9px 10px;border:1px solid #c5ced8;border-radius:6px;font-size:15px;background:#fff;color:var(--ink);}
+    input[type=checkbox]{width:auto;min-height:0;margin-right:8px;}
     .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
-    .btn-small{margin-top:10px;padding:8px 12px;font-size:14px;}
-    @media(max-width:640px){.grid{grid-template-columns:1fr;}}
+    .row select{flex:1;min-width:220px;width:auto;}
+    .span-2{grid-column:1/-1;}
+    .actions{display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap;margin-top:16px;}
+    button,.button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:10px 14px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;font-weight:700;text-decoration:none;cursor:pointer;}
+    .button.secondary,button.secondary{background:#e8edf3;color:#17202a;border:1px solid var(--line);}
+    .btn-small{min-height:36px;padding:8px 11px;}
+    .notice{border-left:4px solid var(--accent-2);padding:10px 12px;background:#edf4ff;color:#25364c;border-radius:4px;margin:0 0 14px;}
+    .footer-links{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:10px;}
+    .footer-links a{color:var(--accent-2);font-weight:700;text-decoration:none;}
+    @media(max-width:760px){
+      .shell{padding:14px;}
+      .topbar{display:block;}
+      .status{grid-template-columns:1fr;min-width:0;margin-top:12px;}
+      .grid{grid-template-columns:1fr;}
+      .span-2{grid-column:auto;}
+      .actions{justify-content:stretch;}
+      button,.button{width:100%;}
+    }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>{{HEADLINE}}</h1>
-    <p class="hint">{{INTRO}}</p>
-    <p class="hint">Hold the BOOT button for 5 seconds after startup to reset WiFi and server settings.</p>
-    <p class="hint">AP IP: <span class="mono">{{AP_IP}}</span> | STA IP: <span class="mono">{{STA_IP}}</span></p>
+  <main class="shell">
+    <div class="topbar">
+      <div>
+        <h1>{{HEADLINE}}</h1>
+        <p class="sub">{{INTRO}}</p>
+      </div>
+      <div class="status">
+        <div><span>Config AP</span><strong class="mono">{{AP_IP}}</strong></div>
+        <div><span>Station IP</span><strong class="mono">{{STA_IP}}</strong></div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <a class="active" href="/">Settings</a>
+      <a href="/update">Firmware</a>
+    </nav>
+
+    <p class="notice">Hold the BOOT button for 5 seconds after startup to reset WiFi and server settings.</p>
+    <p class="sub">Firmware version <span class="mono">{{VERSION}}</span></p>
+
     <form method="post" action="/save">
-      <div class="grid">
-        <div>
-          <label>WiFi SSID</label>
-          <input id="wifi-ssid-input" name="wifi_ssid" value="{{WIFI_SSID}}" autocomplete="off">
-          <label>Nearby WiFi</label>
-          <select id="wifi-ssid-select" onchange="applySelectedWifi()">
-            <option value="">Select detected WiFi...</option>
-            {{SSID_OPTIONS}}
-          </select>
-          <div class="row">
-            <button class="btn-small" type="button" onclick="scanWifi()">Scan Nearby WiFi</button>
-            <span class="hint" id="scan-status">Scan runs on demand to keep hotspot startup stable.</span>
+      <section class="panel">
+        <div class="section-head">
+          <h2>Network</h2>
+          <span class="hint" id="scan-status">Scan runs on demand to keep hotspot startup stable.</span>
+        </div>
+        <div class="grid">
+          <div>
+            <label>WiFi SSID</label>
+            <input id="wifi-ssid-input" name="wifi_ssid" value="{{WIFI_SSID}}" autocomplete="off">
+          </div>
+          <div>
+            <label>WiFi Password</label>
+            <input name="wifi_password" value="{{WIFI_PASSWORD}}">
+          </div>
+          <div class="span-2">
+            <label>Nearby WiFi</label>
+            <div class="row">
+              <select id="wifi-ssid-select" onchange="applySelectedWifi()">
+                <option value="">Select detected WiFi...</option>
+                {{SSID_OPTIONS}}
+              </select>
+              <button class="secondary btn-small" type="button" onclick="scanWifi()">Scan</button>
+            </div>
+          </div>
+          <div>
+            <label>Server Host / IP</label>
+            <input name="server_host" value="{{SERVER_HOST}}">
+          </div>
+          <div>
+            <label>Server Port</label>
+            <input name="server_port" value="{{SERVER_PORT}}">
           </div>
         </div>
-        <div>
-          <label>WiFi Password</label>
-          <input name="wifi_password" value="{{WIFI_PASSWORD}}">
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <h2>Radio</h2>
         </div>
-        <div>
-          <label>Server Host / IP</label>
-          <input name="server_host" value="{{SERVER_HOST}}">
+        <div class="grid">
+          <div>
+            <label>Channel (0-7)</label>
+            <input name="channel" value="{{CHANNEL}}">
+          </div>
+          <div>
+            <label>Callsign</label>
+            <input name="callsign" value="{{CALLSIGN}}">
+          </div>
+          <div>
+            <label>Callsign SSID</label>
+            <input name="callsign_ssid" value="{{CALLSIGN_SSID}}">
+          </div>
+          <div>
+            <label>ES8311 HP Drive</label>
+            <label class="hint"><input type="checkbox" name="hp_drive_enabled" value="1" {{HP_DRIVE_CHECKED}}>Enable headphone output drive (REG13 HPSW)</label>
+          </div>
         </div>
-        <div>
-          <label>Server Port</label>
-          <input name="server_port" value="{{SERVER_PORT}}">
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <h2>Audio</h2>
         </div>
-        <div>
-          <label>Channel (0-7)</label>
-          <input name="channel" value="{{CHANNEL}}">
+        <div class="grid">
+          <div>
+            <label>Mic Volume (0-255)</label>
+            <input name="mic_volume" value="{{MIC_VOLUME}}">
+          </div>
+          <div>
+            <label>Line Out Volume (0-255)</label>
+            <input name="line_out_volume" value="{{LINE_OUT_VOLUME}}">
+          </div>
         </div>
-        <div>
-          <label>Callsign</label>
-          <input name="callsign" value="{{CALLSIGN}}">
+        <div class="actions">
+          <a class="button secondary" href="/update">Firmware update</a>
+          <button type="submit">{{SUBMIT_LABEL}}</button>
         </div>
-        <div>
-          <label>Callsign SSID</label>
-          <input name="callsign_ssid" value="{{CALLSIGN_SSID}}">
-        </div>
-        <div>
-          <label>Mic Volume (0-255)</label>
-          <input name="mic_volume" value="{{MIC_VOLUME}}">
-        </div>
-        <div>
-          <label>Line Out Volume (0-255)</label>
-          <input name="line_out_volume" value="{{LINE_OUT_VOLUME}}">
-        </div>
-        <div>
-          <label>ES8311 HP Drive</label>
-          <label class="hint"><input type="checkbox" name="hp_drive_enabled" value="1" {{HP_DRIVE_CHECKED}}> Enable headphone output drive (REG13 HPSW)</label>
-        </div>
-      </div>
-      <button type="submit">{{SUBMIT_LABEL}}</button>
+      </section>
     </form>
-    {{FOOTER}}
-  </div>
+    <div class="footer-links">{{FOOTER}}</div>
+  </main>
   <script>
     function applySelectedWifi() {
       const select = document.getElementById('wifi-ssid-select');

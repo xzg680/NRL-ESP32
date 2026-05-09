@@ -1,5 +1,7 @@
 #include "nrl_at_commands.h"
 
+#include "nrl_version.h"
+
 #include "driver/es8311.h"
 #include "driver/external_radio.h"
 #include "driver/sci_serial.h"
@@ -269,7 +271,7 @@ static bool parseSciConfigValue(const char *text,
 static bool startAtReply(NrlAtCommandResult *result)
 {
     static const uint8_t kPrefix = 0x02u;
-    static const char kBanner[] = "NRL3188-ESP32 V1.0\r\n";
+    static const char kBanner[] = NRL_FIRMWARE_BANNER "\r\n";
 
     result->payload_size = 0u;
     return appendReplyBytes(result->payload, sizeof(result->payload), &result->payload_size, &kPrefix, 1u) &&

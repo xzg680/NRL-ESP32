@@ -1,6 +1,8 @@
 #include <Arduino.h>
 
+#include "../lib/ble_config.h"
 #include "../lib/nrl_audio_bridge.h"
+#include "../lib/nrl_version.h"
 #include "../lib/wifi_config_portal.h"
 #include "driver/es8311.h"
 #include "driver/external_radio.h"
@@ -17,7 +19,7 @@ void setup()
 {
     Serial.begin(115200);
     delay(200);
-    Serial.println("NRL NRL + ES8311 startup");
+    Serial.println(NRL_FIRMWARE_BANNER " startup");
 
     EXTERNAL_RADIO_Init();
     if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
@@ -28,6 +30,7 @@ void setup()
 
     STATUS_IO_Init();
     WifiConfigPortal_Init();
+    BLEConfig_Init();
 
     if (ES8311_Init()) {
         Serial.println("ES8311 ready.");
@@ -51,6 +54,7 @@ void loop()
         s_last_poll_ms = now;
         STATUS_IO_Poll();
         WifiConfigPortal_Poll();
+        BLEConfig_Poll();
     }
 
     delay(1);

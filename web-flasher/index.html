@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NRL ESP32 USB Web Flasher</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --fg: #17202a;
+      --muted: #5f6b7a;
+      --line: #d7dde5;
+      --panel: #ffffff;
+      --accent: #0b6bcb;
+      --accent-strong: #084f97;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #101418;
+        --fg: #eef3f8;
+        --muted: #a9b5c3;
+        --line: #2b3541;
+        --panel: #171d23;
+        --accent: #5ab0ff;
+        --accent-strong: #8bc8ff;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(920px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 40px 0;
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 24px;
+      margin-bottom: 28px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(28px, 6vw, 44px);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 32px 0 12px;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 12px;
+      color: var(--muted);
+    }
+
+    .install {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+      padding: 22px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .install-text {
+      min-width: 240px;
+      flex: 1;
+    }
+
+    .install-text strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    ol,
+    ul {
+      margin: 0;
+      padding-left: 22px;
+      color: var(--muted);
+    }
+
+    li {
+      margin: 8px 0;
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--line) 55%, transparent);
+      color: var(--fg);
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    a:hover {
+      color: var(--accent-strong);
+    }
+
+    .warning {
+      border-left: 4px solid var(--accent);
+      padding: 10px 14px;
+      background: color-mix(in srgb, var(--accent) 9%, transparent);
+      color: var(--fg);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>NRL ESP32 USB Web Flasher</h1>
+      <p>Flash the ESP32-S3 radio bridge firmware from a browser over USB serial.</p>
+    </header>
+
+    <section class="install" aria-label="USB web install">
+      <div class="install-text">
+        <strong>Firmware target: ESP32-S3 app0, version 0.0.1</strong>
+        <p>Use Chrome or Edge on a desktop system. Connect the board through USB, then start installation.</p>
+      </div>
+      <esp-web-install-button manifest="manifest.json">
+        <button slot="activate">Install firmware</button>
+        <span slot="unsupported">This browser does not support Web Serial. Use Chrome or Edge.</span>
+      </esp-web-install-button>
+    </section>
+
+    <h2>Before Flashing</h2>
+    <ol>
+      <li>Build and stage the firmware files with <code>platformio run -e app0_main</code>, then <code>python scripts/stage_web_flasher.py</code>.</li>
+      <li>Serve this directory over HTTPS or from localhost. For local testing, run <code>python -m http.server 8000 -d web-flasher</code>.</li>
+      <li>Open <code>http://localhost:8000</code> in Chrome or Edge.</li>
+      <li>Hold BOOT if your board does not enter download mode automatically.</li>
+    </ol>
+
+    <h2>Flash Layout</h2>
+    <ul>
+      <li><code>bootloader.bin</code> at <code>0x0000</code></li>
+      <li><code>partitions.bin</code> at <code>0x8000</code></li>
+      <li><code>boot_app0.bin</code> at <code>0xE000</code></li>
+      <li><code>firmware.bin</code> at <code>0x010000</code></li>
+    </ul>
+
+    <h2>Notes</h2>
+    <p class="warning">The firmware path follows the project's dual OTA layout from <code>part.csv</code>. USB flashing installs the partition table needed for later WiFi web updates.</p>
+  </main>
+</body>
+</html>

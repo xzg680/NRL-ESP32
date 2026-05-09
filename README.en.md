@@ -1,5 +1,7 @@
 # NRL ESP32 Radio Bridge
 
+Current firmware version: `0.0.1`
+
 This project is an ESP32-S3 + ES8311 firmware for an NRL network radio bridge. It connects radio audio, PTT, SQL, channel selection, SCI serial passthrough, and network configuration in one embedded application. The current pin map targets the Moto3188/NRL hardware branch.
 
 ## Features
@@ -13,7 +15,14 @@ This project is an ESP32-S3 + ES8311 firmware for an NRL network radio bridge. I
   - The device starts a configuration AP and web page.
   - Default portal IP: `192.168.4.1`.
   - Supports WiFi scanning and configuration of WiFi SSID/password, server host, server port, channel, callsign, audio volume, and ES8311 output mode.
+  - Supports WiFi OTA firmware upload from the `/update` page.
   - Holding the BOOT button for 5 seconds resets network-related settings.
+
+- BLE configuration
+  - The device advertises as `NRL-ESP32-CFG`.
+  - Uses a Nordic UART-style BLE service for text commands from a phone or PC BLE tool.
+  - Supports configuring WiFi SSID/password, server host, server port, channel, and callsign.
+  - WiFi/UDP transport is restarted automatically after saved network changes.
 
 - Radio control IO
   - PTT output controls radio transmit.
@@ -56,6 +65,35 @@ Defaults are defined in `src/lib/nrl_audio_config.h`.
 | Device mode | `55` |
 | Downlink voice timeout | `120 ms` |
 | Heartbeat interval | `2000 ms` |
+
+## BLE Configuration Commands
+
+Use a BLE tool such as nRF Connect or LightBlue to connect to `NRL-ESP32-CFG`.
+
+| Item | UUID |
+| --- | --- |
+| Service | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` |
+| RX Write | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` |
+| TX Notify | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` |
+
+Write newline-terminated text commands to the RX characteristic:
+
+```text
+HELP
+GET
+SET WIFI_SSID=your_ssid
+SET WIFI_PASS=your_password
+SET SERVER_HOST=110.42.107.105
+SET SERVER_PORT=60050
+SET CHANNEL=0
+SET CALLSIGN=NOCALL
+SAVE
+APPLY
+RESET_NET
+REBOOT
+```
+
+`SET` commands are saved immediately. If WiFi or server settings changed, the network bridge reconnects automatically. `GET` returns the main configuration through TX Notify.
 
 ## Main Pins
 
@@ -116,6 +154,34 @@ platformio device monitor -b 115200
 ```
 
 The partition table is `part.csv`, and the current application partition is `app0`.
+During build, `scripts/fix_size_per_env.py` adjusts PlatformIO's maximum firmware size to the actual `app0` size from `part.csv`.
+
+GitHub Actions builds the firmware automatically on every push, pull request, or manual workflow run. The workflow uploads `firmware.bin`, the partition table, bootloader, and USB web flasher files as build artifacts.
+
+## Firmware Flashing
+
+### USB Web Flashing
+
+The `web-flasher/` page is intended for first installation or recovery. It writes the bootloader, partition table, OTA data, and `app0` firmware.
+
+```powershell
+platformio run -e app0_main
+python scripts/stage_web_flasher.py
+python -m http.server 8000 -d web-flasher
+```
+
+Then open `http://localhost:8000` in Chrome or Edge and install the firmware over USB serial.
+
+### WiFi Web Flashing
+
+After the device is running the dual OTA partition layout, firmware can be updated from the configuration portal:
+
+1. Connect to the device configuration AP, or browse to the device IP on your LAN.
+2. Open `http://192.168.4.1/update`, or click `Firmware update` on the setup page.
+3. Upload `.pio/build/app0_main/firmware.bin`.
+4. The device reboots automatically after a successful upload.
+
+Note: WiFi OTA requires the `app0/app1` dual OTA layout from `part.csv`. Devices using the old partition layout should first be updated with USB web flashing or serial flashing so the new partition table is installed.
 
 ## Project Layout
 
@@ -128,12 +194,13 @@ src/app/driver/es8311.*           ES8311/I2S audio driver
 src/app/driver/sci_serial.*       SCI serial driver
 src/lib/nrl_audio_bridge.*        NRL UDP audio bridge
 src/lib/nrl_at_commands.*         Remote AT commands
+src/lib/ble_config.*              BLE configuration
 src/lib/wifi_config_portal.*      Web configuration portal
 src/lib/nrl_audio_config.h        Default network and audio settings
+web-flasher/                      USB web flasher page
 scripts/                          Build helper scripts
 ```
 
 ## License
 
 This project is licensed under the MIT License. See `LICENSE` for details.
-
