@@ -334,11 +334,10 @@ static void flushSciPayload(void)
 
     const bool sent = udpSendPacket(s_sci_tx_packet, packet_size);
     const uint32_t now = millis();
-    if (!sent || (now - s_last_sci_log_ms) >= 1000u) {
+    if (!sent && (now - s_last_sci_log_ms) >= 1000u) {
         s_last_sci_log_ms = now;
-        Serial.printf("[SCI] nrl type12 uplink bytes=%u sent=%u\n",
-                      static_cast<unsigned>(payload_count),
-                      sent ? 1u : 0u);
+        Serial.printf("[SCI] uplink send failed bytes=%u\n",
+                      static_cast<unsigned>(payload_count));
     }
 }
 
@@ -379,9 +378,9 @@ static void handleIncomingSciPayload(const uint8_t *payload, const size_t payloa
 
     const size_t written = SCI_SERIAL_Write(payload, payload_size);
     const uint32_t now = millis();
-    if (written != payload_size || (now - s_last_sci_log_ms) >= 1000u) {
+    if (written != payload_size && (now - s_last_sci_log_ms) >= 1000u) {
         s_last_sci_log_ms = now;
-        Serial.printf("[SCI] nrl type12 downlink bytes=%u written=%u\n",
+        Serial.printf("[SCI] downlink short write bytes=%u written=%u\n",
                       static_cast<unsigned>(payload_size),
                       static_cast<unsigned>(written));
     }
@@ -498,48 +497,27 @@ static void startDownlinkPlayback(void)
         return;
     }
 
-    const char *callsign = (s_remote_callsign[0] != '\0') ? s_remote_callsign : "UNKNOWN";
     ES8311_ClearOutputQueue();
     STATUS_IO_SetPttActive(true);
-    if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
-        Serial.printf("[NRL] audio config before downlink playback: line_out=%u hp_drive=%u\n",
-                      static_cast<unsigned>(config->line_out_volume),
-                      config->hp_drive_enabled ? 1u : 0u);
-    }
 
     if (!ES8311_SetReceiveMode()) {
         Serial.println("[NRL] failed to keep ES8311 in receive/speaker mode");
         STATUS_IO_SetPttActive(false);
         return;
     }
-    ES8311_LogStatus();
 
     s_downlink_playback_active = true;
-    Serial.printf("[NRL] downlink playback start: from=%s-%u ptt=1 timeout=%u ms\n",
-                  callsign,
-                  static_cast<unsigned>(s_remote_ssid),
-                  static_cast<unsigned>(NRL_AUDIO_RX_PACKET_TIMEOUT_MS));
 }
 
 static void logIncomingVoicePacket(const size_t payload_size)
 {
-    const char *callsign = (s_remote_callsign[0] != '\0') ? s_remote_callsign : "UNKNOWN";
-
     if (!s_voice_stream_logged) {
-        Serial.printf("[NRL] voice stream start: from=%s-%u payload=%u bytes\n",
-                      callsign,
-                      static_cast<unsigned>(s_remote_ssid),
-                      static_cast<unsigned>(payload_size));
         s_voice_stream_logged = true;
         s_last_voice_payload_size = payload_size;
         return;
     }
 
     if (payload_size != s_last_voice_payload_size) {
-        Serial.printf("[NRL] voice payload changed: from=%s-%u payload=%u bytes\n",
-                      callsign,
-                      static_cast<unsigned>(s_remote_ssid),
-                      static_cast<unsigned>(payload_size));
         s_last_voice_payload_size = payload_size;
     }
 }
@@ -575,25 +553,12 @@ static void stopDownlinkPlayback(void)
         return;
     }
 
-    const char *callsign = (s_remote_callsign[0] != '\0') ? s_remote_callsign : "UNKNOWN";
-    Serial.printf("[NRL] voice stream timeout: from=%s-%u idle=%u ms\n",
-                  callsign,
-                  static_cast<unsigned>(s_remote_ssid),
-                  static_cast<unsigned>(NRL_AUDIO_RX_PACKET_TIMEOUT_MS));
-
     ES8311_ClearOutputQueue();
 
     if (!ES8311_SetReceiveMode()) {
         Serial.println("[NRL] failed to keep ES8311 in receive/speaker mode");
     }
 
-    Serial.printf("[NRL] voice decode summary: codec=%s gain=%d peak=%d samples=%lu chunks=%lu\n",
-                  "alaw",
-                  kDownlinkPcmGain,
-                  static_cast<int>(s_voice_decode_peak_max),
-                  static_cast<unsigned long>(s_voice_decode_sample_total),
-                  static_cast<unsigned long>(s_voice_decode_chunks));
-    ES8311_LogIdRegisters();
     s_downlink_playback_active = false;
     s_voice_stream_logged = false;
     s_voice_decode_logged = false;
@@ -602,9 +567,6 @@ static void stopDownlinkPlayback(void)
     s_voice_decode_chunks = 0u;
     s_last_voice_payload_size = 0u;
     STATUS_IO_SetPttActive(false);
-    Serial.printf("[NRL] downlink playback stop: from=%s-%u ptt=0\n",
-                  callsign,
-                  static_cast<unsigned>(s_remote_ssid));
 }
 
 static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payload_size)
@@ -615,10 +577,6 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
 
     startDownlinkPlayback();
     if (!s_downlink_playback_active) {
-        Serial.printf("[NRL] voice dropped: playback path not active from=%s-%u payload=%u\n",
-                      (s_remote_callsign[0] != '\0') ? s_remote_callsign : "UNKNOWN",
-                      static_cast<unsigned>(s_remote_ssid),
-                      static_cast<unsigned>(payload_size));
         return;
     }
 
@@ -643,9 +601,6 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
         }
         if (!s_voice_decode_logged) {
             s_voice_decode_logged = true;
-            Serial.printf("[NRL] voice decode first_peak=%d samples=%u\n",
-                          static_cast<int>(peak),
-                          static_cast<unsigned>(chunk));
         }
         if (peak > s_voice_decode_peak_max) {
             s_voice_decode_peak_max = peak;

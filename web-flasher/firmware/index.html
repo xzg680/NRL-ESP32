@@ -137,18 +137,6 @@
       margin-bottom: 4px;
     }
 
-    .install-actions {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    .install-actions button.secondary {
-      background: #e8edf3;
-      color: var(--fg);
-      border: 1px solid var(--line);
-    }
-
     ol,
     ul {
       margin: 0;
@@ -293,60 +281,17 @@
       font-weight: 700;
     }
 
-    .modal {
-      position: fixed;
-      inset: 0;
-      z-index: 1000;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .modal[hidden] { display: none; }
-
-    .modal-backdrop {
-      position: absolute;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.45);
-    }
-
-    .modal-card {
-      position: relative;
-      width: min(720px, calc(100% - 32px));
-      max-height: calc(100vh - 64px);
-      overflow: auto;
+    .monitor {
+      margin-top: 18px;
       padding: 22px;
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 10px;
-      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.25);
+      border-radius: 8px;
     }
 
-    .modal-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 8px;
+    .monitor h2 {
+      margin: 0 0 6px;
     }
-
-    .modal-head h2 {
-      margin: 0;
-      font-size: 20px;
-    }
-
-    .modal-x {
-      background: transparent;
-      color: var(--fg);
-      border: 0;
-      font-size: 22px;
-      line-height: 1;
-      min-height: 32px;
-      padding: 4px 10px;
-      cursor: pointer;
-    }
-
-    .modal-x:hover { background: color-mix(in srgb, var(--line) 60%, transparent); }
 
     .mon-controls {
       display: flex;
@@ -410,13 +355,10 @@
         <strong data-i18n="recommendedTitle">Recommended: automatic upgrade</strong>
         <p data-i18n="recommendedText">Use this when you just want to install the official firmware provided by this page. Connect the device with USB, click the button, choose the serial port, and follow the browser prompts.</p>
       </div>
-      <div class="install-actions">
-        <esp-web-install-button id="install-ewt" manifest="manifest.json">
-          <button slot="activate" id="install-btn" data-i18n="installButton">Install firmware</button>
-          <span slot="unsupported" data-i18n="unsupported">This browser does not support Web Serial. Use Chrome or Edge.</span>
-        </esp-web-install-button>
-        <button id="open-logs-btn" class="secondary" data-i18n="openLogsButton">Serial logs</button>
-      </div>
+      <esp-web-install-button id="install-btn" manifest="manifest.json">
+        <button slot="activate" data-i18n="installButton">Install firmware</button>
+        <span slot="unsupported" data-i18n="unsupported">This browser does not support Web Serial. Use Chrome or Edge.</span>
+      </esp-web-install-button>
     </section>
 
     <div id="usb-progress" class="prog-wrap" hidden>
@@ -424,29 +366,23 @@
       <p id="usb-status" class="prog-status"></p>
     </div>
 
-    <div id="mon-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="mon-modal-title">
-      <div class="modal-backdrop" id="mon-modal-backdrop"></div>
-      <div class="modal-card">
-        <div class="modal-head">
-          <h2 id="mon-modal-title" data-i18n="monitorTitle">Serial monitor</h2>
-          <button id="mon-modal-close" class="modal-x" aria-label="Close">×</button>
-        </div>
-        <p data-i18n="monitorIntro">View device serial output directly. The browser will reconnect to the same USB port automatically after the device reboots.</p>
-        <div class="mon-controls">
-          <select id="mon-baud" aria-label="Baud rate">
-            <option value="115200" selected>115200</option>
-            <option value="9600">9600</option>
-            <option value="460800">460800</option>
-            <option value="921600">921600</option>
-          </select>
-          <button id="mon-open" data-i18n="monOpen">Open serial</button>
-          <button id="mon-close" class="secondary" data-i18n="monClose" disabled>Close</button>
-          <button id="mon-clear" class="secondary" data-i18n="monClear">Clear</button>
-          <span id="mon-status" class="mon-status"></span>
-        </div>
-        <pre id="mon-log" class="log" aria-live="polite"></pre>
+    <section class="monitor" aria-label="Serial monitor">
+      <h2 data-i18n="monitorTitle">Serial monitor</h2>
+      <p data-i18n="monitorIntro">View device serial output directly. The browser will reconnect to the same USB port automatically after the device reboots.</p>
+      <div class="mon-controls">
+        <select id="mon-baud" aria-label="Baud rate">
+          <option value="115200" selected>115200</option>
+          <option value="9600">9600</option>
+          <option value="460800">460800</option>
+          <option value="921600">921600</option>
+        </select>
+        <button id="mon-open" data-i18n="monOpen">Open serial</button>
+        <button id="mon-close" class="secondary" data-i18n="monClose" disabled>Close</button>
+        <button id="mon-clear" class="secondary" data-i18n="monClear">Clear</button>
+        <span id="mon-status" class="mon-status"></span>
       </div>
-    </div>
+      <pre id="mon-log" class="log" aria-live="polite"></pre>
+    </section>
 
     <h2 data-i18n="stepsTitle">How to upgrade</h2>
     <ol>
@@ -476,7 +412,6 @@
         recommendedTitle: "Recommended: automatic upgrade",
         recommendedText: "Use this when you just want to install the official firmware provided by this page. Connect the device with USB, click the button, choose the serial port, and follow the browser prompts.",
         installButton: "Install firmware",
-        openLogsButton: "Serial logs",
         unsupported: "This browser does not support Web Serial. Use Chrome or Edge.",
         usbPreparing: "Preparing device...",
         usbErasing: "Erasing flash...",
@@ -528,7 +463,6 @@
         recommendedTitle: "推荐：自动升级",
         recommendedText: "普通用户请使用这个方式。插上 USB，点击按钮，选择 ESP32-S3 串口，然后按浏览器提示完成升级。",
         installButton: "安装固件",
-        openLogsButton: "串口日志",
         unsupported: "当前浏览器不支持 Web Serial，请使用 Chrome 或 Edge。",
         usbPreparing: "正在准备设备...",
         usbErasing: "正在擦除 Flash...",
@@ -604,12 +538,7 @@
     const usbProgress = document.getElementById("usb-progress");
     const usbBar = document.getElementById("usb-bar");
     const usbStatus = document.getElementById("usb-status");
-    const installEwt = document.getElementById("install-ewt");
     const installBtn = document.getElementById("install-btn");
-    const openLogsBtn = document.getElementById("open-logs-btn");
-    const monModal = document.getElementById("mon-modal");
-    const monModalBackdrop = document.getElementById("mon-modal-backdrop");
-    const monModalClose = document.getElementById("mon-modal-close");
     let usbCurrentKey = null;
     let usbCurrentPct = null;
 
@@ -754,101 +683,51 @@
     }
 
     let monReopenAfterInstall = false;
-    const skippedDashboards = new WeakSet();
 
-    function handleInstallStateChanged(ev) {
-      const detail = ev.detail || {};
-      const state = detail.state;
-      if (state === "initializing" || state === "manifest" || state === "preparing") {
-        usbProgress.hidden = false;
-        setUsbBar(0);
-        setUsb("usbPreparing", null);
-        if (monRunning) {
-          monReopenAfterInstall = true;
-          monClose();
-        }
-      } else if (state === "erasing") {
-        usbProgress.hidden = false;
-        setUsbBar(0);
-        setUsb("usbErasing", null);
-      } else if (state === "writing") {
-        usbProgress.hidden = false;
-        const pct = (detail.details && typeof detail.details.percentage === "number")
-          ? Math.floor(detail.details.percentage)
-          : 0;
-        setUsbBar(pct);
-        setUsb("usbWriting", pct);
-      } else if (state === "finished") {
-        usbProgress.hidden = false;
-        setUsbBar(100, "done");
-        setUsb("usbRebooting", null);
-        setTimeout(() => {
-          if (usbCurrentKey === "usbRebooting") setUsb("usbRebooted", null);
-        }, 8000);
-        if (monReopenAfterInstall) {
-          monReopenAfterInstall = false;
-          setTimeout(() => {
-            if (monPort) { monAutoReconnect = true; openMonitorPort(); }
-          }, 3000);
-        }
-      } else if (state === "error") {
-        usbProgress.hidden = false;
-        setUsbBar(0, "failed");
-        setUsb("usbFailed", null);
-        monReopenAfterInstall = false;
-      }
-    }
-
-    if (installEwt) installEwt.addEventListener("state-changed", handleInstallStateChanged);
-
-    function autoSkipDashboardMenu(dialog) {
-      if (skippedDashboards.has(dialog)) return;
-      let attempts = 0;
-      const tick = () => {
-        if (attempts++ > 40) return;
-        const sr = dialog.shadowRoot;
-        if (!sr) { setTimeout(tick, 80); return; }
-        const items = sr.querySelectorAll("ewt-list-item, mwc-list-item, button.menu-item");
-        let installItem = null;
-        for (const it of items) {
-          const txt = (it.textContent || "").trim().toLowerCase();
-          if (txt.startsWith("install ") || txt.startsWith("安装")) {
-            installItem = it;
-            break;
+    if (installBtn) {
+      installBtn.addEventListener("state-changed", (ev) => {
+        const detail = ev.detail || {};
+        const state = detail.state;
+        if (state === "initializing" || state === "manifest" || state === "preparing") {
+          usbProgress.hidden = false;
+          setUsbBar(0);
+          setUsb("usbPreparing", null);
+          if (monRunning) {
+            monReopenAfterInstall = true;
+            monClose();
           }
+        } else if (state === "erasing") {
+          usbProgress.hidden = false;
+          setUsbBar(0);
+          setUsb("usbErasing", null);
+        } else if (state === "writing") {
+          usbProgress.hidden = false;
+          const pct = (detail.details && typeof detail.details.percentage === "number")
+            ? Math.floor(detail.details.percentage)
+            : 0;
+          setUsbBar(pct);
+          setUsb("usbWriting", pct);
+        } else if (state === "finished") {
+          usbProgress.hidden = false;
+          setUsbBar(100, "done");
+          setUsb("usbRebooting", null);
+          setTimeout(() => {
+            if (usbCurrentKey === "usbRebooting") setUsb("usbRebooted", null);
+          }, 8000);
+          if (monReopenAfterInstall) {
+            monReopenAfterInstall = false;
+            setTimeout(() => {
+              if (monPort) { monAutoReconnect = true; openMonitorPort(); }
+            }, 3000);
+          }
+        } else if (state === "error") {
+          usbProgress.hidden = false;
+          setUsbBar(0, "failed");
+          setUsb("usbFailed", null);
+          monReopenAfterInstall = false;
         }
-        if (!installItem && items.length > 0) installItem = items[0];
-        if (installItem) {
-          skippedDashboards.add(dialog);
-          installItem.click();
-          return;
-        }
-        setTimeout(tick, 100);
-      };
-      setTimeout(tick, 80);
+      });
     }
-
-    function showLogsModal() {
-      if (!monModal) return;
-      monModal.hidden = false;
-      if (!("serial" in navigator)) {
-        appendMonLog("[error] " + t("noSerial") + "\n");
-        return;
-      }
-      if (!monRunning) monOpen();
-    }
-
-    function hideLogsModal() {
-      if (!monModal) return;
-      monModal.hidden = true;
-    }
-
-    if (openLogsBtn) openLogsBtn.addEventListener("click", showLogsModal);
-    if (monModalClose) monModalClose.addEventListener("click", hideLogsModal);
-    if (monModalBackdrop) monModalBackdrop.addEventListener("click", hideLogsModal);
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && monModal && !monModal.hidden) hideLogsModal();
-    });
 
     const ewtTranslations = {
       zh: {
@@ -890,33 +769,9 @@
         "Erasing": "正在擦除",
         "Writing": "正在写入",
         "Failed": "失败",
-        "Logs & Console": "日志与终端",
-        "Logs and Console": "日志与终端",
-        "Console": "终端",
-        "Open Logs": "打开日志",
-        "Hide Logs": "隐藏日志",
-        "Clear": "清空",
-        "Download Logs": "下载日志",
-        "Reset device": "重启设备",
-        "Visit device": "访问设备",
-        "Configure Wi-Fi": "配置 WiFi",
-        "Change Wi-Fi": "更改 WiFi",
-        "Done": "完成",
-        "Update available!": "有可用更新！",
-        "Already up to date": "已是最新",
-        "Erase user data": "擦除用户数据",
-        "Are you sure you want to reset your device?": "确定要重启设备吗？",
-        "Erase": "擦除",
-        "Setup": "设置",
-        "Connect this device to a Wi-Fi network": "把设备连接到 WiFi 网络",
-        "Connected to": "已连接到",
-        "Provisioning": "正在配置",
-        "Provisioning failed": "配置失败",
-        "Failed to start provisioning": "启动配置失败",
-        "Provisioning timed out": "配置超时",
       }
     };
-    const ewtPrefixes = ["Writing", "Erasing", "Connecting", "Initializing", "Preparing", "Install", "Update"];
+    const ewtPrefixes = ["Writing", "Erasing", "Connecting", "Initializing", "Preparing"];
 
     function ewtTranslate(text) {
       const dict = ewtTranslations[getLang()];
@@ -950,13 +805,9 @@
     const ewtDialogObservers = new WeakSet();
 
     function ewtAttachObserver(dialog) {
-      if (!dialog || !dialog.shadowRoot) return;
-      ewtWalk(dialog.shadowRoot);
-      // Re-walk after lit's async render completes
-      setTimeout(() => ewtWalk(dialog.shadowRoot), 80);
-      setTimeout(() => ewtWalk(dialog.shadowRoot), 300);
-      if (ewtDialogObservers.has(dialog)) return;
+      if (!dialog || !dialog.shadowRoot || ewtDialogObservers.has(dialog)) return;
       ewtDialogObservers.add(dialog);
+      ewtWalk(dialog.shadowRoot);
       const obs = new MutationObserver((mutations) => {
         for (const m of mutations) {
           if (m.type === "characterData") {

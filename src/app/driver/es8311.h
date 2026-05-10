@@ -39,8 +39,6 @@ bool ES8311_ApplyAudioConfig(uint8_t mic_volume, uint8_t line_out_volume, bool h
 
 int ES8311_GetSampleRate(void);
 size_t ES8311_GetFrameSamples(void);
-void ES8311_LogStatus(void);
-void ES8311_LogIdRegisters(void);
 
 // Convenience test tone output to verify speaker chain.
 bool ES8311_PlayTestTone(uint32_t durationMs);

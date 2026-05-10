@@ -36,7 +36,7 @@ constexpr int kMclkRate = kSampleRate * 256;
 constexpr i2s_bits_per_sample_t kBitsPerSample = I2S_BITS_PER_SAMPLE_16BIT;
 constexpr size_t kFrameSamples = 80;
 // I2S bus stays stereo (2 slots/frame) so BCLK timing matches ES8311's clock
-// divider expectations. ES8311 is mono internally â€?it reads/writes the LEFT
+// divider expectations. ES8311 is mono internally ï¿½?it reads/writes the LEFT
 // slot only. We duplicate mono content into both slots in i2s_write_frame.
 constexpr size_t kI2sSlotCount = 2;
 constexpr size_t kFrameBytes = kFrameSamples * sizeof(int16_t);
@@ -136,7 +136,6 @@ static size_t s_output_queue_head = 0;
 static size_t s_output_queue_tail = 0;
 static size_t s_output_queue_count = 0;
 static SemaphoreHandle_t s_output_queue_mutex = nullptr;
-static uint32_t s_last_rx_level_log_ms = 0;
 static uint32_t s_last_output_queue_log_ms = 0;
 static uint8_t s_mic_volume = kEs8311AdcVolumeDefault;
 static uint8_t s_line_out_volume = 0xFF;
@@ -524,19 +523,6 @@ static bool es8311_configure_codec(void) {
     return true;
 }
 
-static void es8311_dump_clock_regs(void) {
-    uint8_t r00=0, r01=0, r02=0, r09=0, r0a=0, r0b=0, r0c=0;
-    es8311_read_reg(ES8311_REG00_RESET, &r00);
-    es8311_read_reg(ES8311_REG01_CLK_MANAGER, &r01);
-    es8311_read_reg(ES8311_REG02_CLK_MANAGER, &r02);
-    es8311_read_reg(ES8311_REG09_SDPIN, &r09);
-    es8311_read_reg(ES8311_REG0A_SDPOUT, &r0a);
-    es8311_read_reg(ES8311_REG0B_SYSTEM, &r0b);
-    es8311_read_reg(ES8311_REG0C_SYSTEM, &r0c);
-    Serial.printf("[ES8311] clk: 00=%02X 01=%02X 02=%02X 09=%02X 0a=%02X 0b=%02X 0c=%02X\\n",
-                  r00, r01, r02, r09, r0a, r0b, r0c);
-}
-
 static bool i2s_setup(void) {
     if (s_i2s_ready) {
         return true;
@@ -616,27 +602,9 @@ static bool i2s_setup(void) {
     return true;
 }
 
-static int16_t frame_peak_abs(const int16_t *samples, const size_t sample_count) {
-    if (samples == nullptr || sample_count == 0u) {
-        return 0;
-    }
-
-    int32_t peak = 0;
-    for (size_t i = 0; i < sample_count; ++i) {
-        int32_t value = samples[i];
-        if (value < 0) {
-            value = -value;
-        }
-        if (value > peak) {
-            peak = value;
-        }
-    }
-    return static_cast<int16_t>(peak);
-}
-
 static bool i2s_read_frame(int16_t *dst) {
     // Stereo I2S: 2 int16 per LRCK frame (L,R). ES8311 outputs ADC data on
-    // LEFT only â€?extract LEFT samples into dst.
+    // LEFT only ï¿½?extract LEFT samples into dst.
     static_assert(kI2sSlotCount == 2, "i2s_read_frame assumes stereo I2S frame");
     int16_t raw[kFrameSamples * kI2sSlotCount];  // size = 80*2 = 160
     size_t bytes_in_frame = 0;
@@ -791,19 +759,12 @@ static void es8311_passthrough_task(void *) {
             continue;
         }
 
-        const int16_t peak = frame_peak_abs(frame, kFrameSamples);
-        const uint32_t now = millis();
-        if ((now - s_last_rx_level_log_ms) >= 1000u) {
-            s_last_rx_level_log_ms = now;
-            Serial.printf("[ES8311] rx pcm peak=%d\n", static_cast<int>(peak));
-        }
-
         if (s_frame_hook != nullptr) {
             s_frame_hook(frame, kFrameSamples, mode, s_frame_hook_user_data);
         }
 
         // ADC and DAC are physically independent paths in this hardware.
-        // Do NOT echo captured ADC audio back to DAC â€?that would re-transmit
+        // Do NOT echo captured ADC audio back to DAC ï¿½?that would re-transmit
         // received radio audio out the TO_MIC line.
         // In RX mode, DAC plays whatever is in the output queue (NRL downlink).
         // If the queue is empty, write silence so the DAC stays at VMID.
@@ -872,7 +833,7 @@ bool ES8311_Init(void) {
     if (kPinPaEn >= 0) {
         pinMode(kPinPaEn, OUTPUT);
         digitalWrite(kPinPaEn, HIGH);
-        Serial.printf("[ES8311] PA enable pin %d set HIGH\\n", kPinPaEn);
+        Serial.printf("[ES8311] PA enable pin %d set HIGH\n", kPinPaEn);
     }
 
     I2C_Init();
@@ -899,11 +860,10 @@ bool ES8311_Init(void) {
         uint8_t reg_fe = 0;
         const bool ok_fd = es8311_read_reg(0xFDU, &reg_fd);
         const bool ok_fe = es8311_read_reg(0xFEU, &reg_fe);
-        Serial.printf("[ES8311] chip id check: fd=%s0x%02X (expect 0x83) fe=%s0x%02X (expect 0x11)\n",
-                      ok_fd ? "" : "ERR:", static_cast<unsigned>(reg_fd),
-                      ok_fe ? "" : "ERR:", static_cast<unsigned>(reg_fe));
-        if (ok_fd && ok_fe && (reg_fd != 0x83 || reg_fe != 0x11)) {
-            Serial.println("[ES8311] *** WARNING: chip id does NOT match standard ES8311 ***");
+        if (!ok_fd || !ok_fe || reg_fd != 0x83 || reg_fe != 0x11) {
+            Serial.printf("[ES8311] WARNING chip id mismatch: fd=%s0x%02X (expect 0x83) fe=%s0x%02X (expect 0x11)\n",
+                          ok_fd ? "" : "ERR:", static_cast<unsigned>(reg_fd),
+                          ok_fe ? "" : "ERR:", static_cast<unsigned>(reg_fe));
         }
     }
 
@@ -928,99 +888,11 @@ bool ES8311_Init(void) {
                   kPinEspDout,
                   kPinLrclk,
                   kPinEspDin);
-    ES8311_LogStatus();
     return true;
 }
 
 bool ES8311_IsReady(void) {
     return s_es8311_ready;
-}
-
-void ES8311_LogStatus(void) {
-    es8311_dump_clock_regs();
-    uint8_t reg0d = 0u;
-    uint8_t reg0e = 0u;
-    uint8_t reg10 = 0u;
-    uint8_t reg11 = 0u;
-    uint8_t reg12 = 0u;
-    uint8_t reg13 = 0u;
-    uint8_t reg14 = 0u;
-    uint8_t reg15 = 0u;
-    uint8_t reg16 = 0u;
-    uint8_t reg17 = 0u;
-    uint8_t reg31 = 0u;
-    uint8_t reg32 = 0u;
-    uint8_t reg37 = 0u;
-    uint8_t reg44 = 0u;
-    uint8_t reg45 = 0u;
-    const bool ok0d = es8311_read_reg(ES8311_REG0D_SYSTEM, &reg0d);
-    const bool ok0e = es8311_read_reg(ES8311_REG0E_SYSTEM, &reg0e);
-    const bool ok10 = es8311_read_reg(ES8311_REG10_SYSTEM, &reg10);
-    const bool ok11 = es8311_read_reg(ES8311_REG11_SYSTEM, &reg11);
-    const bool ok12 = es8311_read_reg(ES8311_REG12_SYSTEM, &reg12);
-    const bool ok13 = es8311_read_reg(ES8311_REG13_SYSTEM, &reg13);
-    const bool ok14 = es8311_read_reg(ES8311_REG14_SYSTEM, &reg14);
-    const bool ok15 = es8311_read_reg(ES8311_REG15_ADC, &reg15);
-    const bool ok16 = es8311_read_reg(ES8311_REG16_ADC, &reg16);
-    const bool ok17 = es8311_read_reg(ES8311_REG17_ADC, &reg17);
-    const bool ok31 = es8311_read_reg(ES8311_REG31_DAC, &reg31);
-    const bool ok32 = es8311_read_reg(ES8311_REG32_DAC, &reg32);
-    const bool ok37 = es8311_read_reg(ES8311_REG37_DAC, &reg37);
-    const bool ok44 = es8311_read_reg(ES8311_REG44_GPIO, &reg44);
-    const bool ok45 = es8311_read_reg(ES8311_REG45_GP, &reg45);
-    Serial.printf("[ES8311] status: ready=%u mode=%u rate=%dHz bits=%d stereo_slots=%u mclk=%d bclk=%d esp_dout=%d lrclk=%d esp_din=%d reg0d=%s0x%02X reg0e=%s0x%02X reg10=%s0x%02X reg11=%s0x%02X reg12=%s0x%02X reg13=%s0x%02X reg14=%s0x%02X reg15=%s0x%02X reg16=%s0x%02X reg17=%s0x%02X reg31=%s0x%02X reg32=%s0x%02X reg37=%s0x%02X reg44=%s0x%02X reg45=%s0x%02X\n",
-                  s_es8311_ready ? 1u : 0u,
-                  static_cast<unsigned>(s_audio_mode),
-                  kSampleRate,
-                  16,
-                  static_cast<unsigned>(kI2sSlotCount),
-                  kPinMclk,
-                  kPinBclk,
-                  kPinEspDout,
-                  kPinLrclk,
-                  kPinEspDin,
-                  ok0d ? "" : "ERR:",
-                  static_cast<unsigned>(reg0d),
-                  ok0e ? "" : "ERR:",
-                  static_cast<unsigned>(reg0e),
-                  ok10 ? "" : "ERR:",
-                  static_cast<unsigned>(reg10),
-                  ok11 ? "" : "ERR:",
-                  static_cast<unsigned>(reg11),
-                  ok12 ? "" : "ERR:",
-                  static_cast<unsigned>(reg12),
-                  ok13 ? "" : "ERR:",
-                  static_cast<unsigned>(reg13),
-                  ok14 ? "" : "ERR:",
-                  static_cast<unsigned>(reg14),
-                  ok15 ? "" : "ERR:",
-                  static_cast<unsigned>(reg15),
-                  ok16 ? "" : "ERR:",
-                  static_cast<unsigned>(reg16),
-                  ok17 ? "" : "ERR:",
-                  static_cast<unsigned>(reg17),
-                  ok31 ? "" : "ERR:",
-                  static_cast<unsigned>(reg31),
-                  ok32 ? "" : "ERR:",
-                  static_cast<unsigned>(reg32),
-                  ok37 ? "" : "ERR:",
-                  static_cast<unsigned>(reg37),
-                  ok44 ? "" : "ERR:",
-                  static_cast<unsigned>(reg44),
-                  ok45 ? "" : "ERR:",
-                  static_cast<unsigned>(reg45));
-}
-
-void ES8311_LogIdRegisters(void) {
-    uint8_t reg_fd = 0u;
-    uint8_t reg_fe = 0u;
-    const bool ok_fd = es8311_read_reg(0xFDU, &reg_fd);
-    const bool ok_fe = es8311_read_reg(0xFEU, &reg_fe);
-    Serial.printf("[ES8311] id regs: fd=%s0x%02X fe=%s0x%02X\n",
-                  ok_fd ? "" : "ERR:",
-                  static_cast<unsigned>(reg_fd),
-                  ok_fe ? "" : "ERR:",
-                  static_cast<unsigned>(reg_fe));
 }
 
 bool ES8311_SetAudioMode(const ES8311_AudioMode_t mode) {
@@ -1058,9 +930,9 @@ size_t ES8311_QueueOutputSamples(const int16_t *samples, size_t sample_count) {
 
     const size_t written = output_queue_push(samples, sample_count);
     const uint32_t now = millis();
-    if ((now - s_last_output_queue_log_ms) >= 1000u || written != sample_count) {
+    if (written != sample_count && (now - s_last_output_queue_log_ms) >= 1000u) {
         s_last_output_queue_log_ms = now;
-        Serial.printf("[ES8311] queue output samples=%u written=%u\n",
+        Serial.printf("[ES8311] queue short write samples=%u written=%u\n",
                       static_cast<unsigned>(sample_count),
                       static_cast<unsigned>(written));
     }
@@ -1090,13 +962,12 @@ bool ES8311_ApplyAudioConfig(const uint8_t mic_volume, const uint8_t line_out_vo
                                       es8311_output_drive_reg(),
                                       kEs8311DacUnmute,
                                       s_line_out_volume);
-    Serial.printf("[ES8311] audio config applied: mic=0x%02X line_out=0x%02X hp_drive=%u reg13=0x%02X ok=%u\n",
-                  static_cast<unsigned>(s_mic_volume),
-                  static_cast<unsigned>(s_line_out_volume),
-                  s_hp_drive_enabled ? 1u : 0u,
-                  static_cast<unsigned>(es8311_output_drive_reg()),
-                  ok ? 1u : 0u);
-    ES8311_LogStatus();
+    if (!ok) {
+        Serial.printf("[ES8311] audio config apply failed: mic=0x%02X line_out=0x%02X hp_drive=%u\n",
+                      static_cast<unsigned>(s_mic_volume),
+                      static_cast<unsigned>(s_line_out_volume),
+                      s_hp_drive_enabled ? 1u : 0u);
+    }
     return ok;
 }
 
