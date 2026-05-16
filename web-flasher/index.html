@@ -354,8 +354,13 @@
       <div class="install-text">
         <strong data-i18n="recommendedTitle">Recommended: automatic upgrade</strong>
         <p data-i18n="recommendedText">Use this when you just want to install the official firmware provided by this page. Connect the device with USB, click the button, choose the serial port, and follow the browser prompts.</p>
+        <label for="board-select" data-i18n="boardLabel">Board model</label>
+        <select id="board-select">
+          <option value="gezipai">格子派 (Gezipai)</option>
+          <option value="bh4tdv">BH4TDV 3188</option>
+        </select>
       </div>
-      <esp-web-install-button id="install-ewt" manifest="manifest.json">
+      <esp-web-install-button id="install-ewt" manifest="manifest-gezipai.json">
         <button slot="activate" id="install-btn" data-i18n="installButton">Install firmware</button>
         <span slot="unsupported" data-i18n="unsupported">This browser does not support Web Serial. Use Chrome or Edge.</span>
       </esp-web-install-button>
@@ -396,7 +401,7 @@
     <h2 data-i18n="publisherTitle">For firmware publishers</h2>
     <ul>
       <li data-i18n="publisher1">Build the firmware, then run the staging script before publishing this page.</li>
-      <li><code>platformio run -e app0_main</code></li>
+      <li><code>platformio run</code></li>
       <li><code>python scripts/stage_web_flasher.py</code></li>
     </ul>
 
@@ -413,6 +418,7 @@
         recommendedText: "Use this when you just want to install the official firmware provided by this page. Connect the device with USB, click the button, choose the serial port, and follow the browser prompts.",
         installButton: "Install firmware",
         unsupported: "This browser does not support Web Serial. Use Chrome or Edge.",
+        boardLabel: "Board model",
         usbPreparing: "Preparing device...",
         usbErasing: "Erasing flash...",
         usbWriting: "Writing firmware...",
@@ -464,6 +470,7 @@
         recommendedText: "普通用户请使用这个方式。插上 USB，点击按钮，选择 ESP32-S3 串口，然后按浏览器提示完成升级。",
         installButton: "安装固件",
         unsupported: "当前浏览器不支持 Web Serial，请使用 Chrome 或 Edge。",
+        boardLabel: "板子型号",
         usbPreparing: "正在准备设备...",
         usbErasing: "正在擦除 Flash...",
         usbWriting: "正在写入固件...",
@@ -539,6 +546,20 @@
     const usbBar = document.getElementById("usb-bar");
     const usbStatus = document.getElementById("usb-status");
     const installEwt = document.getElementById("install-ewt");
+    const boardSelect = document.getElementById("board-select");
+
+    // Each board has its own esp-web-tools manifest; the selector swaps which
+    // one the install button uses before the user clicks Install.
+    function applyBoard(board) {
+      if (board !== "gezipai" && board !== "bh4tdv") board = "gezipai";
+      localStorage.setItem("nrl_board", board);
+      boardSelect.value = board;
+      if (installEwt) installEwt.setAttribute("manifest", "manifest-" + board + ".json");
+    }
+
+    applyBoard(localStorage.getItem("nrl_board") || "gezipai");
+    boardSelect.addEventListener("change", function () { applyBoard(this.value); });
+
     let usbCurrentKey = null;
     let usbCurrentPct = null;
 

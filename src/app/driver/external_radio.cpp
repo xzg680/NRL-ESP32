@@ -19,13 +19,23 @@ namespace {
 
 constexpr uint32_t kConfigAddress = 0x2C00U;
 constexpr uint32_t kConfigMagic = 0x58455655U;
-constexpr uint8_t kConfigVersion = 1U;
+constexpr uint8_t kConfigVersion = 4U;
+constexpr uint8_t kLegacyConfigVersion1 = 1U;
+constexpr uint8_t kLegacyConfigVersion2 = 2U;
+constexpr uint8_t kLegacyConfigVersion3 = 3U;
 constexpr uint8_t kMinChannel = 0U;
 constexpr uint8_t kMaxChannel = 7U;
 constexpr uint8_t kDefaultMicVolume = 0xE0U;
 constexpr uint8_t kDefaultLineOutVolume = 0xFFU;
 constexpr uint8_t kPersistedHpDriveOff = 1U;
 constexpr uint8_t kPersistedHpDriveOn = 2U;
+constexpr uint8_t kPersistedFlagOff = 1U;
+constexpr uint8_t kPersistedFlagOn = 2U;
+constexpr uint8_t kDefaultDrcWinsize = 0U;
+constexpr uint8_t kDefaultDrcMaxlevel = 0U;
+constexpr uint8_t kDefaultDrcMinlevel = 0U;
+constexpr uint8_t kDefaultDacRamprate = 0U;
+constexpr uint32_t kDacEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint32_t kDefaultSciBaud = 9600U;
 constexpr uint8_t kDefaultSciDataBits = 8U;
 constexpr char kDefaultSciParity = 'N';
@@ -46,13 +56,31 @@ struct PersistedExternalRadioConfig {
     char server_host[65];
     char callsign[7];
     uint8_t reserved[8];
+    uint8_t drc_enabled;
+    uint8_t drc_winsize;
+    uint8_t drc_maxlevel;
+    uint8_t drc_minlevel;
+    uint8_t dac_ramprate;
+    uint8_t dac_eq_bypass;
+    uint8_t reserved2[6];
+    uint32_t daceq_b0;
+    uint32_t daceq_b1;
+    uint32_t daceq_a1;
+    uint32_t wifi_ip;
+    uint32_t wifi_netmask;
+    uint32_t wifi_gateway;
+    uint32_t wifi_dns;
+    uint8_t wifi_dhcp_enabled;
+    uint8_t reserved3[7];
 } __attribute__((packed));
 
 static_assert((sizeof(PersistedExternalRadioConfig) % 8U) == 0U, "config must stay 8-byte aligned");
 
 ExternalRadioConfig s_config = {};
 bool s_loaded = false;
+#if NRL_BOARD == NRL_BOARD_BH4TDV
 uint8_t s_last_channel_encoded = 0xFFu;
+#endif
 
 static void copyBounded(char *dst, const size_t dst_size, const char *src)
 {
@@ -171,8 +199,40 @@ static void applyDefaultSciConfig(void)
     s_config.sci.stop_bits = kDefaultSciStopBits;
 }
 
+static void applyDefaultDrcConfig(void)
+{
+    s_config.drc_enabled = false;
+    s_config.drc_winsize = kDefaultDrcWinsize;
+    s_config.drc_maxlevel = kDefaultDrcMaxlevel;
+    s_config.drc_minlevel = kDefaultDrcMinlevel;
+    s_config.dac_ramprate = kDefaultDacRamprate;
+    s_config.dac_eq_bypass = true;
+    s_config.daceq_b0 = 0U;
+    s_config.daceq_b1 = 0U;
+    s_config.daceq_a1 = 0U;
+}
+
+static void applyAudioConfigToCodec(void)
+{
+    ES8311_ApplyAudioConfig(s_config.mic_volume,
+                            s_config.line_out_volume,
+                            s_config.hp_drive_enabled,
+                            s_config.drc_enabled,
+                            s_config.drc_winsize,
+                            s_config.drc_maxlevel,
+                            s_config.drc_minlevel,
+                            s_config.dac_ramprate,
+                            s_config.dac_eq_bypass,
+                            s_config.daceq_b0,
+                            s_config.daceq_b1,
+                            s_config.daceq_a1);
+}
+
+// Drives the BH4TDV radio's channel-select GPIOs. 格子派 has no channel-
+// select hardware, so this is compiled out there (40/39/38 are its I2S/I2C).
 static void applyChannelOutputs(void)
 {
+#if NRL_BOARD == NRL_BOARD_BH4TDV
     const uint8_t encoded = clampChannel(s_config.channel);
     digitalWrite(NRL_PIN_CHANNEL_BIT0, (encoded & 0x01U) ? HIGH : LOW);
     digitalWrite(NRL_PIN_CHANNEL_BIT1, (encoded & 0x02U) ? HIGH : LOW);
@@ -186,6 +246,7 @@ static void applyChannelOutputs(void)
                       static_cast<unsigned>((encoded & 0x04U) ? 1u : 0u));
         s_last_channel_encoded = encoded;
     }
+#endif
 }
 
 static void applyDefaults(void)
@@ -199,9 +260,15 @@ static void applyDefaults(void)
     s_config.mic_volume = kDefaultMicVolume;
     s_config.line_out_volume = kDefaultLineOutVolume;
     s_config.hp_drive_enabled = false;
+    applyDefaultDrcConfig();
     applyDefaultSciConfig();
     s_config.wifi_ssid[0] = '\0';
     s_config.wifi_password[0] = '\0';
+    s_config.wifi_ip = 0U;
+    s_config.wifi_netmask = 0U;
+    s_config.wifi_gateway = 0U;
+    s_config.wifi_dns = 0U;
+    s_config.wifi_dhcp_enabled = true;
     copyBounded(s_config.server_host, sizeof(s_config.server_host), NRL_AUDIO_SERVER_HOST);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), NRL_AUDIO_CALLSIGN);
     sanitizeCallsign(s_config.callsign);
@@ -211,6 +278,11 @@ static void applyNetworkDefaults(void)
 {
     s_config.wifi_ssid[0] = '\0';
     s_config.wifi_password[0] = '\0';
+    s_config.wifi_ip = 0U;
+    s_config.wifi_netmask = 0U;
+    s_config.wifi_gateway = 0U;
+    s_config.wifi_dns = 0U;
+    s_config.wifi_dhcp_enabled = true;
     copyBounded(s_config.server_host, sizeof(s_config.server_host), NRL_AUDIO_SERVER_HOST);
     s_config.server_port = static_cast<uint16_t>(NRL_AUDIO_SERVER_PORT);
     s_config.local_port = s_config.server_port;
@@ -227,7 +299,9 @@ static void normalizeConfig(void)
     if (s_config.server_port == 0U) {
         s_config.server_port = static_cast<uint16_t>(NRL_AUDIO_SERVER_PORT);
     }
-    s_config.local_port = s_config.server_port;
+    if (s_config.local_port == 0U) {
+        s_config.local_port = s_config.server_port;
+    }
     s_config.sci.parity = normalizeParity(s_config.sci.parity);
     if (!isValidSciConfig(s_config.sci.baud,
                           s_config.sci.data_bits,
@@ -235,6 +309,13 @@ static void normalizeConfig(void)
                           s_config.sci.stop_bits)) {
         applyDefaultSciConfig();
     }
+    s_config.drc_winsize &= 0x0FU;
+    s_config.drc_maxlevel &= 0x0FU;
+    s_config.drc_minlevel &= 0x0FU;
+    s_config.dac_ramprate &= 0x0FU;
+    s_config.daceq_b0 &= kDacEqCoefficientMask;
+    s_config.daceq_b1 &= kDacEqCoefficientMask;
+    s_config.daceq_a1 &= kDacEqCoefficientMask;
 }
 
 static bool loadPersistedConfig(void)
@@ -244,7 +325,11 @@ static bool loadPersistedConfig(void)
         EEPROM_ReadBuffer(kConfigAddress + offset, reinterpret_cast<uint8_t *>(&persisted) + offset, 8U);
     }
 
-    if (persisted.magic != kConfigMagic || persisted.version != kConfigVersion) {
+    if (persisted.magic != kConfigMagic ||
+        (persisted.version != kConfigVersion &&
+         persisted.version != kLegacyConfigVersion1 &&
+         persisted.version != kLegacyConfigVersion2 &&
+         persisted.version != kLegacyConfigVersion3)) {
         return false;
     }
 
@@ -267,6 +352,38 @@ static bool loadPersistedConfig(void)
     copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password), persisted.wifi_password);
     copyBounded(s_config.server_host, sizeof(s_config.server_host), persisted.server_host);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), persisted.callsign);
+    if (persisted.version >= kLegacyConfigVersion2) {
+        s_config.drc_enabled = persisted.drc_enabled == kPersistedFlagOn;
+        s_config.drc_winsize = persisted.drc_winsize;
+        s_config.drc_maxlevel = persisted.drc_maxlevel;
+        s_config.drc_minlevel = persisted.drc_minlevel;
+        s_config.dac_ramprate = persisted.dac_ramprate;
+        s_config.dac_eq_bypass = persisted.dac_eq_bypass != kPersistedFlagOff;
+    } else {
+        applyDefaultDrcConfig();
+    }
+    if (persisted.version == kConfigVersion) {
+        s_config.daceq_b0 = persisted.daceq_b0;
+        s_config.daceq_b1 = persisted.daceq_b1;
+        s_config.daceq_a1 = persisted.daceq_a1;
+    } else {
+        s_config.daceq_b0 = 0U;
+        s_config.daceq_b1 = 0U;
+        s_config.daceq_a1 = 0U;
+    }
+    if (persisted.version == kConfigVersion) {
+        s_config.wifi_ip = persisted.wifi_ip;
+        s_config.wifi_netmask = persisted.wifi_netmask;
+        s_config.wifi_gateway = persisted.wifi_gateway;
+        s_config.wifi_dns = persisted.wifi_dns;
+        s_config.wifi_dhcp_enabled = persisted.wifi_dhcp_enabled != kPersistedFlagOff;
+    } else {
+        s_config.wifi_ip = 0U;
+        s_config.wifi_netmask = 0U;
+        s_config.wifi_gateway = 0U;
+        s_config.wifi_dns = 0U;
+        s_config.wifi_dhcp_enabled = true;
+    }
     normalizeConfig();
     return true;
 }
@@ -291,6 +408,20 @@ static bool savePersistedConfig(void)
     persisted.reserved[5] = static_cast<uint8_t>((s_config.sci.baud >> 8) & 0xFFU);
     persisted.reserved[6] = static_cast<uint8_t>((s_config.sci.baud >> 16) & 0xFFU);
     persisted.reserved[7] = static_cast<uint8_t>((s_config.sci.baud >> 24) & 0xFFU);
+    persisted.drc_enabled = s_config.drc_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.drc_winsize = s_config.drc_winsize & 0x0FU;
+    persisted.drc_maxlevel = s_config.drc_maxlevel & 0x0FU;
+    persisted.drc_minlevel = s_config.drc_minlevel & 0x0FU;
+    persisted.dac_ramprate = s_config.dac_ramprate & 0x0FU;
+    persisted.dac_eq_bypass = s_config.dac_eq_bypass ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.daceq_b0 = s_config.daceq_b0 & kDacEqCoefficientMask;
+    persisted.daceq_b1 = s_config.daceq_b1 & kDacEqCoefficientMask;
+    persisted.daceq_a1 = s_config.daceq_a1 & kDacEqCoefficientMask;
+    persisted.wifi_ip = s_config.wifi_ip;
+    persisted.wifi_netmask = s_config.wifi_netmask;
+    persisted.wifi_gateway = s_config.wifi_gateway;
+    persisted.wifi_dns = s_config.wifi_dns;
+    persisted.wifi_dhcp_enabled = s_config.wifi_dhcp_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
@@ -324,9 +455,11 @@ extern "C" void EXTERNAL_RADIO_Init(void)
         return;
     }
 
+#if NRL_BOARD == NRL_BOARD_BH4TDV
     pinMode(NRL_PIN_CHANNEL_BIT0, OUTPUT);
     pinMode(NRL_PIN_CHANNEL_BIT1, OUTPUT);
     pinMode(NRL_PIN_CHANNEL_BIT2, OUTPUT);
+#endif
 
     applyDefaults();
     if (!loadPersistedConfig()) {
@@ -398,6 +531,56 @@ bool EXTERNAL_RADIO_SetWifiPassword(const char *value, const bool persist)
     return updateStringField(s_config.wifi_password, sizeof(s_config.wifi_password), value, persist);
 }
 
+bool EXTERNAL_RADIO_SetWifiIp(const uint32_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.wifi_ip = value;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetWifiNetmask(const uint32_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.wifi_netmask = value;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetWifiGateway(const uint32_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.wifi_gateway = value;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetWifiDns(const uint32_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.wifi_dns = value;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetWifiDhcpEnabled(const bool enabled, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.wifi_dhcp_enabled = enabled;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
 bool EXTERNAL_RADIO_SetServerHost(const char *value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
@@ -418,7 +601,6 @@ bool EXTERNAL_RADIO_SetServerPort(const uint16_t value, const bool persist)
         return false;
     }
     s_config.server_port = value;
-    s_config.local_port = value;
     if (persist) {
         return savePersistedConfig();
     }
@@ -431,7 +613,6 @@ bool EXTERNAL_RADIO_SetLocalPort(const uint16_t value, const bool persist)
     if (value == 0U) {
         return false;
     }
-    s_config.server_port = value;
     s_config.local_port = value;
     if (persist) {
         return savePersistedConfig();
@@ -488,7 +669,7 @@ bool EXTERNAL_RADIO_SetLineOutVolume(const uint8_t value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
     s_config.line_out_volume = value;
-    ES8311_ApplyAudioConfig(s_config.mic_volume, s_config.line_out_volume, s_config.hp_drive_enabled);
+    applyAudioConfigToCodec();
     if (persist) {
         return savePersistedConfig();
     }
@@ -499,7 +680,106 @@ bool EXTERNAL_RADIO_SetHpDriveEnabled(const bool enabled, const bool persist)
 {
     EXTERNAL_RADIO_Init();
     s_config.hp_drive_enabled = enabled;
-    ES8311_ApplyAudioConfig(s_config.mic_volume, s_config.line_out_volume, s_config.hp_drive_enabled);
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetDrcEnabled(const bool enabled, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.drc_enabled = enabled;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetDrcWinsize(const uint8_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (value > 15U) {
+        return false;
+    }
+    s_config.drc_winsize = value;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetDrcMaxlevel(const uint8_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (value > 15U) {
+        return false;
+    }
+    s_config.drc_maxlevel = value;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetDrcMinlevel(const uint8_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (value > 15U) {
+        return false;
+    }
+    s_config.drc_minlevel = value;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetDacRamprate(const uint8_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (value > 15U) {
+        return false;
+    }
+    s_config.dac_ramprate = value;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetDacEqBypass(const bool enabled, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.dac_eq_bypass = enabled;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetDacEqCoefficients(const uint32_t b0,
+                                         const uint32_t b1,
+                                         const uint32_t a1,
+                                         const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if ((b0 & ~kDacEqCoefficientMask) != 0U ||
+        (b1 & ~kDacEqCoefficientMask) != 0U ||
+        (a1 & ~kDacEqCoefficientMask) != 0U) {
+        return false;
+    }
+    s_config.daceq_b0 = b0;
+    s_config.daceq_b1 = b1;
+    s_config.daceq_a1 = a1;
+    applyAudioConfigToCodec();
     if (persist) {
         return savePersistedConfig();
     }

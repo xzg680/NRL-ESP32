@@ -7,6 +7,7 @@
 #include "driver/sci_serial.h"
 
 #include <Arduino.h>
+#include <WiFi.h>
 
 #include <ctype.h>
 #include <stdint.h>
@@ -109,6 +110,26 @@ static bool appendUnsignedLine(uint8_t *payload,
     return appendReplyLine(payload, capacity, used, line);
 }
 
+static const char *ipText(const uint32_t value, char *buffer, const size_t buffer_size)
+{
+    if (buffer == nullptr || buffer_size == 0u) {
+        return "";
+    }
+    IPAddress ip(value);
+    snprintf(buffer, buffer_size, "%s", ip.toString().c_str());
+    return buffer;
+}
+
+static uint32_t currentWifiIpValue(const uint32_t configured_value,
+                                   const IPAddress &dhcp_value,
+                                   const bool use_dhcp_value)
+{
+    if (use_dhcp_value) {
+        return static_cast<uint32_t>(dhcp_value);
+    }
+    return configured_value;
+}
+
 static void formatSciConfig(const SciSerialConfig &sci, char *buffer, const size_t buffer_size)
 {
     if (buffer == nullptr || buffer_size == 0u) {
@@ -123,35 +144,62 @@ static void formatSciConfig(const SciSerialConfig &sci, char *buffer, const size
              static_cast<unsigned>(sci.stop_bits));
 }
 
+// Format a secret (e.g. WiFi password) for AT replies: never echo plaintext,
+// only report its length.
+static void formatMaskedSecret(const char *text, char *buffer, const size_t buffer_size)
+{
+    if (buffer == nullptr || buffer_size == 0u) {
+        return;
+    }
+    const size_t len = (text != nullptr) ? strlen(text) : 0u;
+    if (len == 0u) {
+        snprintf(buffer, buffer_size, "(empty)");
+    } else {
+        snprintf(buffer, buffer_size, "****** (%u chars)", static_cast<unsigned>(len));
+    }
+}
+
 static bool appendSupportedAtList(uint8_t *payload,
                                   const size_t capacity,
                                   size_t *used)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     char sci_config[32] = "9600,8,N,1";
+    char wifi_pass[32] = "(empty)";
+    char hp_drive[4] = "OFF";
+    char wifi_ip[16] = "0.0.0.0";
+    char wifi_mask[16] = "0.0.0.0";
+    char wifi_gw[16] = "0.0.0.0";
+    char wifi_dns[16] = "0.0.0.0";
     if (config != nullptr) {
         formatSciConfig(config->sci, sci_config, sizeof(sci_config));
+        formatMaskedSecret(config->wifi_password, wifi_pass, sizeof(wifi_pass));
+        snprintf(hp_drive, sizeof(hp_drive), "%s", config->hp_drive_enabled ? "ON" : "OFF");
+        const bool show_dhcp_values = config->wifi_dhcp_enabled && WiFi.status() == WL_CONNECTED;
+        ipText(currentWifiIpValue(config->wifi_ip, WiFi.localIP(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
+        ipText(currentWifiIpValue(config->wifi_netmask, WiFi.subnetMask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
+        ipText(currentWifiIpValue(config->wifi_gateway, WiFi.gatewayIP(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
+        ipText(currentWifiIpValue(config->wifi_dns, WiFi.dnsIP(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
     }
-    return appendReplyLine(payload, capacity, used, "AT+SCI=?") &&
+    return appendKeyValueLine(payload, capacity, used, "WIFI_SSID", (config != nullptr) ? config->wifi_ssid : "") &&
+           appendKeyValueLine(payload, capacity, used, "WIFI_PASS", wifi_pass) &&
+           appendUnsignedLine(payload, capacity, used, "WIFI_DHCP", (config != nullptr && config->wifi_dhcp_enabled) ? 1u : 0u) &&
+           appendKeyValueLine(payload, capacity, used, "WIFI_IP", wifi_ip) &&
+           appendKeyValueLine(payload, capacity, used, "WIFI_MASK", wifi_mask) &&
+           appendKeyValueLine(payload, capacity, used, "WIFI_GW", wifi_gw) &&
+           appendKeyValueLine(payload, capacity, used, "WIFI_DNS", wifi_dns) &&
            appendKeyValueLine(payload, capacity, used, "SCI", sci_config) &&
-           appendReplyLine(payload, capacity, used, "AT+SCI=<baud>,<5..8>,<N|E|O>,<1|2>") &&
-           appendReplyLine(payload, capacity, used, "AT+CH=?") &&
-           appendReplyLine(payload, capacity, used, "AT+CH=0..7") &&
-           appendReplyLine(payload, capacity, used, "AT+D_IP=?") &&
-           appendReplyLine(payload, capacity, used, "AT+D_IP=<host_or_ip>") &&
-           appendReplyLine(payload, capacity, used, "AT+D_PORT=?") &&
-           appendReplyLine(payload, capacity, used, "AT+D_PORT=<1..65535>") &&
-           appendReplyLine(payload, capacity, used, "AT+CALL=?") &&
-           appendReplyLine(payload, capacity, used, "AT+CALL=<value>") &&
-           appendReplyLine(payload, capacity, used, "AT+SSID=?") &&
-           appendReplyLine(payload, capacity, used, "AT+SSID=<0..255>") &&
-           appendReplyLine(payload, capacity, used, "AT+MIC_GAIN=?") &&
-           appendReplyLine(payload, capacity, used, "AT+MIC_GAIN=<0..255>") &&
-           appendReplyLine(payload, capacity, used, "AT+VOLUME=?") &&
-           appendReplyLine(payload, capacity, used, "AT+VOLUME=<0..255>") &&
-           appendReplyLine(payload, capacity, used, "AT+HP_DRIVE=?") &&
-           appendReplyLine(payload, capacity, used, "AT+HP_DRIVE=<ON|OFF>") &&
-           appendReplyLine(payload, capacity, used, "AT+REBOOT=1");
+           appendUnsignedLine(payload, capacity, used, "CH", (config != nullptr) ? config->channel : 0u) &&
+           appendKeyValueLine(payload, capacity, used, "D_IP", (config != nullptr) ? config->server_host : "") &&
+           appendUnsignedLine(payload, capacity, used, "D_PORT", (config != nullptr) ? config->server_port : 0u) &&
+           appendUnsignedLine(payload, capacity, used, "L_PORT", (config != nullptr) ? config->local_port : 0u) &&
+           appendKeyValueLine(payload, capacity, used, "CALL", (config != nullptr) ? config->callsign : "") &&
+           appendUnsignedLine(payload, capacity, used, "SSID", (config != nullptr) ? config->callsign_ssid : 0u) &&
+           appendUnsignedLine(payload, capacity, used, "MODE", (config != nullptr) ? config->device_mode : 0u) &&
+           appendUnsignedLine(payload, capacity, used, "MIC_GAIN", (config != nullptr) ? config->mic_volume : 0u) &&
+           appendUnsignedLine(payload, capacity, used, "VOLUME", (config != nullptr) ? config->line_out_volume : 0u) &&
+           appendKeyValueLine(payload, capacity, used, "HP_DRIVE", hp_drive) &&
+           appendKeyValueLine(payload, capacity, used, "REBOOT", "1");
 }
 
 static bool decodeAtCommand(const uint8_t *payload, const size_t payload_size, AtCommand *out_cmd)
@@ -200,6 +248,41 @@ static bool parseUnsignedValue(const char *text, unsigned long *out_value)
     }
 
     *out_value = value;
+    return true;
+}
+
+static bool parseBoolValue(const char *text, bool *out_value)
+{
+    if (text == nullptr || out_value == nullptr) {
+        return false;
+    }
+    if (stringEqualsIgnoreCase(text, "1") ||
+        stringEqualsIgnoreCase(text, "ON") ||
+        stringEqualsIgnoreCase(text, "TRUE") ||
+        stringEqualsIgnoreCase(text, "ENABLE")) {
+        *out_value = true;
+        return true;
+    }
+    if (stringEqualsIgnoreCase(text, "0") ||
+        stringEqualsIgnoreCase(text, "OFF") ||
+        stringEqualsIgnoreCase(text, "FALSE") ||
+        stringEqualsIgnoreCase(text, "DISABLE")) {
+        *out_value = false;
+        return true;
+    }
+    return false;
+}
+
+static bool parseIpValue(const char *text, uint32_t *out_value)
+{
+    if (text == nullptr || out_value == nullptr) {
+        return false;
+    }
+    IPAddress ip;
+    if (!ip.fromString(text)) {
+        return false;
+    }
+    *out_value = static_cast<uint32_t>(ip);
     return true;
 }
 
@@ -283,21 +366,60 @@ static bool appendAllConfigLines(NrlAtCommandResult *result)
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     char sci_config[32];
     formatSciConfig(config->sci, sci_config, sizeof(sci_config));
-    return appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SCI", sci_config) &&
+    char wifi_pass[32];
+    formatMaskedSecret(config->wifi_password, wifi_pass, sizeof(wifi_pass));
+    char wifi_ip[16];
+    char wifi_mask[16];
+    char wifi_gw[16];
+    char wifi_dns[16];
+    const bool show_dhcp_values = config->wifi_dhcp_enabled && WiFi.status() == WL_CONNECTED;
+    ipText(currentWifiIpValue(config->wifi_ip, WiFi.localIP(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
+    ipText(currentWifiIpValue(config->wifi_netmask, WiFi.subnetMask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
+    ipText(currentWifiIpValue(config->wifi_gateway, WiFi.gatewayIP(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
+    ipText(currentWifiIpValue(config->wifi_dns, WiFi.dnsIP(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
+    return appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_SSID", config->wifi_ssid) &&
+           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_PASS", wifi_pass) &&
+           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_DHCP", config->wifi_dhcp_enabled ? 1u : 0u) &&
+           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_IP", wifi_ip) &&
+           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_MASK", wifi_mask) &&
+           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_GW", wifi_gw) &&
+           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_DNS", wifi_dns) &&
+           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SCI", sci_config) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "CH", config->channel) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "D_IP", config->server_host) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "D_PORT", config->server_port) &&
+           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "L_PORT", config->local_port) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "CALL", config->callsign) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "SSID", config->callsign_ssid) &&
+           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MODE", config->device_mode) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", config->mic_volume) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOLUME", config->line_out_volume) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", config->hp_drive_enabled ? "ON" : "OFF");
+}
+
+static bool applyCurrentAudioConfig(void)
+{
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    return config != nullptr &&
+           ES8311_ApplyAudioConfig(config->mic_volume,
+                                   config->line_out_volume,
+                                   config->hp_drive_enabled,
+                                   config->drc_enabled,
+                                   config->drc_winsize,
+                                   config->drc_maxlevel,
+                                   config->drc_minlevel,
+                                   config->dac_ramprate,
+                                   config->dac_eq_bypass,
+                                   config->daceq_b0,
+                                   config->daceq_b1,
+                                   config->daceq_a1);
 }
 
 } // namespace
 
 void NRL_AT_HandlePayload(const uint8_t *payload,
                           const size_t payload_size,
+                          const NrlAtCommandSource source,
                           NrlAtCommandResult *result)
 {
     if (result == nullptr) {
@@ -312,8 +434,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
 
     result->should_reply = true;
     if (!decodeAtCommand(payload, payload_size, &command)) {
-        if (!appendSupportedAtList(result->payload, sizeof(result->payload), &result->payload_size) ||
-            !appendAllConfigLines(result)) {
+        if (!appendSupportedAtList(result->payload, sizeof(result->payload), &result->payload_size)) {
             result->should_reply = false;
         }
         return;
@@ -321,6 +442,116 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
 
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     const bool is_query = stringEqualsIgnoreCase(command.value, "?");
+    const bool allow_wifi_config_write = source == NRL_AT_SOURCE_SERIAL;
+
+    if (stringEqualsIgnoreCase(command.command, "WIFI_SSID")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_SSID", config->wifi_ssid);
+            return;
+        }
+        if (!allow_wifi_config_write ||
+            !EXTERNAL_RADIO_SetWifiSsid(command.value, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "WIFI_SSID");
+            return;
+        }
+        result->restart_wifi = true;
+        result->restart_udp = true;
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_SSID", EXTERNAL_RADIO_GetConfig()->wifi_ssid);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "WIFI_PASS") ||
+        stringEqualsIgnoreCase(command.command, "WIFI_PASSWORD")) {
+        char masked[32];
+        if (is_query) {
+            formatMaskedSecret(config->wifi_password, masked, sizeof(masked));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_PASS", masked);
+            return;
+        }
+        if (!allow_wifi_config_write ||
+            !EXTERNAL_RADIO_SetWifiPassword(command.value, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "WIFI_PASS");
+            return;
+        }
+        result->restart_wifi = true;
+        result->restart_udp = true;
+        formatMaskedSecret(EXTERNAL_RADIO_GetConfig()->wifi_password, masked, sizeof(masked));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_PASS", masked);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "WIFI_DHCP")) {
+        if (is_query) {
+            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_DHCP", config->wifi_dhcp_enabled ? 1u : 0u);
+            return;
+        }
+        bool enabled = false;
+        if (!allow_wifi_config_write ||
+            !parseBoolValue(command.value, &enabled) ||
+            !EXTERNAL_RADIO_SetWifiDhcpEnabled(enabled, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "WIFI_DHCP");
+            return;
+        }
+        result->restart_wifi = true;
+        result->restart_udp = true;
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_DHCP", EXTERNAL_RADIO_GetConfig()->wifi_dhcp_enabled ? 1u : 0u);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "WIFI_IP") ||
+        stringEqualsIgnoreCase(command.command, "WIFI_MASK") ||
+        stringEqualsIgnoreCase(command.command, "WIFI_GW") ||
+        stringEqualsIgnoreCase(command.command, "WIFI_DNS")) {
+        char current[16];
+        uint32_t configured = config->wifi_ip;
+        IPAddress dhcp = WiFi.localIP();
+        const char *key = "WIFI_IP";
+        if (stringEqualsIgnoreCase(command.command, "WIFI_MASK")) {
+            configured = config->wifi_netmask;
+            dhcp = WiFi.subnetMask();
+            key = "WIFI_MASK";
+        } else if (stringEqualsIgnoreCase(command.command, "WIFI_GW")) {
+            configured = config->wifi_gateway;
+            dhcp = WiFi.gatewayIP();
+            key = "WIFI_GW";
+        } else if (stringEqualsIgnoreCase(command.command, "WIFI_DNS")) {
+            configured = config->wifi_dns;
+            dhcp = WiFi.dnsIP();
+            key = "WIFI_DNS";
+        }
+        if (is_query) {
+            const bool show_dhcp_value = config->wifi_dhcp_enabled && WiFi.status() == WL_CONNECTED;
+            appendKeyValueLine(result->payload,
+                               sizeof(result->payload),
+                               &result->payload_size,
+                               key,
+                               ipText(currentWifiIpValue(configured, dhcp, show_dhcp_value), current, sizeof(current)));
+            return;
+        }
+        uint32_t value = 0U;
+        bool ok = allow_wifi_config_write && parseIpValue(command.value, &value);
+        if (ok && strcmp(key, "WIFI_IP") == 0) {
+            ok = EXTERNAL_RADIO_SetWifiIp(value, true);
+        } else if (ok && strcmp(key, "WIFI_MASK") == 0) {
+            ok = EXTERNAL_RADIO_SetWifiNetmask(value, true);
+        } else if (ok && strcmp(key, "WIFI_GW") == 0) {
+            ok = EXTERNAL_RADIO_SetWifiGateway(value, true);
+        } else if (ok && strcmp(key, "WIFI_DNS") == 0) {
+            ok = EXTERNAL_RADIO_SetWifiDns(value, true);
+        }
+        if (!ok) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", key);
+            return;
+        }
+        result->restart_wifi = true;
+        result->restart_udp = true;
+        appendKeyValueLine(result->payload,
+                           sizeof(result->payload),
+                           &result->payload_size,
+                           key,
+                           ipText(value, current, sizeof(current)));
+        return;
+    }
 
     if (stringEqualsIgnoreCase(command.command, "REBOOT")) {
         if (is_query) {
@@ -383,6 +614,23 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    if (stringEqualsIgnoreCase(command.command, "L_PORT") ||
+        stringEqualsIgnoreCase(command.command, "LOCAL_PORT")) {
+        if (is_query) {
+            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "L_PORT", config->local_port);
+            return;
+        }
+        unsigned long value = 0u;
+        if (!parseUnsignedValue(command.value, &value) || value == 0u || value > 65535u ||
+            !EXTERNAL_RADIO_SetLocalPort(static_cast<uint16_t>(value), true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "L_PORT");
+            return;
+        }
+        result->restart_udp = true;
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "L_PORT", EXTERNAL_RADIO_GetConfig()->local_port);
+        return;
+    }
+
     if (stringEqualsIgnoreCase(command.command, "CALL")) {
         if (is_query) {
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "CALL", config->callsign);
@@ -411,6 +659,22 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    if (stringEqualsIgnoreCase(command.command, "MODE") ||
+        stringEqualsIgnoreCase(command.command, "DEVICE_MODE")) {
+        if (is_query) {
+            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MODE", config->device_mode);
+            return;
+        }
+        unsigned long value = 0u;
+        if (!parseUnsignedValue(command.value, &value) || value > 255u ||
+            !EXTERNAL_RADIO_SetDeviceMode(static_cast<uint8_t>(value), true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "MODE");
+            return;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MODE", EXTERNAL_RADIO_GetConfig()->device_mode);
+        return;
+    }
+
     if (stringEqualsIgnoreCase(command.command, "MIC_GAIN")) {
         if (is_query) {
             appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", config->mic_volume);
@@ -423,7 +687,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
-        ES8311_ApplyAudioConfig(updated->mic_volume, updated->line_out_volume, updated->hp_drive_enabled);
+        applyCurrentAudioConfig();
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", updated->mic_volume);
         return;
     }
@@ -440,7 +704,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
-        ES8311_ApplyAudioConfig(updated->mic_volume, updated->line_out_volume, updated->hp_drive_enabled);
+        applyCurrentAudioConfig();
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOLUME", updated->line_out_volume);
         return;
     }
@@ -451,11 +715,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         bool enabled = false;
-        if (stringEqualsIgnoreCase(command.value, "ON") || stringEqualsIgnoreCase(command.value, "1")) {
-            enabled = true;
-        } else if (stringEqualsIgnoreCase(command.value, "OFF") || stringEqualsIgnoreCase(command.value, "0")) {
-            enabled = false;
-        } else {
+        if (!parseBoolValue(command.value, &enabled)) {
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "HP_DRIVE");
             return;
         }
@@ -464,7 +724,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
-        ES8311_ApplyAudioConfig(updated->mic_volume, updated->line_out_volume, updated->hp_drive_enabled);
+        applyCurrentAudioConfig();
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", updated->hp_drive_enabled ? "ON" : "OFF");
         return;
     }
@@ -497,8 +757,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     Serial.printf("[NRL] unknown AT command: %s=%s, returning command list\n",
                   command.command,
                   command.value);
-    if (!appendSupportedAtList(result->payload, sizeof(result->payload), &result->payload_size) ||
-        !appendAllConfigLines(result)) {
+    if (!appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "UNKNOWN") ||
+        !appendSupportedAtList(result->payload, sizeof(result->payload), &result->payload_size)) {
         result->should_reply = false;
     }
 }

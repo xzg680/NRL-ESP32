@@ -140,11 +140,12 @@ When downlink network voice is received, the firmware enables PTT and starts fee
 
 ## Build and Flash
 
-This project uses PlatformIO. The default environment is `app0_main`.
+This project uses PlatformIO with two board environments: `gezipai` (格子派) and `bh4tdv` (BH4TDV 3188), selected via `-DNRL_BOARD`.
 
 ```powershell
-platformio run -e app0_main
-platformio run -e app0_main -t upload
+platformio run                        # build both boards
+platformio run -e gezipai             # build 格子派 only
+platformio run -e gezipai -t upload   # build and flash 格子派
 ```
 
 Serial monitor:
@@ -165,7 +166,7 @@ GitHub Actions builds the firmware automatically on every push, pull request, or
 The `web-flasher/` page is intended for first installation or recovery. It writes the bootloader, partition table, OTA data, and `app0` firmware.
 
 ```powershell
-platformio run -e app0_main
+platformio run
 python scripts/stage_web_flasher.py
 python -m http.server 8000 -d web-flasher
 ```
@@ -178,7 +179,7 @@ After the device is running the dual OTA partition layout, firmware can be updat
 
 1. Connect to the device configuration AP, or browse to the device IP on your LAN.
 2. Open `http://192.168.4.1/update`, or click `Firmware update` on the setup page.
-3. Upload `.pio/build/app0_main/firmware.bin`.
+3. Upload `.pio/build/gezipai/firmware.bin` (use `.pio/build/bh4tdv/firmware.bin` for the BH4TDV board).
 4. The device reboots automatically after a successful upload.
 
 Note: WiFi OTA requires the `app0/app1` dual OTA layout from `part.csv`. Devices using the old partition layout should first be updated with USB web flashing or serial flashing so the new partition table is installed.

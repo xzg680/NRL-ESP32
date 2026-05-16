@@ -35,7 +35,18 @@ void ES8311_SetFrameHook(ES8311_FrameHook_t hook, void *user_data);
 // Queue PCM16 mono samples (8 kHz) for DAC playback.
 size_t ES8311_QueueOutputSamples(const int16_t *samples, size_t sample_count);
 void ES8311_ClearOutputQueue(void);
-bool ES8311_ApplyAudioConfig(uint8_t mic_volume, uint8_t line_out_volume, bool hp_drive_enabled);
+bool ES8311_ApplyAudioConfig(uint8_t mic_volume,
+                             uint8_t line_out_volume,
+                             bool hp_drive_enabled,
+                             bool drc_enabled,
+                             uint8_t drc_winsize,
+                             uint8_t drc_maxlevel,
+                             uint8_t drc_minlevel,
+                             uint8_t dac_ramprate,
+                             bool dac_eq_bypass,
+                             uint32_t daceq_b0,
+                             uint32_t daceq_b1,
+                             uint32_t daceq_a1);
 
 int ES8311_GetSampleRate(void);
 size_t ES8311_GetFrameSamples(void);

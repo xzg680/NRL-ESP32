@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-constexpr size_t NRL_AT_REPLY_CAPACITY = 1072u;
+constexpr size_t NRL_AT_REPLY_CAPACITY = 1024u;
 
 struct NrlAtCommandResult {
     bool should_reply = false;
@@ -15,8 +15,14 @@ struct NrlAtCommandResult {
     size_t payload_size = 0u;
 };
 
+enum NrlAtCommandSource : uint8_t {
+    NRL_AT_SOURCE_REMOTE = 0,
+    NRL_AT_SOURCE_SERIAL = 1,
+};
+
 void NRL_AT_HandlePayload(const uint8_t *payload,
                           size_t payload_size,
+                          NrlAtCommandSource source,
                           NrlAtCommandResult *result);
 
 #endif // SRC_LIB_NRL_AT_COMMANDS_H

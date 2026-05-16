@@ -34,6 +34,20 @@ struct ExternalRadioConfig {
     uint8_t mic_volume;
     uint8_t line_out_volume;
     bool hp_drive_enabled;
+    bool drc_enabled;
+    uint8_t drc_winsize;
+    uint8_t drc_maxlevel;
+    uint8_t drc_minlevel;
+    uint8_t dac_ramprate;
+    bool dac_eq_bypass;
+    uint32_t daceq_b0;
+    uint32_t daceq_b1;
+    uint32_t daceq_a1;
+    uint32_t wifi_ip;
+    uint32_t wifi_netmask;
+    uint32_t wifi_gateway;
+    uint32_t wifi_dns;
+    bool wifi_dhcp_enabled;
     SciSerialConfig sci;
     char wifi_ssid[33];
     char wifi_password[65];
@@ -44,6 +58,11 @@ struct ExternalRadioConfig {
 const ExternalRadioConfig *EXTERNAL_RADIO_GetConfig(void);
 bool EXTERNAL_RADIO_SetWifiSsid(const char *value, bool persist);
 bool EXTERNAL_RADIO_SetWifiPassword(const char *value, bool persist);
+bool EXTERNAL_RADIO_SetWifiIp(uint32_t value, bool persist);
+bool EXTERNAL_RADIO_SetWifiNetmask(uint32_t value, bool persist);
+bool EXTERNAL_RADIO_SetWifiGateway(uint32_t value, bool persist);
+bool EXTERNAL_RADIO_SetWifiDns(uint32_t value, bool persist);
+bool EXTERNAL_RADIO_SetWifiDhcpEnabled(bool enabled, bool persist);
 bool EXTERNAL_RADIO_SetServerHost(const char *value, bool persist);
 bool EXTERNAL_RADIO_SetServerPort(uint16_t value, bool persist);
 bool EXTERNAL_RADIO_SetLocalPort(uint16_t value, bool persist);
@@ -53,6 +72,13 @@ bool EXTERNAL_RADIO_SetDeviceMode(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetMicVolume(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetLineOutVolume(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetHpDriveEnabled(bool enabled, bool persist);
+bool EXTERNAL_RADIO_SetDrcEnabled(bool enabled, bool persist);
+bool EXTERNAL_RADIO_SetDrcWinsize(uint8_t value, bool persist);
+bool EXTERNAL_RADIO_SetDrcMaxlevel(uint8_t value, bool persist);
+bool EXTERNAL_RADIO_SetDrcMinlevel(uint8_t value, bool persist);
+bool EXTERNAL_RADIO_SetDacRamprate(uint8_t value, bool persist);
+bool EXTERNAL_RADIO_SetDacEqBypass(bool enabled, bool persist);
+bool EXTERNAL_RADIO_SetDacEqCoefficients(uint32_t b0, uint32_t b1, uint32_t a1, bool persist);
 bool EXTERNAL_RADIO_SetSciConfig(uint32_t baud, uint8_t data_bits, char parity, uint8_t stop_bits, bool persist);
 #endif
 

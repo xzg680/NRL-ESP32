@@ -443,7 +443,7 @@ static bool ensureWifiAndUdp(void)
     const char *wifi_password = (config != nullptr) ? config->wifi_password : NRL_AUDIO_WIFI_PASSWORD;
     const char *server_host = (config != nullptr) ? config->server_host : NRL_AUDIO_SERVER_HOST;
     const uint16_t server_port = (config != nullptr) ? config->server_port : static_cast<uint16_t>(NRL_AUDIO_SERVER_PORT);
-    const uint16_t local_port = server_port;
+    const uint16_t local_port = (config != nullptr) ? config->local_port : server_port;
 
     if (WiFi.status() != WL_CONNECTED) {
         const WifiConnResult result = wifiEnsureConnected(wifi_ssid, wifi_password, 15000u);
@@ -642,6 +642,81 @@ static void scheduleReboot(void)
     Serial.println("[NRL] reboot scheduled by AT command");
 }
 
+//=============== Serial AT command console (USB debug serial) ================
+
+constexpr size_t kSerialAtLineMax = 168u;
+char s_serial_at_line[kSerialAtLineMax];
+size_t s_serial_at_len = 0u;
+uint8_t s_serial_at_payload[kSerialAtLineMax + 1u];
+
+// Execute one AT command line typed on the USB debug serial and print the
+// reply back to the same serial port.
+static void processSerialAtLine(char *line)
+{
+    while (*line == ' ' || *line == '\t') {
+        ++line;
+    }
+    size_t len = strlen(line);
+    while (len > 0u && (line[len - 1u] == ' ' || line[len - 1u] == '\t')) {
+        line[--len] = '\0';
+    }
+    if (len == 0u) {
+        return;
+    }
+
+    Serial.printf("[AT] serial command: %s\n", line);
+
+    // Wrap the text line into the binary payload the AT handler expects:
+    // byte 0 is the 0x01 request marker, followed by the "AT+KEY=VALUE" text.
+    if (len > sizeof(s_serial_at_payload) - 1u) {
+        len = sizeof(s_serial_at_payload) - 1u;
+    }
+    s_serial_at_payload[0] = 0x01u;
+    memcpy(s_serial_at_payload + 1u, line, len);
+
+    NrlAtCommandResult at_result = {};
+    NRL_AT_HandlePayload(s_serial_at_payload, len + 1u, NRL_AT_SOURCE_SERIAL, &at_result);
+
+    if (at_result.should_reply && at_result.payload_size > 1u) {
+        // Skip the 0x02 reply marker; the remainder is CRLF-delimited text.
+        Serial.write(at_result.payload + 1u, at_result.payload_size - 1u);
+    }
+
+    if (at_result.restart_wifi || at_result.restart_udp) {
+        Serial.printf("[AT] applying config via serial: restart_wifi=%d restart_udp=%d\n",
+                      at_result.restart_wifi ? 1 : 0,
+                      at_result.restart_udp ? 1 : 0);
+        restartTransport(at_result.restart_wifi, at_result.restart_udp);
+    }
+    if (at_result.reboot) {
+        scheduleReboot();
+    }
+}
+
+static void pollSerialAtConsole(void)
+{
+    while (Serial.available() > 0) {
+        const int ch = Serial.read();
+        if (ch < 0) {
+            break;
+        }
+        if (ch == '\n' || ch == '\r') {
+            if (s_serial_at_len > 0u) {
+                s_serial_at_line[s_serial_at_len] = '\0';
+                processSerialAtLine(s_serial_at_line);
+                s_serial_at_len = 0u;
+            }
+            continue;
+        }
+        if (s_serial_at_len + 1u >= sizeof(s_serial_at_line)) {
+            s_serial_at_len = 0u;
+            Serial.println("[AT] serial command too long, discarded");
+            continue;
+        }
+        s_serial_at_line[s_serial_at_len++] = static_cast<char>(ch);
+    }
+}
+
 static void bridgeTask(void *)
 {
     while (true) {
@@ -693,7 +768,7 @@ static void bridgeTask(void *)
                                   static_cast<unsigned>(payload_size),
                                   (payload_size > 1u) ? reinterpret_cast<const char *>(payload + 1u) : "");
                     NrlAtCommandResult at_result = {};
-                    NRL_AT_HandlePayload(payload, payload_size, &at_result);
+                    NRL_AT_HandlePayload(payload, payload_size, NRL_AT_SOURCE_REMOTE, &at_result);
                     if (at_result.should_reply && at_result.payload_size > 0u) {
                         const size_t reply_packet_size = buildNrlPacket(kNrlTypeAtCommand,
                                                                         at_result.payload,
@@ -817,4 +892,9 @@ void NRLAudioBridge_ApplyConfig(bool restart_wifi, bool restart_udp)
     }
 
     restartTransport(restart_wifi, restart_udp);
+}
+
+void NRLAudioBridge_PollSerialConsole(void)
+{
+    pollSerialAtConsole();
 }

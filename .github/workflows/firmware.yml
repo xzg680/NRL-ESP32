@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build:
-    name: PlatformIO app0_main
+    name: PlatformIO (gezipai + bh4tdv)
     runs-on: ubuntu-latest
 
     steps:
@@ -53,27 +53,22 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved firmware version: ${VERSION}"
 
-      - name: Build firmware
+      - name: Build firmware (both boards)
         env:
           PLATFORMIO_BUILD_FLAGS: -DNRL_FIRMWARE_VERSION=\"${{ steps.ver.outputs.version }}\"
-        run: pio run -e app0_main
+        run: pio run
 
       - name: Stage USB web flasher files
-        run: python scripts/stage_web_flasher.py
+        run: python scripts/stage_web_flasher.py --version "${{ steps.ver.outputs.version }}"
 
-      - name: Update web-flasher manifest version
+      - name: Collect firmware binaries
         run: |
-          python - <<'PY'
-          import json, os, pathlib
-          version = os.environ['VERSION']
-          path = pathlib.Path('web-flasher/manifest.json')
-          data = json.loads(path.read_text(encoding='utf-8'))
-          data['version'] = version
-          path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-          print(f"manifest.json version -> {version}")
-          PY
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
+          mkdir -p dist
+          for b in gezipai bh4tdv; do
+            cp ".pio/build/$b/firmware.bin"   "dist/firmware-$b.bin"
+            cp ".pio/build/$b/partitions.bin" "dist/partitions-$b.bin"
+            cp ".pio/build/$b/bootloader.bin" "dist/bootloader-$b.bin"
+          done
 
       - name: Bundle web-flasher
         run: |
@@ -86,12 +81,17 @@ jobs:
           name: nrl-esp32-firmware-${{ steps.ver.outputs.version }}
           if-no-files-found: error
           path: |
-            .pio/build/app0_main/firmware.bin
-            .pio/build/app0_main/partitions.bin
-            .pio/build/app0_main/bootloader.bin
+            dist/firmware-gezipai.bin
+            dist/firmware-bh4tdv.bin
+            dist/partitions-gezipai.bin
+            dist/partitions-bh4tdv.bin
+            dist/bootloader-gezipai.bin
+            dist/bootloader-bh4tdv.bin
             web-flasher/index.html
-            web-flasher/manifest.json
-            web-flasher/firmware/*.bin
+            web-flasher/manifest-gezipai.json
+            web-flasher/manifest-bh4tdv.json
+            web-flasher/firmware/gezipai/*.bin
+            web-flasher/firmware/bh4tdv/*.bin
             web-flasher-${{ steps.ver.outputs.version }}.zip
 
       - name: Publish GitHub Release
@@ -103,7 +103,10 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            .pio/build/app0_main/firmware.bin
-            .pio/build/app0_main/partitions.bin
-            .pio/build/app0_main/bootloader.bin
+            dist/firmware-gezipai.bin
+            dist/firmware-bh4tdv.bin
+            dist/partitions-gezipai.bin
+            dist/partitions-bh4tdv.bin
+            dist/bootloader-gezipai.bin
+            dist/bootloader-bh4tdv.bin
             web-flasher-${{ steps.ver.outputs.version }}.zip

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Firmware Update</title>
+  <style>
+<!-- @include wifi_portal_parts/wifi_update_portal.css -->
+</style>
+</head>
+<body>
+  <main class="shell">
+    <div class="topbar">
+      <div>
+        <h1 data-i18n="{{HEADLINE_KEY}}">{{HEADLINE}}</h1>
+        <p class="sub" data-i18n="{{INTRO_KEY}}">{{INTRO}}</p>
+        <div class="language">
+          <span class="lang-label" data-i18n="language">Language</span>
+          <div id="language-select" class="lang-radio">
+            <label><input type="radio" name="lang" value="en">English</label>
+            <label><input type="radio" name="lang" value="zh">中文</label>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <div><span data-i18n="configAp">Config AP</span><strong class="mono">{{AP_IP}}</strong></div>
+        <div><span data-i18n="stationIp">Station IP</span><strong class="mono">{{STA_IP}}</strong></div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <a href="/" data-i18n="wifiConfig">WiFi Config</a>
+      <a href="/nrl" data-i18n="nrlConfig">NRL Config</a>
+      <a href="/audio" data-i18n="audioSettings">Audio Settings</a>
+      <a class="active" href="/update" data-i18n="firmwareUpdate">Firmware Update</a>
+    </nav>
+
+    <p class="notice"><span data-i18n="firmwareVersion">Firmware version</span> {{VERSION}}</p>
+    <p class="notice" data-i18n="otaNotice">Select a firmware.bin file from support or from a trusted release. The device will reboot after a successful update.</p>
+
+    <section class="panel">
+      <h2 data-i18n="otaTitle">WiFi Firmware Update</h2>
+      <form id="ota-form" enctype="multipart/form-data">
+        <input id="ota-file" type="file" name="firmware" accept=".bin,application/octet-stream" required>
+        <div class="actions"><button id="ota-submit" type="submit" data-i18n="uploadFirmware">Upload firmware</button></div>
+        <div id="ota-progress" class="prog-wrap" hidden>
+          <div class="prog-bar"><div id="ota-bar"></div></div>
+          <p id="ota-status" class="prog-status"></p>
+        </div>
+      </form>
+    </section>
+  </main>
+  <script>
+<!-- @include wifi_portal_parts/wifi_update_portal.js -->
+</script>
+</body>
+</html>

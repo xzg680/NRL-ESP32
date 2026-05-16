@@ -1,5 +1,6 @@
-#include "wifi_config_portal.h"
+﻿#include "wifi_config_portal.h"
 #include "wifi_config_portal_page.generated.h"
+#include "wifi_update_portal_page.generated.h"
 #include "nrl_audio_bridge.h"
 #include "nrl_version.h"
 
@@ -38,9 +39,17 @@ constexpr byte kDnsPort = 53;
 constexpr unsigned long kBootResetHoldMs = 5000UL;
 constexpr unsigned long kApCloseDelayMs = 5000UL;
 constexpr unsigned long kApReopenAfterStaDownMs = 60000UL;
+constexpr unsigned long kDacEqCoefficientMax = 1073741823UL;
 const IPAddress kApIp(192, 168, 4, 1);
 const IPAddress kApGateway(192, 168, 4, 1);
 const IPAddress kApSubnet(255, 255, 255, 0);
+
+static String formatHex32(const uint32_t value)
+{
+    char buffer[12];
+    snprintf(buffer, sizeof(buffer), "0x%08lX", static_cast<unsigned long>(value));
+    return String(buffer);
+}
 
 static String htmlEscape(const char *text)
 {
@@ -111,6 +120,74 @@ static String jsonEscape(const String &text)
     return out;
 }
 
+// Mask secret fields (e.g. WiFi password) for serial logs: show length only,
+// never the plaintext.
+static String maskSecret(const char *text)
+{
+    if (text == nullptr || *text == '\0') {
+        return String("(empty)");
+    }
+    return String("****** (") + String(static_cast<unsigned>(strlen(text))) + " chars)";
+}
+
+static String ipToString(const uint32_t value)
+{
+    return IPAddress(value).toString();
+}
+
+static String wifiDisplayIp(const ExternalRadioConfig *config,
+                            const uint32_t configured_value,
+                            const IPAddress &dhcp_value)
+{
+    if (config != nullptr && config->wifi_dhcp_enabled && WiFi.status() == WL_CONNECTED) {
+        return dhcp_value.toString();
+    }
+    return ipToString(configured_value);
+}
+
+static String buildDacEqSlider(const char *field_name, const char *label, const uint32_t value)
+{
+    String html = F("<form class=\"item-form eq-control\" method=\"post\" action=\"/save_nrl\"><label>");
+    html += label;
+    html += F("</label><div class=\"eq-row\"><input class=\"eq-slider\" type=\"range\" min=\"0\" max=\"1073741823\" step=\"1\" name=\"");
+    html += field_name;
+    html += F("\" value=\"");
+    html += String(value);
+    html += F("\" oninput=\"syncEqValue(this)\" onpointerup=\"submitEqSlider(this)\"><input class=\"eq-value mono\" type=\"text\" value=\"");
+    html += formatHex32(value);
+    html += F("\" oninput=\"syncEqSlider(this)\"></div></form>");
+    return html;
+}
+
+static String buildAutoSubmitSlider(const char *field_name,
+                                    const char *label,
+                                    const char *i18n_key,
+                                    const uint32_t min_value,
+                                    const uint32_t max_value,
+                                    const uint32_t value)
+{
+    String html = F("<form class=\"item-form\" method=\"post\" action=\"/save_nrl\"><label");
+    if (i18n_key != nullptr && i18n_key[0] != '\0') {
+        html += F(" data-i18n=\"");
+        html += i18n_key;
+        html += F("\"");
+    }
+    html += F(">");
+    html += label;
+    html += F("</label><div class=\"eq-row\"><input class=\"auto-slider\" type=\"range\" name=\"");
+    html += field_name;
+    html += F("\" min=\"");
+    html += String(min_value);
+    html += F("\" max=\"");
+    html += String(max_value);
+    html += F("\" step=\"1\" value=\"");
+    html += String(value);
+    html += F("\" oninput=\"syncAutoSliderValue(this)\" onpointerup=\"submitAutoSlider(this)\" onchange=\"syncAutoSliderValue(this)\"><input class=\"eq-value mono\" type=\"number\" value=\"");
+    html += String(value);
+    html += F("\" readonly tabindex=\"-1\"></div></form>");
+    return html;
+}
+
 static String buildApSsid()
 {
     const uint64_t efuse = ESP.getEfuseMac();
@@ -122,9 +199,14 @@ static String buildApSsid()
 
 static void redirectToPortal()
 {
-    const String url = String("http://") + WiFi.softAPIP().toString() + "/";
-    s_server.sendHeader("Location", url, true);
+    s_server.sendHeader("Location", "/", true);
     s_server.send(302, "text/plain", "");
+}
+
+static void handleFavicon()
+{
+    s_server.sendHeader("Cache-Control", "max-age=86400");
+    s_server.send(204, "image/x-icon", "");
 }
 
 static void ensureApRunning()
@@ -284,12 +366,30 @@ static String buildNetworkSection(const ExternalRadioConfig *config)
                     "<span class=\"hint\" id=\"scan-status\" data-i18n=\"scanIdle\">Click Scan to find nearby WiFi networks.</span>"
                     "</div>"
                     "<div class=\"grid\">"
-                    "<div><label data-i18n=\"wifiSsid\">WiFi SSID</label><input id=\"wifi-ssid-input\" name=\"wifi_ssid\" value=\"");
+                    "<form class=\"item-form span-2\" method=\"post\" action=\"/save_wifi\"><div class=\"subgrid\"><div><label data-i18n=\"wifiSsid\">WiFi SSID</label><input id=\"wifi-ssid-input\" name=\"wifi_ssid\" value=\"");
     html += htmlEscape(config->wifi_ssid);
     html += F("\" autocomplete=\"off\"></div>"
               "<div><label data-i18n=\"wifiPassword\">WiFi Password</label><input name=\"wifi_password\" value=\"");
     html += htmlEscape(config->wifi_password);
+    html += F("\"></div></div><div class=\"actions\"><button class=\"btn-small\" type=\"submit\" data-i18n=\"saveItem\">Save</button></div></form>"
+              "<form class=\"item-form span-2\" method=\"post\" action=\"/save_wifi\"><div class=\"subgrid\">"
+              "<div><label>DHCP</label><input type=\"hidden\" name=\"wifi_dhcp_present\" value=\"1\"><label class=\"hint\"><input id=\"wifi-dhcp-enabled\" type=\"checkbox\" name=\"wifi_dhcp_enabled\" value=\"1\" onchange=\"syncDhcpFields()\" ");
+    if (config->wifi_dhcp_enabled) {
+        html += F("checked");
+    }
+    html += F("><span>Use DHCP for station IP</span></label></div>"
+              "<div><label>WiFi IP</label><input class=\"wifi-static-field\" name=\"wifi_ip\" value=\"");
+    html += wifiDisplayIp(config, config->wifi_ip, WiFi.localIP());
     html += F("\"></div>"
+              "<div><label>WiFi Mask</label><input class=\"wifi-static-field\" name=\"wifi_mask\" value=\"");
+    html += wifiDisplayIp(config, config->wifi_netmask, WiFi.subnetMask());
+    html += F("\"></div>"
+              "<div><label>WiFi Gateway</label><input class=\"wifi-static-field\" name=\"wifi_gateway\" value=\"");
+    html += wifiDisplayIp(config, config->wifi_gateway, WiFi.gatewayIP());
+    html += F("\"></div>"
+              "<div><label>WiFi DNS</label><input class=\"wifi-static-field\" name=\"wifi_dns\" value=\"");
+    html += wifiDisplayIp(config, config->wifi_dns, WiFi.dnsIP());
+    html += F("\"></div></div><div class=\"actions\"><button class=\"btn-small\" type=\"submit\" data-i18n=\"saveItem\">Save</button></div></form>"
               "<div class=\"span-2\"><label data-i18n=\"nearbyWifi\">Nearby WiFi</label><div class=\"row\">"
               "<select id=\"wifi-ssid-select\" onchange=\"applySelectedWifi()\">"
               "<option value=\"\" data-i18n=\"selectWifi\">Select detected WiFi...</option>"
@@ -297,7 +397,6 @@ static String buildNetworkSection(const ExternalRadioConfig *config)
               "<button class=\"secondary btn-small\" type=\"button\" onclick=\"scanWifi()\" data-i18n=\"scan\">Scan</button>"
               "</div></div>"
               "</div>"
-              "<div class=\"actions\"><button type=\"submit\" data-i18n=\"saveWifi\">Save WiFi Config</button></div>"
               "</section>");
     return html;
 }
@@ -307,17 +406,17 @@ static String buildDeviceSections(const ExternalRadioConfig *config)
     String html = F("<section class=\"panel\">"
                     "<div class=\"section-head\"><h2 data-i18n=\"server\">Server</h2></div>"
                     "<div class=\"grid\">"
-                    "<div><label data-i18n=\"serverHost\">Server Host / IP</label><input name=\"server_host\" value=\"");
+                    "<form class=\"item-form span-2\" method=\"post\" action=\"/save_nrl\"><div class=\"subgrid\"><div><label data-i18n=\"serverHost\">Server Host / IP</label><input name=\"server_host\" value=\"");
     html += htmlEscape(config->server_host);
     html += F("\"></div>"
               "<div><label data-i18n=\"serverPort\">Server Port</label><input name=\"server_port\" value=\"");
     html += String(config->server_port);
-    html += F("\"></div>"
+    html += F("\"></div></div><div class=\"actions\"><button class=\"btn-small\" type=\"submit\" data-i18n=\"saveItem\">Save</button></div></form>"
               "</div></section>"
               "<section class=\"panel\">"
               "<div class=\"section-head\"><h2 data-i18n=\"radio\">Radio</h2></div>"
               "<div class=\"grid\">"
-              "<div><label data-i18n=\"channel\">Channel (0-7)</label><input name=\"channel\" value=\"");
+              "<form class=\"item-form span-2\" method=\"post\" action=\"/save_nrl\"><div class=\"subgrid\"><div class=\"span-2\"><label data-i18n=\"channel\">Channel (0-7)</label><input name=\"channel\" value=\"");
     html += String(config->channel);
     html += F("\"></div>"
               "<div><label data-i18n=\"callsign\">Callsign</label><input name=\"callsign\" value=\"");
@@ -325,25 +424,60 @@ static String buildDeviceSections(const ExternalRadioConfig *config)
     html += F("\"></div>"
               "<div><label data-i18n=\"callsignSsid\">Callsign SSID</label><input name=\"callsign_ssid\" value=\"");
     html += String(config->callsign_ssid);
-    html += F("\"></div>"
-              "<div><label data-i18n=\"hpDrive\">ES8311 HP Drive</label><label class=\"hint\">"
-              "<input type=\"checkbox\" name=\"hp_drive_enabled\" value=\"1\" ");
+    html += F("\"></div></div><div class=\"actions\"><button class=\"btn-small\" type=\"submit\" data-i18n=\"saveItem\">Save</button></div></form>"
+              "</div></section>");
+    return html;
+}
+
+static String buildAudioSections(const ExternalRadioConfig *config)
+{
+    String html = F("<section class=\"panel\">"
+                    "<div class=\"section-head\"><h2 data-i18n=\"audio\">Audio</h2></div>"
+                    "<div class=\"grid\">"
+              "<div class=\"subpanel\"><h3>Output</h3><div class=\"subgrid\">"
+              "<form class=\"item-form\" method=\"post\" action=\"/save_nrl\"><label data-i18n=\"hpDrive\">ES8311 HP Drive</label><input type=\"hidden\" name=\"hp_drive_present\" value=\"1\"><label class=\"hint\">"
+              "<input type=\"checkbox\" name=\"hp_drive_enabled\" value=\"1\" onchange=\"submitSwitch(this)\" ");
     if (config->hp_drive_enabled) {
         html += F("checked");
     }
-    html += F("><span data-i18n=\"hpDriveText\">Enable headphone output drive (REG13 HPSW)</span></label></div>"
-              "</div></section>"
-              "<section class=\"panel\">"
-              "<div class=\"section-head\"><h2 data-i18n=\"audio\">Audio</h2></div>"
-              "<div class=\"grid\">"
-              "<div><label data-i18n=\"micVolume\">Mic Volume (0-255)</label><input name=\"mic_volume\" value=\"");
-    html += String(config->mic_volume);
-    html += F("\"></div>"
-              "<div><label data-i18n=\"lineOutVolume\">Line Out Volume (0-255)</label><input name=\"line_out_volume\" value=\"");
-    html += String(config->line_out_volume);
-    html += F("\"></div>"
+    html += F("><span data-i18n=\"hpDriveText\">Enable headphone output drive (REG13 HPSW)</span></label></form></div></div>"
+              "<div class=\"subpanel\"><h3>Volume</h3><div class=\"subgrid\">");
+    html += buildAutoSubmitSlider("mic_volume", "Mic Volume (0-255)", "micVolume", 0u, 255u, config->mic_volume);
+    html += buildAutoSubmitSlider("line_out_volume", "Line Out Volume (0-255)", "lineOutVolume", 0u, 255u, config->line_out_volume);
+    html += F("</div></div>"
+              "<div class=\"subpanel\"><h3>DRC</h3><div class=\"subgrid\">"
+              "<form class=\"item-form span-2\" method=\"post\" action=\"/save_nrl\"><label>ES8311 DRC Enable</label><input type=\"hidden\" name=\"drc_present\" value=\"1\"><label class=\"hint\">"
+              "<input type=\"checkbox\" name=\"drc_enabled\" value=\"1\" onchange=\"submitSwitch(this)\" ");
+    if (config->drc_enabled) {
+        html += F("checked");
+    }
+    html += F("><span>Enable DAC DRC (REG34 bit7)</span></label></form>");
+    html += buildAutoSubmitSlider("drc_winsize", "DRC Window Size (0-15)", nullptr, 0u, 15u, config->drc_winsize);
+    html += buildAutoSubmitSlider("drc_maxlevel", "DRC Max Level (0-15)", nullptr, 0u, 15u, config->drc_maxlevel);
+    html += buildAutoSubmitSlider("drc_minlevel", "DRC Min Level (0-15)", nullptr, 0u, 15u, config->drc_minlevel);
+    html += buildAutoSubmitSlider("dac_ramprate", "DAC Ramp Rate (0-15)", nullptr, 0u, 15u, config->dac_ramprate);
+    html += F("</div></div>"
+              "<div class=\"subpanel\"><h3>EQ</h3><div class=\"subgrid\">"
+              "<form class=\"item-form\" method=\"post\" action=\"/save_nrl\"><label>DAC EQ Bypass</label><input type=\"hidden\" name=\"dac_eq_bypass_present\" value=\"1\"><label class=\"hint\">"
+              "<input type=\"checkbox\" name=\"dac_eq_bypass\" value=\"1\" onchange=\"submitSwitch(this)\" ");
+    if (config->dac_eq_bypass) {
+        html += F("checked");
+    }
+    html += F("><span>Bypass DAC EQ (REG37 bit3)</span></label></form>"
+              "<div class=\"span-2 eq-panel\"><div class=\"section-head\"><h2>DAC EQ Coefficients</h2>"
+              "<span class=\"hint\">30-bit unsigned register values for B0/B1/A1</span></div>"
+              "<div class=\"eq-presets\">"
+              "<button class=\"secondary btn-small\" type=\"button\" onclick=\"applyDacEqPreset('flat')\">Flat</button>"
+              "<button class=\"secondary btn-small\" type=\"button\" onclick=\"applyDacEqPreset('neutral')\">Neutral EQ</button>"
+              "<button class=\"secondary btn-small\" type=\"button\" onclick=\"applyDacEqPreset('voice_bright')\">Voice Bright</button>"
+              "<button class=\"secondary btn-small\" type=\"button\" onclick=\"applyDacEqPreset('voice_soft')\">Voice Soft</button>"
+              "<button class=\"secondary btn-small\" type=\"button\" onclick=\"applyDacEqPreset('low_cut')\">Low Cut</button>"
+              "</div>");
+    html += buildDacEqSlider("daceq_b0", "DACEQ B0 (REG38-3B)", config->daceq_b0);
+    html += buildDacEqSlider("daceq_b1", "DACEQ B1 (REG3C-3F)", config->daceq_b1);
+    html += buildDacEqSlider("daceq_a1", "DACEQ A1 (REG40-43)", config->daceq_a1);
+    html += F("</div></div></div>"
               "</div>"
-              "<div class=\"actions\"><button type=\"submit\" data-i18n=\"saveNrl\">Save NRL Config</button></div>"
               "</section>");
     return html;
 }
@@ -357,6 +491,7 @@ static void sendConfigPage(const char *title,
                            const String &form_sections,
                            const bool network_active,
                            const bool device_active,
+                           const bool audio_active,
                            const String &footer)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
@@ -368,6 +503,7 @@ static void sendConfigPage(const char *title,
     replaceToken(html, "{{INTRO_KEY}}", intro_key);
     replaceToken(html, "{{NETWORK_ACTIVE}}", network_active ? "active" : "");
     replaceToken(html, "{{DEVICE_ACTIVE}}", device_active ? "active" : "");
+    replaceToken(html, "{{AUDIO_ACTIVE}}", audio_active ? "active" : "");
     replaceToken(html, "{{AP_IP}}", WiFi.softAPIP().toString());
     replaceToken(html, "{{STA_IP}}", (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("not connected"));
     replaceToken(html, "{{SSID_OPTIONS}}", "");
@@ -400,6 +536,7 @@ static void handleRoot()
                    buildNetworkSection(config),
                    true,
                    false,
+                   false,
                    "");
 }
 
@@ -413,6 +550,23 @@ static void handleNrlPage()
                    "nrlIntro",
                    "/save_nrl",
                    buildDeviceSections(config),
+                   false,
+                   true,
+                   false,
+                   "");
+}
+
+static void handleAudioPage()
+{
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    sendConfigPage((String(NRL_FIRMWARE_NAME) + " Audio Settings").c_str(),
+                   "Audio Settings",
+                   "audioHeadline",
+                   "Set ES8311 output, volume, DRC, and EQ.",
+                   "audioIntro",
+                   "/save_nrl",
+                   buildAudioSections(config),
+                   false,
                    false,
                    true,
                    "");
@@ -480,6 +634,19 @@ static bool parseUIntArg(const String &text, unsigned long *out_value)
     return true;
 }
 
+static bool parseIpArg(const String &text, uint32_t *out_value)
+{
+    if (out_value == nullptr || text.length() == 0) {
+        return false;
+    }
+    IPAddress ip;
+    if (!ip.fromString(text)) {
+        return false;
+    }
+    *out_value = static_cast<uint32_t>(ip);
+    return true;
+}
+
 static void handleSaveWifi()
 {
     bool ok = true;
@@ -487,16 +654,49 @@ static void handleSaveWifi()
     const ExternalRadioConfig *before = EXTERNAL_RADIO_GetConfig();
     char old_wifi_ssid[33] = {};
     char old_wifi_password[65] = {};
+    bool old_wifi_dhcp_enabled = true;
+    uint32_t old_wifi_ip = 0u;
+    uint32_t old_wifi_netmask = 0u;
+    uint32_t old_wifi_gateway = 0u;
+    uint32_t old_wifi_dns = 0u;
     if (before != nullptr) {
         strncpy(old_wifi_ssid, before->wifi_ssid, sizeof(old_wifi_ssid) - 1u);
         strncpy(old_wifi_password, before->wifi_password, sizeof(old_wifi_password) - 1u);
+        old_wifi_dhcp_enabled = before->wifi_dhcp_enabled;
+        old_wifi_ip = before->wifi_ip;
+        old_wifi_netmask = before->wifi_netmask;
+        old_wifi_gateway = before->wifi_gateway;
+        old_wifi_dns = before->wifi_dns;
     }
 
-    if (ok) {
+    if (ok && s_server.hasArg("wifi_ssid")) {
         ok = EXTERNAL_RADIO_SetWifiSsid(s_server.arg("wifi_ssid").c_str(), false);
     }
-    if (ok) {
+    if (ok && s_server.hasArg("wifi_password")) {
         ok = EXTERNAL_RADIO_SetWifiPassword(s_server.arg("wifi_password").c_str(), false);
+    }
+    if (ok && s_server.hasArg("wifi_dhcp_present")) {
+        ok = EXTERNAL_RADIO_SetWifiDhcpEnabled(s_server.hasArg("wifi_dhcp_enabled"), false);
+    }
+    if (ok && s_server.hasArg("wifi_ip") && s_server.arg("wifi_ip").length() > 0) {
+        uint32_t value = 0u;
+        ok = parseIpArg(s_server.arg("wifi_ip"), &value) &&
+             EXTERNAL_RADIO_SetWifiIp(value, false);
+    }
+    if (ok && s_server.hasArg("wifi_mask") && s_server.arg("wifi_mask").length() > 0) {
+        uint32_t value = 0u;
+        ok = parseIpArg(s_server.arg("wifi_mask"), &value) &&
+             EXTERNAL_RADIO_SetWifiNetmask(value, false);
+    }
+    if (ok && s_server.hasArg("wifi_gateway") && s_server.arg("wifi_gateway").length() > 0) {
+        uint32_t value = 0u;
+        ok = parseIpArg(s_server.arg("wifi_gateway"), &value) &&
+             EXTERNAL_RADIO_SetWifiGateway(value, false);
+    }
+    if (ok && s_server.hasArg("wifi_dns") && s_server.arg("wifi_dns").length() > 0) {
+        uint32_t value = 0u;
+        ok = parseIpArg(s_server.arg("wifi_dns"), &value) &&
+             EXTERNAL_RADIO_SetWifiDns(value, false);
     }
     if (ok) {
         ok = EXTERNAL_RADIO_SaveConfig();
@@ -504,11 +704,37 @@ static void handleSaveWifi()
 
     const ExternalRadioConfig *after = EXTERNAL_RADIO_GetConfig();
     if (ok && after != nullptr) {
-        const bool restart_wifi = strcmp(old_wifi_ssid, after->wifi_ssid) != 0 ||
-                                  strcmp(old_wifi_password, after->wifi_password) != 0;
-        if (restart_wifi) {
-            NRLAudioBridge_ApplyConfig(true, true);
+        if (s_server.hasArg("wifi_ssid") || s_server.hasArg("wifi_password")) {
+            Serial.printf("[CFG] WiFi account saved via web: ssid=\"%s\" password=%s\n",
+                          after->wifi_ssid, maskSecret(after->wifi_password).c_str());
         }
+        if (s_server.hasArg("wifi_dhcp_present") ||
+            s_server.hasArg("wifi_ip") ||
+            s_server.hasArg("wifi_mask") ||
+            s_server.hasArg("wifi_gateway") ||
+            s_server.hasArg("wifi_dns")) {
+            Serial.printf("[CFG] WiFi network saved via web: dhcp=%s ip=%s mask=%s gateway=%s dns=%s\n",
+                          after->wifi_dhcp_enabled ? "on" : "off",
+                          ipToString(after->wifi_ip).c_str(),
+                          ipToString(after->wifi_netmask).c_str(),
+                          ipToString(after->wifi_gateway).c_str(),
+                          ipToString(after->wifi_dns).c_str());
+        }
+        const bool restart_wifi = strcmp(old_wifi_ssid, after->wifi_ssid) != 0 ||
+                                  strcmp(old_wifi_password, after->wifi_password) != 0 ||
+                                  old_wifi_dhcp_enabled != after->wifi_dhcp_enabled ||
+                                  old_wifi_ip != after->wifi_ip ||
+                                  old_wifi_netmask != after->wifi_netmask ||
+                                  old_wifi_gateway != after->wifi_gateway ||
+                                  old_wifi_dns != after->wifi_dns;
+        if (restart_wifi) {
+            Serial.printf("[CFG] WiFi credentials changed, reconnecting to \"%s\"\n", after->wifi_ssid);
+            NRLAudioBridge_ApplyConfig(true, true);
+        } else {
+            Serial.println("[CFG] WiFi config unchanged, keeping current connection");
+        }
+    } else if (!ok) {
+        Serial.println("[CFG] WiFi config save via web failed (invalid params or EEPROM write error)");
     }
 
     if (ok) {
@@ -522,6 +748,7 @@ static void handleSaveWifi()
                        buildNetworkSection(config),
                        true,
                        false,
+                       false,
                        "");
     } else {
         const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
@@ -533,6 +760,7 @@ static void handleSaveWifi()
                        "/save_wifi",
                        buildNetworkSection(config),
                        true,
+                       false,
                        false,
                        "");
     }
@@ -550,44 +778,96 @@ static void handleSaveNrl()
         old_server_port = before->server_port;
     }
 
-    if (ok) {
+    if (ok && s_server.hasArg("server_host")) {
         ok = EXTERNAL_RADIO_SetServerHost(s_server.arg("server_host").c_str(), false);
     }
-    if (ok) {
+    if (ok && s_server.hasArg("server_port")) {
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("server_port"), &value) &&
              value > 0UL && value <= 65535UL &&
              EXTERNAL_RADIO_SetServerPort(static_cast<uint16_t>(value), false);
     }
-    if (ok) {
+    if (ok && s_server.hasArg("channel")) {
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("channel"), &value) &&
              value <= 7UL &&
              EXTERNAL_RADIO_SetChannel(static_cast<uint8_t>(value), false);
     }
-    if (ok) {
+    if (ok && s_server.hasArg("callsign")) {
         ok = EXTERNAL_RADIO_SetCallsign(s_server.arg("callsign").c_str(), false);
     }
-    if (ok) {
+    if (ok && s_server.hasArg("callsign_ssid")) {
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("callsign_ssid"), &value) &&
              value <= 255UL &&
              EXTERNAL_RADIO_SetCallsignSsid(static_cast<uint8_t>(value), false);
     }
-    if (ok) {
+    if (ok && s_server.hasArg("mic_volume")) {
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("mic_volume"), &value) &&
              value <= 255UL &&
              EXTERNAL_RADIO_SetMicVolume(static_cast<uint8_t>(value), false);
     }
-    if (ok) {
+    if (ok && s_server.hasArg("line_out_volume")) {
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("line_out_volume"), &value) &&
              value <= 255UL &&
              EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(value), false);
     }
-    if (ok) {
+    if (ok && s_server.hasArg("hp_drive_present")) {
         ok = EXTERNAL_RADIO_SetHpDriveEnabled(s_server.hasArg("hp_drive_enabled"), false);
+    }
+    if (ok && s_server.hasArg("drc_present")) {
+        ok = EXTERNAL_RADIO_SetDrcEnabled(s_server.hasArg("drc_enabled"), false);
+    }
+    if (ok && s_server.hasArg("drc_winsize")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("drc_winsize"), &value) &&
+             value <= 15UL &&
+             EXTERNAL_RADIO_SetDrcWinsize(static_cast<uint8_t>(value), false);
+    }
+    if (ok && s_server.hasArg("drc_maxlevel")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("drc_maxlevel"), &value) &&
+             value <= 15UL &&
+             EXTERNAL_RADIO_SetDrcMaxlevel(static_cast<uint8_t>(value), false);
+    }
+    if (ok && s_server.hasArg("drc_minlevel")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("drc_minlevel"), &value) &&
+             value <= 15UL &&
+             EXTERNAL_RADIO_SetDrcMinlevel(static_cast<uint8_t>(value), false);
+    }
+    if (ok && s_server.hasArg("dac_ramprate")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("dac_ramprate"), &value) &&
+             value <= 15UL &&
+             EXTERNAL_RADIO_SetDacRamprate(static_cast<uint8_t>(value), false);
+    }
+    if (ok && s_server.hasArg("dac_eq_bypass_present")) {
+        ok = EXTERNAL_RADIO_SetDacEqBypass(s_server.hasArg("dac_eq_bypass"), false);
+    }
+    if (ok && (s_server.hasArg("daceq_b0") || s_server.hasArg("daceq_b1") || s_server.hasArg("daceq_a1"))) {
+        const ExternalRadioConfig *current = EXTERNAL_RADIO_GetConfig();
+        uint32_t b0 = current != nullptr ? current->daceq_b0 : 0u;
+        uint32_t b1 = current != nullptr ? current->daceq_b1 : 0u;
+        uint32_t a1 = current != nullptr ? current->daceq_a1 : 0u;
+        unsigned long value = 0UL;
+        if (ok && s_server.hasArg("daceq_b0")) {
+            ok = parseUIntArg(s_server.arg("daceq_b0"), &value) && value <= kDacEqCoefficientMax;
+            b0 = static_cast<uint32_t>(value);
+        }
+        if (ok && s_server.hasArg("daceq_b1")) {
+            ok = parseUIntArg(s_server.arg("daceq_b1"), &value) && value <= kDacEqCoefficientMax;
+            b1 = static_cast<uint32_t>(value);
+        }
+        if (ok && s_server.hasArg("daceq_a1")) {
+            ok = parseUIntArg(s_server.arg("daceq_a1"), &value) && value <= kDacEqCoefficientMax;
+            a1 = static_cast<uint32_t>(value);
+        }
+        if (ok) {
+            ok = EXTERNAL_RADIO_SetDacEqCoefficients(b0, b1, a1, false);
+        }
     }
     if (ok) {
         ok = EXTERNAL_RADIO_SaveConfig();
@@ -595,35 +875,107 @@ static void handleSaveNrl()
 
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     if (ok && config != nullptr) {
-        ES8311_ApplyAudioConfig(config->mic_volume, config->line_out_volume, config->hp_drive_enabled);
+        if (s_server.hasArg("server_host") || s_server.hasArg("server_port")) {
+            Serial.printf("[CFG] NRL server saved via web: server=%s:%u\n",
+                          config->server_host,
+                          static_cast<unsigned>(config->server_port));
+        }
+        if (s_server.hasArg("channel") || s_server.hasArg("callsign") || s_server.hasArg("callsign_ssid")) {
+            Serial.printf("[CFG] Radio identity saved via web: channel=%u callsign=%s-%u\n",
+                          static_cast<unsigned>(config->channel),
+                          config->callsign,
+                          static_cast<unsigned>(config->callsign_ssid));
+        }
+        if (s_server.hasArg("mic_volume") || s_server.hasArg("line_out_volume")) {
+            Serial.printf("[CFG] Audio volume saved via web: mic_volume=%u line_out_volume=%u\n",
+                          static_cast<unsigned>(config->mic_volume),
+                          static_cast<unsigned>(config->line_out_volume));
+        }
+        if (s_server.hasArg("hp_drive_present")) {
+            Serial.printf("[CFG] ES8311 HP drive saved via web: hp_drive=%s\n",
+                          config->hp_drive_enabled ? "on" : "off");
+        }
+        if (s_server.hasArg("drc_present") ||
+            s_server.hasArg("drc_winsize") ||
+            s_server.hasArg("drc_maxlevel") ||
+            s_server.hasArg("drc_minlevel") ||
+            s_server.hasArg("dac_ramprate")) {
+            Serial.printf("[CFG] ES8311 DRC saved via web: enabled=%u winsize=%u maxlevel=%u minlevel=%u ramp=%u\n",
+                          config->drc_enabled ? 1u : 0u,
+                          static_cast<unsigned>(config->drc_winsize),
+                          static_cast<unsigned>(config->drc_maxlevel),
+                          static_cast<unsigned>(config->drc_minlevel),
+                          static_cast<unsigned>(config->dac_ramprate));
+        }
+        if (s_server.hasArg("dac_eq_bypass_present") ||
+            s_server.hasArg("daceq_b0") ||
+            s_server.hasArg("daceq_b1") ||
+            s_server.hasArg("daceq_a1")) {
+            Serial.printf("[CFG] ES8311 EQ saved via web: bypass=%u b0=%lu b1=%lu a1=%lu\n",
+                          config->dac_eq_bypass ? 1u : 0u,
+                          static_cast<unsigned long>(config->daceq_b0),
+                          static_cast<unsigned long>(config->daceq_b1),
+                          static_cast<unsigned long>(config->daceq_a1));
+        }
+        ES8311_ApplyAudioConfig(config->mic_volume,
+                                config->line_out_volume,
+                                config->hp_drive_enabled,
+                                config->drc_enabled,
+                                config->drc_winsize,
+                                config->drc_maxlevel,
+                                config->drc_minlevel,
+                                config->dac_ramprate,
+                                config->dac_eq_bypass,
+                                config->daceq_b0,
+                                config->daceq_b1,
+                                config->daceq_a1);
         const bool restart_udp = strcmp(old_server_host, config->server_host) != 0 ||
                                  old_server_port != config->server_port;
         if (restart_udp) {
+            Serial.printf("[CFG] server address changed, rebuilding UDP connection to %s:%u\n",
+                          config->server_host, static_cast<unsigned>(config->server_port));
             NRLAudioBridge_ApplyConfig(false, true);
         }
+    } else if (!ok) {
+        Serial.println("[CFG] NRL config save via web failed (invalid params or EEPROM write error)");
     }
+
+    const bool audio_request = s_server.hasArg("mic_volume") ||
+                               s_server.hasArg("line_out_volume") ||
+                               s_server.hasArg("hp_drive_present") ||
+                               s_server.hasArg("drc_present") ||
+                               s_server.hasArg("drc_winsize") ||
+                               s_server.hasArg("drc_maxlevel") ||
+                               s_server.hasArg("drc_minlevel") ||
+                               s_server.hasArg("dac_ramprate") ||
+                               s_server.hasArg("dac_eq_bypass_present") ||
+                               s_server.hasArg("daceq_b0") ||
+                               s_server.hasArg("daceq_b1") ||
+                               s_server.hasArg("daceq_a1");
 
     if (ok) {
         sendConfigPage("Applied",
-                       "NRL Saved",
-                       "nrlAppliedHeadline",
-                       "NRL, server, and audio settings were saved.",
-                       "nrlAppliedIntro",
+                       audio_request ? "Audio Settings Saved" : "NRL Saved",
+                       audio_request ? "audioHeadline" : "nrlAppliedHeadline",
+                       audio_request ? "Audio settings were saved." : "NRL settings were saved.",
+                       audio_request ? "audioIntro" : "nrlAppliedIntro",
                        "/save_nrl",
-                       buildDeviceSections(config),
+                       audio_request ? buildAudioSections(config) : buildDeviceSections(config),
                        false,
-                       true,
+                       !audio_request,
+                       audio_request,
                        "");
     } else {
         sendConfigPage("Error",
-                       "NRL Save Failed",
+                       audio_request ? "Audio Save Failed" : "NRL Save Failed",
                        "nrlErrorHeadline",
                        "Check server address, port, channel, callsign, SSID, and audio values.",
                        "nrlErrorIntro",
                        "/save_nrl",
-                       buildDeviceSections(config),
+                       audio_request ? buildAudioSections(config) : buildDeviceSections(config),
                        false,
-                       true,
+                       !audio_request,
+                       audio_request,
                        "");
     }
 }
@@ -633,63 +985,14 @@ static String buildUpdatePageI18n(const char *headline,
                                   const char *intro,
                                   const char *intro_key)
 {
-    String html = F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-                    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-                    "<title>Firmware Update</title>"
-                    "<style>"
-                    ":root{color-scheme:light;--bg:#eef2f5;--panel:#fff;--ink:#17202a;--muted:#5d6875;--line:#d8e0e8;--accent:#0f766e;--accent-2:#2457a6;}"
-                    "*{box-sizing:border-box;}body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif;font-size:15px;}"
-                    ".shell{max-width:1040px;margin:0 auto;padding:20px;}.topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px;}"
-                    "h1{margin:0;font-size:26px;line-height:1.18;letter-spacing:0;}.sub{margin:6px 0 0;color:var(--muted);font-size:14px;}.language{margin-top:12px;}.language .lang-label{display:block;margin:0 0 6px;font-weight:700;font-size:13px;}.language .lang-radio{display:flex;gap:14px;flex-wrap:wrap;}.language .lang-radio label{display:inline-flex;align-items:center;margin:0;font-weight:400;font-size:14px;cursor:pointer;}input[type=radio]{width:auto;min-height:0;margin-right:6px;}"
-                    ".status{display:grid;grid-template-columns:repeat(2,minmax(150px,1fr));gap:8px;min-width:320px;}.status div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;}.status span{display:block;color:var(--muted);font-size:12px;margin-bottom:3px;}"
-                    ".mono{font-family:Consolas,monospace;}.nav{display:flex;gap:8px;margin:0 0 14px;border-bottom:1px solid var(--line);}.nav a{display:inline-block;padding:10px 12px;text-decoration:none;color:var(--muted);border-bottom:3px solid transparent;font-weight:700;}.nav a.active{color:var(--accent);border-bottom-color:var(--accent);}"
-                    ".panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:14px;}h2{margin:0 0 12px;font-size:17px;letter-spacing:0;}label{display:block;margin:0 0 6px;font-weight:700;font-size:13px;}"
-                    "input,select{width:100%;min-height:40px;padding:9px 10px;border:1px solid #c5ced8;border-radius:6px;font-size:15px;background:#fff;color:var(--ink);}.actions{display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap;margin-top:16px;}"
-                    "button,.button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:10px 14px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;font-weight:700;text-decoration:none;cursor:pointer;}button:disabled{cursor:not-allowed;opacity:.6;}.button.secondary{background:#e8edf3;color:#17202a;border:1px solid var(--line);}.notice{border-left:4px solid var(--accent-2);padding:10px 12px;background:#edf4ff;color:#25364c;border-radius:4px;margin:0 0 14px;}"
-                    ".prog-wrap{margin-top:14px;}.prog-bar{height:14px;background:#e8edf3;border-radius:7px;overflow:hidden;border:1px solid var(--line);}.prog-bar>div{height:100%;width:0;background:var(--accent);transition:width .15s linear;}.prog-bar>div.done{background:#16a34a;}.prog-bar>div.failed{background:#b42318;}.prog-status{margin:8px 0 0;font-size:13px;font-weight:700;color:var(--ink);}"
-                    "@media(max-width:760px){.shell{padding:14px;}.topbar{display:block;}.status{grid-template-columns:1fr;min-width:0;margin-top:12px;}.actions{justify-content:stretch;}button,.button{width:100%;}}"
-                    "</style></head><body><main class=\"shell\"><div class=\"topbar\"><div><h1 data-i18n=\"");
-    html += headline_key;
-    html += F("\">");
-    html += headline;
-    html += F("</h1><p class=\"sub\" data-i18n=\"");
-    html += intro_key;
-    html += F("\">");
-    html += intro;
-    html += F("</p><div class=\"language\"><span class=\"lang-label\" data-i18n=\"language\">Language</span>"
-              "<div id=\"language-select\" class=\"lang-radio\">"
-              "<label><input type=\"radio\" name=\"lang\" value=\"en\">English</label>"
-              "<label><input type=\"radio\" name=\"lang\" value=\"zh\">中文</label>"
-              "</div></div>"
-              "</div><div class=\"status\"><div><span data-i18n=\"configAp\">Config AP</span><strong class=\"mono\">");
-    html += WiFi.softAPIP().toString();
-    html += F("</strong></div><div><span data-i18n=\"stationIp\">Station IP</span><strong class=\"mono\">");
-    html += (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("not connected");
-    html += F("</strong></div></div></div>"
-              "<nav class=\"nav\"><a href=\"/\" data-i18n=\"wifiConfig\">WiFi Config</a><a href=\"/nrl\" data-i18n=\"nrlConfig\">NRL Config</a><a class=\"active\" href=\"/update\" data-i18n=\"firmwareUpdate\">Firmware Update</a></nav>"
-              "<p class=\"notice\"><span data-i18n=\"firmwareVersion\">Firmware version</span> ");
-    html += NRL_FIRMWARE_VERSION;
-    html += F("</p><p class=\"notice\" data-i18n=\"otaNotice\">Select a firmware.bin file from support or from a trusted release. The device will reboot after a successful update.</p>"
-              "<section class=\"panel\"><h2 data-i18n=\"otaTitle\">WiFi Firmware Update</h2>"
-              "<form id=\"ota-form\" enctype=\"multipart/form-data\">"
-              "<input id=\"ota-file\" type=\"file\" name=\"firmware\" accept=\".bin,application/octet-stream\" required>"
-              "<div class=\"actions\"><button id=\"ota-submit\" type=\"submit\" data-i18n=\"uploadFirmware\">Upload firmware</button></div>"
-              "<div id=\"ota-progress\" class=\"prog-wrap\" hidden>"
-              "<div class=\"prog-bar\"><div id=\"ota-bar\"></div></div>"
-              "<p id=\"ota-status\" class=\"prog-status\"></p>"
-              "</div>"
-              "</form></section></main><script>"
-              "const translations={en:{language:'Language',wifiConfig:'WiFi Config',nrlConfig:'NRL Config',firmwareUpdate:'Firmware Update',configAp:'Config AP',stationIp:'Station IP',firmwareVersion:'Firmware version',updateHeadline:'Firmware Update',updateIntro:'Upload a firmware file over this WiFi connection.',updateDoneHeadline:'Update Complete',updateDoneIntro:'Firmware was written successfully. Rebooting shortly.',updateFailHeadline:'Update Failed',updateFailIntro:'Firmware upload failed. Check that the file is a valid firmware.bin.',otaNotice:'Select a firmware.bin file from support or from a trusted release. The device will reboot after a successful update.',otaTitle:'WiFi Firmware Update',uploadFirmware:'Upload firmware',otaUploading:'Uploading firmware...',otaInstalling:'Installing firmware, please wait...',otaDone:'Update complete. Device is rebooting.',otaRebooting:'Waiting for device to come back online...',otaRebooted:'Device is back online. Update finished.',otaRebootTimeout:'Could not reach the device. Please check it manually.',otaFailed:'Update failed. Please try again.'},zh:{language:'语言',wifiConfig:'WiFi配置',nrlConfig:'NRL配置',firmwareUpdate:'固件升级',configAp:'配置热点',stationIp:'联网地址',firmwareVersion:'固件版本',updateHeadline:'固件升级',updateIntro:'通过当前 WiFi 配置页面上传固件文件。',updateDoneHeadline:'升级完成',updateDoneIntro:'固件写入成功，设备即将重启。',updateFailHeadline:'升级失败',updateFailIntro:'固件上传失败，请确认文件是有效的 firmware.bin。',otaNotice:'请选择来自官方发布或售后支持的 firmware.bin 文件。升级成功后设备会自动重启。',otaTitle:'WiFi固件升级',uploadFirmware:'上传固件',otaUploading:'正在上传固件...',otaInstalling:'正在升级，请稍候...',otaDone:'升级完成，设备正在重启。',otaRebooting:'正在等待设备重新启动...',otaRebooted:'设备已重启完成，升级成功。',otaRebootTimeout:'无法连接到设备，请手动检查。',otaFailed:'升级失败，请重试。'}};"
-              "function lang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}"
-              "function t(k){const l=lang();return (translations[l]&&translations[l][k])||translations.en[k]||k;}"
-              "function applyLanguage(l){localStorage.setItem('nrl_lang',l);document.documentElement.lang=l==='zh'?'zh-CN':'en';document.querySelectorAll('input[name=\"lang\"]').forEach((r)=>{r.checked=(r.value===l);});document.querySelectorAll('[data-i18n]').forEach((el)=>{const k=el.getAttribute('data-i18n');if(translations[l]&&translations[l][k])el.textContent=translations[l][k];});if(otaCurrentKey){setOta(otaCurrentKey,otaCurrentPct);}}"
-              "let otaCurrentKey=null,otaCurrentPct=null;"
-              "const otaForm=document.getElementById('ota-form'),otaFile=document.getElementById('ota-file'),otaSubmit=document.getElementById('ota-submit'),otaProgress=document.getElementById('ota-progress'),otaBar=document.getElementById('ota-bar'),otaStatus=document.getElementById('ota-status');"
-              "function setOta(k,p){otaCurrentKey=k;otaCurrentPct=(p==null?null:p);otaStatus.removeAttribute('data-i18n');otaStatus.textContent=(p==null)?t(k):(t(k)+' '+p+'%');}"
-              "function pollAlive(){let n=0;const max=30;const tick=()=>{if(n>=max){setOta('otaRebootTimeout',null);return;}n++;const c=new AbortController();const tm=setTimeout(()=>c.abort(),1500);fetch('/ping?_='+Date.now(),{cache:'no-store',signal:c.signal}).then((r)=>{clearTimeout(tm);if(r.ok){setOta('otaRebooted',null);}else{setTimeout(tick,2000);}}).catch(()=>{clearTimeout(tm);setTimeout(tick,2000);});};setTimeout(tick,3000);}"
-              "if(otaForm){otaForm.addEventListener('submit',function(e){e.preventDefault();const f=otaFile.files&&otaFile.files[0];if(!f)return;otaSubmit.disabled=true;otaProgress.hidden=false;otaBar.classList.remove('done','failed');otaBar.style.width='0%';setOta('otaUploading',0);const fd=new FormData();fd.append('firmware',f);const xhr=new XMLHttpRequest();xhr.upload.onprogress=function(ev){if(ev.lengthComputable){const pct=Math.floor(ev.loaded*100/ev.total);otaBar.style.width=pct+'%';setOta('otaUploading',pct);}};xhr.upload.onload=function(){otaBar.style.width='100%';setOta('otaInstalling',null);};xhr.onload=function(){if(xhr.status===200){otaBar.style.width='100%';otaBar.classList.add('done');setOta('otaRebooting',null);pollAlive();}else{otaBar.classList.add('failed');setOta('otaFailed',null);otaSubmit.disabled=false;}};xhr.onerror=function(){otaBar.classList.add('failed');setOta('otaFailed',null);otaSubmit.disabled=false;};xhr.open('POST','/update');xhr.send(fd);});}"
-              "applyLanguage(lang());document.querySelectorAll('input[name=\"lang\"]').forEach((r)=>{r.addEventListener('change',function(){if(this.checked)applyLanguage(this.value);});});"
-              "</script></body></html>");
+    String html = String(kWifiUpdatePortalHtmlTemplate);
+    replaceToken(html, "{{HEADLINE}}", headline);
+    replaceToken(html, "{{HEADLINE_KEY}}", headline_key);
+    replaceToken(html, "{{INTRO}}", intro);
+    replaceToken(html, "{{INTRO_KEY}}", intro_key);
+    replaceToken(html, "{{AP_IP}}", WiFi.softAPIP().toString());
+    replaceToken(html, "{{STA_IP}}", (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("not connected"));
+    replaceToken(html, "{{VERSION}}", NRL_FIRMWARE_VERSION);
     return html;
 }
 
@@ -793,12 +1096,14 @@ static void ensureServerRunning()
 
     s_server.on("/", HTTP_GET, handleRoot);
     s_server.on("/nrl", HTTP_GET, handleNrlPage);
+    s_server.on("/audio", HTTP_GET, handleAudioPage);
     s_server.on("/scan", HTTP_GET, handleScan);
     s_server.on("/save_wifi", HTTP_POST, handleSaveWifi);
     s_server.on("/save_nrl", HTTP_POST, handleSaveNrl);
     s_server.on("/update", HTTP_GET, handleUpdatePage);
     s_server.on("/update", HTTP_POST, handleUpdateFinished, handleUpdateUpload);
     s_server.on("/ping", HTTP_GET, handlePing);
+    s_server.on("/favicon.ico", HTTP_GET, handleFavicon);
     s_server.on("/generate_204", HTTP_GET, handleGenerate204);
     s_server.on("/hotspot-detect.html", HTTP_GET, handleHotspotDetect);
     s_server.on("/connecttest.txt", HTTP_GET, handleConnectTest);
@@ -854,3 +1159,4 @@ void WifiConfigPortal_EnterFallbackMode(void)
                   buildApSsid().c_str(),
                   WiFi.softAPIP().toString().c_str());
 }
+

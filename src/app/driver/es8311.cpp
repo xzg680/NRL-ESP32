@@ -82,6 +82,18 @@ enum : uint8_t {
     ES8311_REG35_DAC = 0x35,
     ES8311_REG36_DAC = 0x36,
     ES8311_REG37_DAC = 0x37,
+    ES8311_REG38_DACEQ = 0x38,
+    ES8311_REG39_DACEQ = 0x39,
+    ES8311_REG3A_DACEQ = 0x3A,
+    ES8311_REG3B_DACEQ = 0x3B,
+    ES8311_REG3C_DACEQ = 0x3C,
+    ES8311_REG3D_DACEQ = 0x3D,
+    ES8311_REG3E_DACEQ = 0x3E,
+    ES8311_REG3F_DACEQ = 0x3F,
+    ES8311_REG40_DACEQ = 0x40,
+    ES8311_REG41_DACEQ = 0x41,
+    ES8311_REG42_DACEQ = 0x42,
+    ES8311_REG43_DACEQ = 0x43,
     ES8311_REG44_GPIO = 0x44,
     ES8311_REG45_GP = 0x45,
 };
@@ -105,7 +117,10 @@ constexpr uint8_t kEs8311PowerUpDac = 0x00;
 constexpr uint8_t kEs8311OutputDriveLine = 0x00; // REG13: HPSW=0 bit6=0
 constexpr uint8_t kEs8311OutputDriveHp = 0x10;   // REG13: HPSW=1 bit6=0
 constexpr uint8_t kEs8311AdcEqBypass = 0x6A;
-constexpr uint8_t kEs8311DacEqBypass = 0x08;     // REG37: EQ bypass, no soft ramp
+constexpr uint8_t kDefaultDrcWinsize = 0x00;
+constexpr uint8_t kDefaultDrcLevel = 0x00;
+constexpr uint8_t kDefaultDacRamprate = 0x00;
+constexpr uint32_t kDacEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint8_t kEs8311DacUnmute = 0x00;
 
 struct Es8311ClockConfig {
@@ -140,6 +155,15 @@ static uint32_t s_last_output_queue_log_ms = 0;
 static uint8_t s_mic_volume = kEs8311AdcVolumeDefault;
 static uint8_t s_line_out_volume = 0xFF;
 static bool s_hp_drive_enabled = false;
+static bool s_drc_enabled = false;
+static uint8_t s_drc_winsize = kDefaultDrcWinsize;
+static uint8_t s_drc_maxlevel = kDefaultDrcLevel;
+static uint8_t s_drc_minlevel = kDefaultDrcLevel;
+static uint8_t s_dac_ramprate = kDefaultDacRamprate;
+static bool s_dac_eq_bypass = true;
+static uint32_t s_daceq_b0 = 0U;
+static uint32_t s_daceq_b1 = 0U;
+static uint32_t s_daceq_a1 = 0U;
 
 static bool es8311_write_reg(uint8_t reg, uint8_t value) {
     bool ok = false;
@@ -304,6 +328,47 @@ static uint8_t es8311_output_drive_reg(void) {
         return 0x10;
     }
     return 0x00;
+}
+
+static uint8_t es8311_drc_reg34(void)
+{
+    return static_cast<uint8_t>((s_drc_enabled ? 0x80u : 0x00u) |
+                                (s_drc_winsize & 0x0Fu));
+}
+
+static uint8_t es8311_drc_reg35(void)
+{
+    return static_cast<uint8_t>(((s_drc_maxlevel & 0x0Fu) << 4) |
+                                (s_drc_minlevel & 0x0Fu));
+}
+
+static uint8_t es8311_dac_reg37(void)
+{
+    return static_cast<uint8_t>(((s_dac_ramprate & 0x0Fu) << 4) |
+                                (s_dac_eq_bypass ? 0x08u : 0x00u));
+}
+
+static bool es8311_apply_drc_config(void)
+{
+    return es8311_write_reg(ES8311_REG34_DAC, es8311_drc_reg34()) &&
+           es8311_write_reg(ES8311_REG35_DAC, es8311_drc_reg35()) &&
+           es8311_write_reg(ES8311_REG37_DAC, es8311_dac_reg37());
+}
+
+static bool es8311_write_daceq_coeff(const uint8_t first_reg, const uint32_t value)
+{
+    const uint32_t coeff = value & kDacEqCoefficientMask;
+    return es8311_write_reg(first_reg, static_cast<uint8_t>((coeff >> 24) & 0x3Fu)) &&
+           es8311_write_reg(static_cast<uint8_t>(first_reg + 1U), static_cast<uint8_t>((coeff >> 16) & 0xFFu)) &&
+           es8311_write_reg(static_cast<uint8_t>(first_reg + 2U), static_cast<uint8_t>((coeff >> 8) & 0xFFu)) &&
+           es8311_write_reg(static_cast<uint8_t>(first_reg + 3U), static_cast<uint8_t>(coeff & 0xFFu));
+}
+
+static bool es8311_apply_daceq_coefficients(void)
+{
+    return es8311_write_daceq_coeff(ES8311_REG38_DACEQ, s_daceq_b0) &&
+           es8311_write_daceq_coeff(ES8311_REG3C_DACEQ, s_daceq_b1) &&
+           es8311_write_daceq_coeff(ES8311_REG40_DACEQ, s_daceq_a1);
 }
 
 static bool es8311_config_dac_output_path(const uint8_t reg12,
@@ -502,8 +567,8 @@ static bool es8311_configure_codec(void) {
         Serial.println("[ES8311] REG15 ADC ramp rate failed");
         return false;
     }
-    if (!es8311_write_reg(ES8311_REG37_DAC, kEs8311DacEqBypass)) {
-        Serial.println("[ES8311] REG37 DAC EQ failed");
+    if (!es8311_apply_drc_config() || !es8311_apply_daceq_coefficients()) {
+        Serial.println("[ES8311] DAC DRC/EQ config failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG45_GP, 0x00)) {
@@ -943,16 +1008,45 @@ void ES8311_ClearOutputQueue(void) {
     output_queue_clear();
 }
 
-bool ES8311_ApplyAudioConfig(const uint8_t mic_volume, const uint8_t line_out_volume, const bool hp_drive_enabled) {
+bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
+                             const uint8_t line_out_volume,
+                             const bool hp_drive_enabled,
+                             const bool drc_enabled,
+                             const uint8_t drc_winsize,
+                             const uint8_t drc_maxlevel,
+                             const uint8_t drc_minlevel,
+                             const uint8_t dac_ramprate,
+                             const bool dac_eq_bypass,
+                             const uint32_t daceq_b0,
+                             const uint32_t daceq_b1,
+                             const uint32_t daceq_a1) {
     s_mic_volume = mic_volume;
     s_line_out_volume = line_out_volume;
     s_hp_drive_enabled = hp_drive_enabled;
+    s_drc_enabled = drc_enabled;
+    s_drc_winsize = drc_winsize & 0x0Fu;
+    s_drc_maxlevel = drc_maxlevel & 0x0Fu;
+    s_drc_minlevel = drc_minlevel & 0x0Fu;
+    s_dac_ramprate = dac_ramprate & 0x0Fu;
+    s_dac_eq_bypass = dac_eq_bypass;
+    s_daceq_b0 = daceq_b0 & kDacEqCoefficientMask;
+    s_daceq_b1 = daceq_b1 & kDacEqCoefficientMask;
+    s_daceq_a1 = daceq_a1 & kDacEqCoefficientMask;
 
     if (!s_es8311_ready) {
-        Serial.printf("[ES8311] audio config pending: mic=0x%02X line_out=0x%02X hp_drive=%u\n",
+        Serial.printf("[ES8311] audio config pending: mic=0x%02X line_out=0x%02X hp_drive=%u drc=%u,%u,%u,%u ramp=%u eq_bypass=%u eq=%lu,%lu,%lu\n",
                       static_cast<unsigned>(s_mic_volume),
                       static_cast<unsigned>(s_line_out_volume),
-                      s_hp_drive_enabled ? 1u : 0u);
+                      s_hp_drive_enabled ? 1u : 0u,
+                      s_drc_enabled ? 1u : 0u,
+                      static_cast<unsigned>(s_drc_winsize),
+                      static_cast<unsigned>(s_drc_maxlevel),
+                      static_cast<unsigned>(s_drc_minlevel),
+                      static_cast<unsigned>(s_dac_ramprate),
+                      s_dac_eq_bypass ? 1u : 0u,
+                      static_cast<unsigned long>(s_daceq_b0),
+                      static_cast<unsigned long>(s_daceq_b1),
+                      static_cast<unsigned long>(s_daceq_a1));
         return true;
     }
 
@@ -961,12 +1055,23 @@ bool ES8311_ApplyAudioConfig(const uint8_t mic_volume, const uint8_t line_out_vo
         es8311_config_dac_output_path(kEs8311PowerUpDac,
                                       es8311_output_drive_reg(),
                                       kEs8311DacUnmute,
-                                      s_line_out_volume);
+                                      s_line_out_volume) &&
+        es8311_apply_drc_config() &&
+        es8311_apply_daceq_coefficients();
     if (!ok) {
-        Serial.printf("[ES8311] audio config apply failed: mic=0x%02X line_out=0x%02X hp_drive=%u\n",
+        Serial.printf("[ES8311] audio config apply failed: mic=0x%02X line_out=0x%02X hp_drive=%u drc=%u,%u,%u,%u ramp=%u eq_bypass=%u eq=%lu,%lu,%lu\n",
                       static_cast<unsigned>(s_mic_volume),
                       static_cast<unsigned>(s_line_out_volume),
-                      s_hp_drive_enabled ? 1u : 0u);
+                      s_hp_drive_enabled ? 1u : 0u,
+                      s_drc_enabled ? 1u : 0u,
+                      static_cast<unsigned>(s_drc_winsize),
+                      static_cast<unsigned>(s_drc_maxlevel),
+                      static_cast<unsigned>(s_drc_minlevel),
+                      static_cast<unsigned>(s_dac_ramprate),
+                      s_dac_eq_bypass ? 1u : 0u,
+                      static_cast<unsigned long>(s_daceq_b0),
+                      static_cast<unsigned long>(s_daceq_b1),
+                      static_cast<unsigned long>(s_daceq_a1));
     }
     return ok;
 }
