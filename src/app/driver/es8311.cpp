@@ -112,7 +112,7 @@ constexpr uint8_t kEs8311ClockEnableAll = 0x3F;
 constexpr uint8_t kEs8311AnalogMicPgaEnable = 0x1A; // mic gain from test.cpp
 constexpr uint8_t kEs8311AdcGainScaleUp = 0x24;
 constexpr uint8_t kEs8311AdcVolumeDefault = 0xBF;  // reference es8311_start: REG17 = 0xBF
-constexpr uint8_t kEs8311DacVolumeDefault = 0xFF; // max DAC volume for the attenuated radio MIC path
+constexpr uint8_t kEs8311DacVolumeDefault = 180U;
 // REG0D bits: PDN_ANA(7) PDN_IBIASGEN(6) PDN_ADCBIASGEN(5) PDN_ADCVERFGEN(4)
 //             PDN_DACVREFGEN(3) PDN_VREF(2) VMIDSEL(1:0)
 // NOTE: PDN_VREF (bit 2) has REVERSE polarity vs other PDN bits!
@@ -165,7 +165,7 @@ static size_t s_output_queue_count = 0;
 static SemaphoreHandle_t s_output_queue_mutex = nullptr;
 static uint32_t s_last_output_queue_log_ms = 0;
 static uint8_t s_mic_volume = kEs8311AdcVolumeDefault;
-static uint8_t s_line_out_volume = 0xFF;
+static uint8_t s_line_out_volume = kEs8311DacVolumeDefault;
 static bool s_hp_drive_enabled = false;
 static bool s_drc_enabled = false;
 static uint8_t s_drc_winsize = kDefaultDrcWinsize;

@@ -514,6 +514,10 @@ static void logIncomingVoicePacket(const size_t payload_size)
     if (!s_voice_stream_logged) {
         s_voice_stream_logged = true;
         s_last_voice_payload_size = payload_size;
+        const char *callsign = (s_remote_callsign[0] != '\0') ? s_remote_callsign : "UNKNOWN";
+        Serial.printf("[NRL] voice start: from=%s-%u\n",
+                      callsign,
+                      static_cast<unsigned>(s_remote_ssid));
         return;
     }
 

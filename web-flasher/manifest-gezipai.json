@@ -1,6 +1,6 @@
 {
   "name": "NRL ESP32 - 格子派",
-  "version": "0.0.6",
+  "version": "0.0.8",
   "new_install_prompt_erase": true,
   "builds": [
     {

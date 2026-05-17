@@ -159,10 +159,7 @@ extern "C" void STATUS_IO_Init(void)
 
 extern "C" void STATUS_IO_SetPttActive(const bool active)
 {
-    // On 格子派 "PTT active" means inbound network voice is being played out.
-    if (s_net_audio_active != active) {
-        Serial.printf("[IO] net_audio=%u\n", active ? 1u : 0u);
-    }
+    // On Gezipai, "PTT active" means inbound network voice is being played out.
     s_net_audio_active = active;
     writeLed(NRL_PIN_LED_AUDIO, active);
 }
