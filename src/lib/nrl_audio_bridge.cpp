@@ -83,10 +83,33 @@ uint32_t s_last_sci_poll_ms = 0u;
 
 constexpr uint32_t kWifiRetryBackoffMs = 30000u;
 constexpr uint8_t kWifiFallbackFailureThreshold = 3u;
+constexpr size_t kAtLogTextMax = 96u;
 
 static void initCpuId(void)
 {
     memset(s_cpu_id, 0, sizeof(s_cpu_id));
+}
+
+static void formatAtLogText(const uint8_t *payload,
+                            const size_t payload_size,
+                            char *out,
+                            const size_t out_size)
+{
+    if (out == nullptr || out_size == 0u) {
+        return;
+    }
+    out[0] = '\0';
+    if (payload == nullptr || payload_size <= 1u) {
+        return;
+    }
+
+    const size_t text_size = payload_size - 1u;
+    const size_t copy_size = (text_size < (out_size - 1u)) ? text_size : (out_size - 1u);
+    for (size_t i = 0; i < copy_size; ++i) {
+        const uint8_t ch = payload[i + 1u];
+        out[i] = (ch >= 0x20u && ch <= 0x7Eu) ? static_cast<char>(ch) : '.';
+    }
+    out[copy_size] = '\0';
 }
 
 static void updateRemoteIdentity(const uint8_t *packet, const size_t packet_size)
@@ -766,11 +789,13 @@ static void bridgeTask(void *)
                 } else if (packet_type == kNrlTypeSciTransparent) {
                     handleIncomingSciPayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeAtCommand) {
+                    char at_log_text[kAtLogTextMax] = {};
+                    formatAtLogText(payload, payload_size, at_log_text, sizeof(at_log_text));
                     Serial.printf("[NRL] at packet: from=%s-%u payload=%u data=%s\n",
                                   (s_remote_callsign[0] != '\0') ? s_remote_callsign : "UNKNOWN",
                                   static_cast<unsigned>(s_remote_ssid),
                                   static_cast<unsigned>(payload_size),
-                                  (payload_size > 1u) ? reinterpret_cast<const char *>(payload + 1u) : "");
+                                  at_log_text);
                     NrlAtCommandResult at_result = {};
                     NRL_AT_HandlePayload(payload, payload_size, NRL_AT_SOURCE_REMOTE, &at_result);
                     if (at_result.should_reply && at_result.payload_size > 0u) {
