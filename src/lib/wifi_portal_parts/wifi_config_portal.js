@@ -128,16 +128,12 @@ const translations = {
           el.textContent = translations[lang][key];
         }
       });
-      const firstOption = document.querySelector('#wifi-ssid-select option[value=""]');
-      if (firstOption) firstOption.textContent = t('selectWifi');
-    }
-
-    function applySelectedWifi() {
-      const select = document.getElementById('wifi-ssid-select');
-      const input = document.getElementById('wifi-ssid-input');
-      if (select.value) {
-        input.value = select.value;
-      }
+      document.querySelectorAll('[data-i18n-title]').forEach((el) => {
+        const key = el.getAttribute('data-i18n-title');
+        if (translations[lang] && translations[lang][key]) {
+          el.title = translations[lang][key];
+        }
+      });
     }
 
     function syncDhcpFields() {
@@ -241,17 +237,17 @@ const translations = {
 
     async function scanWifi() {
       const status = document.getElementById('scan-status');
-      const list = document.getElementById('wifi-ssid-select');
+      const list = document.getElementById('wifi-ssid-options');
       status.textContent = t('scanning');
       try {
         const res = await fetch('/scan', {cache: 'no-store'});
         if (!res.ok) throw new Error('scan failed');
         const items = await res.json();
-        list.innerHTML = '<option value="">' + t('selectWifi') + '</option>';
+        list.innerHTML = '';
         items.forEach((item) => {
           const opt = document.createElement('option');
           opt.value = item.ssid;
-          opt.textContent = item.label;
+          opt.label = item.label;
           list.appendChild(opt);
         });
         status.textContent = items.length ? (t('foundPrefix') + items.length + t('foundSuffix')) : t('noneFound');

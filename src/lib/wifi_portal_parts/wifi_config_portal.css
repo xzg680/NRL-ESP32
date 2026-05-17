@@ -25,8 +25,10 @@
     label{display:block;margin:0 0 6px;font-weight:700;font-size:13px;}
     input,select{width:100%;min-height:40px;padding:9px 10px;border:1px solid #c5ced8;border-radius:6px;font-size:15px;background:#fff;color:var(--ink);}
     input[type=checkbox]{width:auto;min-height:0;margin-right:8px;}
-    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:nowrap;}
     .row select{flex:1;min-width:220px;width:auto;}
+    .row input{flex:1;min-width:0;width:auto;}
+    .icon-btn{flex:0 0 auto;min-height:40px;width:44px;padding:0;font-size:18px;line-height:1;}
     .span-2{grid-column:1/-1;}
     .actions{display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap;margin-top:16px;}
     button,.button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:10px 14px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;font-weight:700;text-decoration:none;cursor:pointer;}

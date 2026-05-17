@@ -331,8 +331,9 @@ class ConfigRxCallbacks final : public BLECharacteristicCallbacks {
             return;
         }
 
-        const std::string value = characteristic->getValue();
-        appendCommandData(reinterpret_cast<const uint8_t *>(value.data()), value.size());
+        // arduino-esp32 3.x: BLECharacteristic::getValue() returns Arduino String.
+        const String value = characteristic->getValue();
+        appendCommandData(reinterpret_cast<const uint8_t *>(value.c_str()), value.length());
     }
 };
 

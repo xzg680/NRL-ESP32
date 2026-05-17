@@ -22,6 +22,10 @@ void setup()
     Serial.begin(115200);
     delay(200);
     Serial.println(NRL_FIRMWARE_BANNER " startup");
+    Serial.printf("[BOOT] flash=%u bytes psram=%u bytes (psram %s)\n",
+                  static_cast<unsigned>(ESP.getFlashChipSize()),
+                  static_cast<unsigned>(ESP.getPsramSize()),
+                  ESP.getPsramSize() > 0 ? "OK" : "absent");
 
     EXTERNAL_RADIO_Init();
     if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {

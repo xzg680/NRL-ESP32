@@ -35,6 +35,19 @@ bool s_update_reboot_pending = false;
 unsigned long s_boot_press_started_ms = 0UL;
 unsigned long s_update_reboot_at_ms = 0UL;
 
+// Cached WiFi scan results. The scan runs once before the config AP starts
+// (no portal client connected yet, so the channel-hopping scan disturbs
+// nobody); the portal then serves this cache and never does a live scan,
+// which would otherwise drop the connected client.
+struct WifiScanEntry {
+    String ssid;
+    int32_t rssi;
+};
+const size_t kWifiScanCacheMax = 24u;
+WifiScanEntry s_wifi_scan_cache[kWifiScanCacheMax];
+int s_wifi_scan_count = 0;
+bool s_wifi_prescan_done = false;
+
 constexpr byte kDnsPort = 53;
 constexpr unsigned long kBootResetHoldMs = 5000UL;
 constexpr unsigned long kApCloseDelayMs = 5000UL;
@@ -209,6 +222,37 @@ static void handleFavicon()
     s_server.send(204, "image/x-icon", "");
 }
 
+// Scan nearby WiFi and store the result in s_wifi_scan_cache.
+static void performWifiPrescan()
+{
+    Serial.println("[CFG] pre-scanning WiFi before AP start...");
+    const int found = WiFi.scanNetworks(false /*async*/, true /*show_hidden*/);
+    s_wifi_scan_count = 0;
+    for (int i = 0; i < found && static_cast<size_t>(s_wifi_scan_count) < kWifiScanCacheMax; ++i) {
+        const String ssid = WiFi.SSID(i);
+        if (ssid.length() == 0) {
+            continue;
+        }
+        bool duplicate = false;
+        for (int j = 0; j < s_wifi_scan_count; ++j) {
+            if (s_wifi_scan_cache[j].ssid == ssid) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+        s_wifi_scan_cache[s_wifi_scan_count].ssid = ssid;
+        s_wifi_scan_cache[s_wifi_scan_count].rssi = WiFi.RSSI(i);
+        ++s_wifi_scan_count;
+    }
+    if (found >= 0) {
+        WiFi.scanDelete();
+    }
+    Serial.printf("[CFG] pre-scan cached %d WiFi networks\n", s_wifi_scan_count);
+}
+
 static void ensureApRunning()
 {
     if (!s_ap_should_run || s_ap_started) {
@@ -216,6 +260,17 @@ static void ensureApRunning()
     }
 
     WiFi.persistent(false);
+
+    // First time the config AP comes up: scan nearby WiFi while no portal
+    // client is connected yet, and cache it. The page then shows the list
+    // immediately and never needs a live scan (which would drop the client).
+    if (!s_wifi_prescan_done) {
+        s_wifi_prescan_done = true;
+        WiFi.mode(WIFI_STA);
+        delay(100);
+        performWifiPrescan();
+    }
+
     const wifi_mode_t mode = WiFi.getMode();
     if (mode != WIFI_MODE_AP && mode != WIFI_MODE_APSTA) {
         // Stay in plain AP at boot so BLE coexistence init in BLEConfig_Init
@@ -300,24 +355,6 @@ static void manageApLifecycle()
     }
 }
 
-static bool ensureScanReady()
-{
-    const wifi_mode_t mode = WiFi.getMode();
-    if (mode != WIFI_MODE_APSTA && mode != WIFI_MODE_STA) {
-        WiFi.mode(WIFI_AP_STA);
-        delay(120);
-    }
-
-    return WiFi.getMode() == WIFI_MODE_APSTA || WiFi.getMode() == WIFI_MODE_STA;
-}
-
-static void restoreApOnlyAfterScan()
-{
-    if (WiFi.getMode() == WIFI_MODE_APSTA) {
-        WiFi.scanDelete();
-    }
-}
-
 static void pollBootResetGesture()
 {
     const bool pressed = digitalRead(NRL_PIN_BOOT_BUTTON) == LOW;
@@ -366,9 +403,21 @@ static String buildNetworkSection(const ExternalRadioConfig *config)
                     "<span class=\"hint\" id=\"scan-status\" data-i18n=\"scanIdle\">Click Scan to find nearby WiFi networks.</span>"
                     "</div>"
                     "<div class=\"grid\">"
-                    "<form class=\"item-form span-2\" method=\"post\" action=\"/save_wifi\"><div class=\"subgrid\"><div><label data-i18n=\"wifiSsid\">WiFi SSID</label><input id=\"wifi-ssid-input\" name=\"wifi_ssid\" value=\"");
+                    "<form class=\"item-form span-2\" method=\"post\" action=\"/save_wifi\"><div class=\"subgrid\">"
+                    "<div><label data-i18n=\"wifiSsid\">WiFi SSID</label><div class=\"row\">"
+                    "<input id=\"wifi-ssid-input\" name=\"wifi_ssid\" list=\"wifi-ssid-options\" autocomplete=\"off\" value=\"");
     html += htmlEscape(config->wifi_ssid);
-    html += F("\" autocomplete=\"off\"></div>"
+    html += F("\"><button class=\"secondary btn-small icon-btn\" type=\"button\" onclick=\"scanWifi()\" data-i18n-title=\"scan\" title=\"Scan\" aria-label=\"Scan\">&#x21BB;</button>"
+              "</div><datalist id=\"wifi-ssid-options\">");
+    for (int i = 0; i < s_wifi_scan_count; ++i) {
+        const String escaped = htmlEscape(s_wifi_scan_cache[i].ssid.c_str());
+        html += F("<option value=\"");
+        html += escaped;
+        html += F("\" label=\"(");
+        html += String(s_wifi_scan_cache[i].rssi);
+        html += F(" dBm)\"></option>");
+    }
+    html += F("</datalist></div>"
               "<div><label data-i18n=\"wifiPassword\">WiFi Password</label><input name=\"wifi_password\" value=\"");
     html += htmlEscape(config->wifi_password);
     html += F("\"></div></div><div class=\"actions\"><button class=\"btn-small\" type=\"submit\" data-i18n=\"saveItem\">Save</button></div></form>"
@@ -390,12 +439,6 @@ static String buildNetworkSection(const ExternalRadioConfig *config)
               "<div><label>WiFi DNS</label><input class=\"wifi-static-field\" name=\"wifi_dns\" value=\"");
     html += wifiDisplayIp(config, config->wifi_dns, WiFi.dnsIP());
     html += F("\"></div></div><div class=\"actions\"><button class=\"btn-small\" type=\"submit\" data-i18n=\"saveItem\">Save</button></div></form>"
-              "<div class=\"span-2\"><label data-i18n=\"nearbyWifi\">Nearby WiFi</label><div class=\"row\">"
-              "<select id=\"wifi-ssid-select\" onchange=\"applySelectedWifi()\">"
-              "<option value=\"\" data-i18n=\"selectWifi\">Select detected WiFi...</option>"
-              "</select>"
-              "<button class=\"secondary btn-small\" type=\"button\" onclick=\"scanWifi()\" data-i18n=\"scan\">Scan</button>"
-              "</div></div>"
               "</div>"
               "</section>");
     return html;
@@ -574,47 +617,23 @@ static void handleAudioPage()
 
 static void handleScan()
 {
-    if (!ensureScanReady()) {
-        s_server.send(500, "application/json; charset=utf-8", "[]");
-        return;
-    }
-
-    int scan_count = WiFi.scanComplete();
-    if (scan_count == WIFI_SCAN_RUNNING) {
-        WiFi.scanDelete();
-        scan_count = WIFI_SCAN_FAILED;
-    }
-
-    if (scan_count < 0) {
-        scan_count = WiFi.scanNetworks(false, true);
-    }
-
+    // Serve the cache captured before the AP started. No live scan -- a live
+    // scan hops channels and drops the portal client that is connected now.
     String json = "[";
-    bool first = true;
-
-    for (int i = 0; i < scan_count; ++i) {
-        const String ssid = WiFi.SSID(i);
-        if (ssid.length() == 0) {
-            continue;
-        }
-
-        if (!first) {
+    for (int i = 0; i < s_wifi_scan_count; ++i) {
+        if (i != 0) {
             json += ",";
         }
-        first = false;
-
-        const String escaped_ssid = jsonEscape(ssid);
+        const String escaped_ssid = jsonEscape(s_wifi_scan_cache[i].ssid);
         json += "{\"ssid\":\"";
         json += escaped_ssid;
         json += "\",\"label\":\"";
         json += escaped_ssid;
         json += " (";
-        json += String(WiFi.RSSI(i));
+        json += String(s_wifi_scan_cache[i].rssi);
         json += " dBm)\"}";
     }
-
     json += "]";
-    restoreApOnlyAfterScan();
     s_server.send(200, "application/json; charset=utf-8", json);
 }
 

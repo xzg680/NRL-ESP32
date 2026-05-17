@@ -35,12 +35,14 @@ jobs:
             ~/.cache/pip
             ~/.platformio/.cache
             ~/.platformio/packages
-          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini', 'part.csv') }}
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini', 'part.csv', 'part-gezipai.csv') }}
           restore-keys: |
             ${{ runner.os }}-pio-
 
       - name: Install PlatformIO
-        run: python -m pip install --upgrade platformio
+        # click<8.2 pin: pioarduino's esptool 5.0.0 is incompatible with the
+        # click 8.2+ get_metavar() signature change.
+        run: python -m pip install --upgrade platformio "click<8.2"
 
       - name: Resolve firmware version
         id: ver
