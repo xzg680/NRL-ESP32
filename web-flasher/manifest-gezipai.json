@@ -1,0 +1,28 @@
+{
+  "name": "NRL ESP32 - 格子派",
+  "version": "0.0.2",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "firmware/gezipai/bootloader.bin",
+          "offset": 0
+        },
+        {
+          "path": "firmware/gezipai/partitions.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/gezipai/boot_app0.bin",
+          "offset": 57344
+        },
+        {
+          "path": "firmware/gezipai/firmware.bin",
+          "offset": 65536
+        }
+      ]
+    }
+  ]
+}

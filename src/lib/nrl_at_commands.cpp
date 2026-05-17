@@ -195,7 +195,6 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendUnsignedLine(payload, capacity, used, "L_PORT", (config != nullptr) ? config->local_port : 0u) &&
            appendKeyValueLine(payload, capacity, used, "CALL", (config != nullptr) ? config->callsign : "") &&
            appendUnsignedLine(payload, capacity, used, "SSID", (config != nullptr) ? config->callsign_ssid : 0u) &&
-           appendUnsignedLine(payload, capacity, used, "MODE", (config != nullptr) ? config->device_mode : 0u) &&
            appendUnsignedLine(payload, capacity, used, "MIC_GAIN", (config != nullptr) ? config->mic_volume : 0u) &&
            appendUnsignedLine(payload, capacity, used, "VOLUME", (config != nullptr) ? config->line_out_volume : 0u) &&
            appendKeyValueLine(payload, capacity, used, "HP_DRIVE", hp_drive) &&
@@ -391,7 +390,6 @@ static bool appendAllConfigLines(NrlAtCommandResult *result)
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "L_PORT", config->local_port) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "CALL", config->callsign) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "SSID", config->callsign_ssid) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MODE", config->device_mode) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", config->mic_volume) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOLUME", config->line_out_volume) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", config->hp_drive_enabled ? "ON" : "OFF");
@@ -656,22 +654,6 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "SSID", EXTERNAL_RADIO_GetConfig()->callsign_ssid);
-        return;
-    }
-
-    if (stringEqualsIgnoreCase(command.command, "MODE") ||
-        stringEqualsIgnoreCase(command.command, "DEVICE_MODE")) {
-        if (is_query) {
-            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MODE", config->device_mode);
-            return;
-        }
-        unsigned long value = 0u;
-        if (!parseUnsignedValue(command.value, &value) || value > 255u ||
-            !EXTERNAL_RADIO_SetDeviceMode(static_cast<uint8_t>(value), true)) {
-            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "MODE");
-            return;
-        }
-        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MODE", EXTERNAL_RADIO_GetConfig()->device_mode);
         return;
     }
 

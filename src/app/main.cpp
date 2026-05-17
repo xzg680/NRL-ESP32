@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_log.h>
 
 #include "../lib/ble_config.h"
 #include "../lib/nrl_audio_bridge.h"
@@ -21,6 +22,10 @@ void setup()
 {
     Serial.begin(115200);
     delay(200);
+    // The IDF gpio driver logs every gpio_config() at INFO level; the
+    // bit-bang I2C reconfigures SDA/SCL constantly and floods the console.
+    // Silence the gpio tag (harmless on the pure-Arduino build too).
+    esp_log_level_set("gpio", ESP_LOG_WARN);
     Serial.println(NRL_FIRMWARE_BANNER " startup");
     Serial.printf("[BOOT] flash=%u bytes psram=%u bytes (psram %s)\n",
                   static_cast<unsigned>(ESP.getFlashChipSize()),

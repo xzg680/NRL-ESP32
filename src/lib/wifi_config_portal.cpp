@@ -405,19 +405,34 @@ static String buildNetworkSection(const ExternalRadioConfig *config)
                     "<div class=\"grid\">"
                     "<form class=\"item-form span-2\" method=\"post\" action=\"/save_wifi\"><div class=\"subgrid\">"
                     "<div><label data-i18n=\"wifiSsid\">WiFi SSID</label><div class=\"row\">"
-                    "<input id=\"wifi-ssid-input\" name=\"wifi_ssid\" list=\"wifi-ssid-options\" autocomplete=\"off\" value=\"");
-    html += htmlEscape(config->wifi_ssid);
-    html += F("\"><button class=\"secondary btn-small icon-btn\" type=\"button\" onclick=\"scanWifi()\" data-i18n-title=\"scan\" title=\"Scan\" aria-label=\"Scan\">&#x21BB;</button>"
-              "</div><datalist id=\"wifi-ssid-options\">");
+                    "<select id=\"wifi-ssid-select\" name=\"wifi_ssid\">"
+              "<option value=\"\" data-i18n=\"selectWifi\">Select detected WiFi...</option>");
+    bool current_ssid_found = false;
     for (int i = 0; i < s_wifi_scan_count; ++i) {
         const String escaped = htmlEscape(s_wifi_scan_cache[i].ssid.c_str());
         html += F("<option value=\"");
         html += escaped;
-        html += F("\" label=\"(");
+        if (strcmp(s_wifi_scan_cache[i].ssid.c_str(), config->wifi_ssid) == 0) {
+            current_ssid_found = true;
+            html += F("\" selected>");
+        } else {
+            html += F("\">");
+        }
+        html += escaped;
+        html += F(" (");
         html += String(s_wifi_scan_cache[i].rssi);
-        html += F(" dBm)\"></option>");
+        html += F(" dBm)</option>");
     }
-    html += F("</datalist></div>"
+    if (!current_ssid_found && config->wifi_ssid[0] != '\0') {
+        const String escaped = htmlEscape(config->wifi_ssid);
+        html += F("<option value=\"");
+        html += escaped;
+        html += F("\" selected>");
+        html += escaped;
+        html += F("</option>");
+    }
+    html += F("</select><button class=\"secondary btn-small icon-btn\" type=\"button\" onclick=\"scanWifi()\" data-i18n-title=\"scan\" title=\"Scan\" aria-label=\"Scan\">&#x21BB;</button>"
+              "</div></div>"
               "<div><label data-i18n=\"wifiPassword\">WiFi Password</label><input name=\"wifi_password\" value=\"");
     html += htmlEscape(config->wifi_password);
     html += F("\"></div></div><div class=\"actions\"><button class=\"btn-small\" type=\"submit\" data-i18n=\"saveItem\">Save</button></div></form>"
@@ -1178,4 +1193,3 @@ void WifiConfigPortal_EnterFallbackMode(void)
                   buildApSsid().c_str(),
                   WiFi.softAPIP().toString().c_str());
 }
-

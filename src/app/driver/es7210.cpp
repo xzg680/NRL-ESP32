@@ -229,18 +229,20 @@ bool ES7210_Init(void) {
         return false;
     }
 
-    // Read chip ID. A standard ES7210 returns FD=0x72, FE=0x10.
+    // Optional chip-ID probe. Not all ES7210 parts expose an ID at
+    // 0xFD/0xFE (reads then return 0xFF); that is harmless -- the functional
+    // register read-back below is the real proof the device is an ES7210.
     {
         uint8_t id1 = 0;
         uint8_t id0 = 0;
-        const bool ok1 = es7210_read_reg(ES7210_CHIP_ID1_REGFD, &id1);
-        const bool ok0 = es7210_read_reg(ES7210_CHIP_ID0_REGFE, &id0);
-        if (!ok1 || !ok0 || id1 != 0x72 || id0 != 0x10) {
-            Serial.printf("[ES7210] WARNING chip id mismatch: fd=%s0x%02X (expect 0x72) fe=%s0x%02X (expect 0x10)\n",
-                          ok1 ? "" : "ERR:", static_cast<unsigned>(id1),
-                          ok0 ? "" : "ERR:", static_cast<unsigned>(id0));
-        } else {
+        es7210_read_reg(ES7210_CHIP_ID1_REGFD, &id1);
+        es7210_read_reg(ES7210_CHIP_ID0_REGFE, &id0);
+        if (id1 == 0x72 && id0 == 0x10) {
             Serial.println("[ES7210] chip id ok (ES7210)");
+        } else {
+            Serial.printf("[ES7210] chip id regs fd=0x%02X fe=0x%02X (no id at 0xFD/0xFE; "
+                          "check the register dump below instead)\n",
+                          static_cast<unsigned>(id1), static_cast<unsigned>(id0));
         }
     }
 

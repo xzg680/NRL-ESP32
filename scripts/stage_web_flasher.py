@@ -13,6 +13,7 @@ BOOT_APP0_CANDIDATES = [
 
 # PlatformIO env name -> display name shown in the web flasher manifest.
 BOARDS = {
+    "gezipai_aec": "NRL ESP32 - 格子派 AEC",
     "gezipai": "NRL ESP32 - 格子派",
     "bh4tdv": "NRL ESP32 - BH4TDV 3188",
 }
@@ -80,8 +81,26 @@ def parse_version(args):
     return "0.0.0"
 
 
+def parse_boards(args):
+    selected = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--version":
+            skip_next = True
+            continue
+        if arg.startswith("--"):
+            continue
+        selected.append(arg)
+    return selected or list(BOARDS.keys())
+
+
 def main():
-    version = parse_version(sys.argv[1:])
+    args = sys.argv[1:]
+    version = parse_version(args)
+    boards = parse_boards(args)
 
     boot_app0 = find_boot_app0()
     if boot_app0 is None:
@@ -89,7 +108,12 @@ def main():
         return 1
 
     ok = True
-    for board, display_name in BOARDS.items():
+    for board in boards:
+        if board not in BOARDS:
+            print(f"[web-flasher] unknown board: {board}")
+            ok = False
+            continue
+        display_name = BOARDS[board]
         ok = stage_board(board, display_name, version, boot_app0) and ok
 
     if not ok:

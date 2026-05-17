@@ -90,6 +90,33 @@
       margin-right: 6px;
     }
 
+    .board-radio {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .board-radio label {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0;
+      padding: 8px 11px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg);
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    .board-radio input[type=radio] {
+      width: auto;
+      min-height: 0;
+      margin: 0;
+    }
+
     h1 {
       margin: 0 0 10px;
       font-size: clamp(28px, 6vw, 44px);
@@ -354,14 +381,15 @@
       <div class="install-text">
         <strong data-i18n="recommendedTitle">Recommended: automatic upgrade</strong>
         <p data-i18n="recommendedText">Use this when you just want to install the official firmware provided by this page. Connect the device with USB, click the button, choose the serial port, and follow the browser prompts.</p>
-        <label for="board-select" data-i18n="boardLabel">Board model</label>
-        <select id="board-select">
-          <option value="gezipai">格子派 (Gezipai)</option>
-          <option value="bh4tdv">BH4TDV 3188</option>
-        </select>
+        <span class="lang-label" data-i18n="boardLabel">Board model</span>
+        <div id="board-select" class="board-radio">
+          <label><input type="radio" name="board" value="gezipai_aec">格子派 AEC (Gezipai AEC)</label>
+          <label><input type="radio" name="board" value="gezipai">格子派 (Gezipai)</label>
+          <label><input type="radio" name="board" value="bh4tdv">BH4TDV 3188</label>
+        </div>
       </div>
-      <esp-web-install-button id="install-ewt" manifest="manifest-gezipai.json">
-        <button slot="activate" id="install-btn" data-i18n="installButton">Install firmware</button>
+      <esp-web-install-button id="install-ewt">
+        <button slot="activate" id="install-btn" data-i18n="installButton" disabled>Install firmware</button>
         <span slot="unsupported" data-i18n="unsupported">This browser does not support Web Serial. Use Chrome or Edge.</span>
       </esp-web-install-button>
     </section>
@@ -419,6 +447,7 @@
         installButton: "Install firmware",
         unsupported: "This browser does not support Web Serial. Use Chrome or Edge.",
         boardLabel: "Board model",
+        boardPlaceholder: "Select board model...",
         usbPreparing: "Preparing device...",
         usbErasing: "Erasing flash...",
         usbWriting: "Writing firmware...",
@@ -471,6 +500,7 @@
         installButton: "安装固件",
         unsupported: "当前浏览器不支持 Web Serial，请使用 Chrome 或 Edge。",
         boardLabel: "板子型号",
+        boardPlaceholder: "请选择板子型号...",
         usbPreparing: "正在准备设备...",
         usbErasing: "正在擦除 Flash...",
         usbWriting: "正在写入固件...",
@@ -546,19 +576,31 @@
     const usbBar = document.getElementById("usb-bar");
     const usbStatus = document.getElementById("usb-status");
     const installEwt = document.getElementById("install-ewt");
-    const boardSelect = document.getElementById("board-select");
+    const installBtn = document.getElementById("install-btn");
+    const boardRadios = Array.from(document.querySelectorAll('input[name="board"]'));
 
     // Each board has its own esp-web-tools manifest; the selector swaps which
     // one the install button uses before the user clicks Install.
     function applyBoard(board) {
-      if (board !== "gezipai" && board !== "bh4tdv") board = "gezipai";
-      localStorage.setItem("nrl_board", board);
-      boardSelect.value = board;
-      if (installEwt) installEwt.setAttribute("manifest", "manifest-" + board + ".json");
+      if (board !== "gezipai_aec" && board !== "gezipai" && board !== "bh4tdv") board = "";
+      boardRadios.forEach((radio) => { radio.checked = (radio.value === board); });
+      if (board) {
+        localStorage.setItem("nrl_board", board);
+        if (installEwt) installEwt.setAttribute("manifest", "manifest-" + board + ".json");
+        if (installBtn) installBtn.disabled = false;
+      } else {
+        localStorage.removeItem("nrl_board");
+        if (installEwt) installEwt.removeAttribute("manifest");
+        if (installBtn) installBtn.disabled = true;
+      }
     }
 
-    applyBoard(localStorage.getItem("nrl_board") || "gezipai");
-    boardSelect.addEventListener("change", function () { applyBoard(this.value); });
+    applyBoard("");
+    boardRadios.forEach((radio) => {
+      radio.addEventListener("change", function () {
+        if (this.checked) applyBoard(this.value);
+      });
+    });
 
     let usbCurrentKey = null;
     let usbCurrentPct = null;
@@ -786,8 +828,10 @@
         "Close": "关闭",
         "Logs": "日志",
         "Cancel": "取消",
+        "Connect": "连接",
         "Reset Device": "重启设备",
         "Visit Device": "访问设备",
+        "Add to Home Assistant": "添加到 Home Assistant",
         "Configure Wi-Fi": "配置 WiFi",
         "Connect to Wi-Fi": "连接 WiFi",
         "Save": "保存",
@@ -795,14 +839,59 @@
         "Try Again": "重试",
         "Continue": "继续",
         "Install": "安装",
+        "install": "安装",
+        "INSTALL": "安装",
         "Update": "升级",
+        "update to": "升级到",
+        "Do you want to": "是否",
+        "Confirm Installation": "确认安装",
+        "Do you want to install": "是否安装",
+        "Do you want to update to": "是否升级到",
+        "All data on the device will be erased.": "设备上的所有数据都将被擦除。",
+        "Connecting": "正在连接",
         "Connecting...": "正在连接...",
+        "Disconnected": "已断开连接",
+        "Initialized. Found": "初始化完成，发现",
         "Initializing...": "正在初始化...",
+        "Initializing": "正在初始化",
+        "Initializing Improv Serial": "正在初始化 Improv 串口",
+        "Improv initialization failed.": "Improv 初始化失败。",
+        "Improv Wi-Fi Serial not detected": "未检测到 Improv Wi-Fi 串口",
+        "Preparing installation": "正在准备安装",
         "Preparing installation...": "正在准备安装...",
+        "Installation prepared": "安装准备完成",
         "Installation complete!": "安装完成！",
+        "Installation failed": "安装失败",
+        "Installing": "正在安装",
+        "Wrapping up": "即将完成",
+        "This will take": "大约需要",
+        "a minute": "1 分钟",
+        "2 minutes": "2 分钟",
+        "This will take 2 minutes.": "大约需要 2 分钟。",
+        "Keep this page visible to prevent slow down": "请保持此页面在前台显示，以免速度变慢",
+        "Erasing device...": "正在擦除设备...",
+        "Device erased": "设备已擦除",
+        "Chip erase completed successfully in": "芯片擦除完成，耗时",
+        "Writing progress": "写入进度",
+        "Writing at": "正在写入",
+        "Writing complete": "写入完成",
+        "All done!": "全部完成！",
+        "Running stub...": "正在运行 stub...",
+        "Stub running...": "stub 已运行...",
+        "Stub is already running. No upload is necessary.": "stub 已在运行，无需上传。",
+        "Staying in bootloader.": "保持在 bootloader 中。",
+        "using USB JTAG Serial Reset": "使用 USB JTAG 串口复位",
+        "using Classic Serial Reset": "使用经典串口复位",
         "Provisioning Wi-Fi": "正在配置 WiFi",
         "Provisioned!": "配置完成！",
+        "Scanning for networks": "正在扫描网络",
+        "Trying to connect": "正在尝试连接",
+        "Unable to connect": "无法连接",
+        "Timeout": "超时",
+        "Unknown error": "未知错误",
         "Network Name": "网络名称",
+        "Network": "网络",
+        "Join other…": "加入其他网络...",
         "Password": "密码",
         "Wi-Fi": "WiFi",
         "Erase device": "擦除设备",
@@ -830,36 +919,134 @@
         "Visit device": "访问设备",
         "Configure Wi-Fi": "配置 WiFi",
         "Change Wi-Fi": "更改 WiFi",
+        "Fund Development": "支持开发",
         "Done": "完成",
         "Update available!": "有可用更新！",
         "Already up to date": "已是最新",
         "Erase user data": "擦除用户数据",
+        "Erase User Data": "擦除用户数据",
         "Are you sure you want to reset your device?": "确定要重启设备吗？",
+        "Do you want to reset your device and erase all user data from your device?": "是否重置设备并擦除设备上的所有用户数据？",
         "Erase": "擦除",
         "Setup": "设置",
         "Connect this device to a Wi-Fi network": "把设备连接到 WiFi 网络",
+        "Connect your device to the network to start using it.": "将设备连接到网络后即可开始使用。",
+        "Device connected to the network!": "设备已连接到网络！",
         "Connected to": "已连接到",
         "Provisioning": "正在配置",
         "Provisioning failed": "配置失败",
         "Failed to start provisioning": "启动配置失败",
         "Provisioning timed out": "配置超时",
+        "No port selected": "未选择端口",
+        "If you didn't select a port because you didn't see your device listed, try the following steps:": "如果你因为没有在列表中看到设备而未选择端口，请尝试以下步骤：",
+        "Make sure that the device is connected to this computer (the one that runs the browser that shows this website)": "确认设备已连接到这台电脑（即运行显示本网站的浏览器所在的电脑）",
+        "Most devices have a tiny light when it is powered on. If yours has one, make sure it is on.": "大多数设备通电时会有一个小指示灯。如果你的设备有，请确认它已亮起。",
+        "Make sure that the USB cable you use can be used for data and is not a power-only cable.": "确认所用的 USB 数据线支持数据传输，而不是仅能充电的线。",
+        "Make sure you have the right drivers installed. Below are the drivers for common chips used in ESP devices:": "确认已安装正确的驱动程序。以下是 ESP 设备常用芯片的驱动：",
+        "CP2102 drivers:": "CP2102 驱动：",
+        "CH342, CH343, CH9102 drivers:": "CH342、CH343、CH9102 驱动：",
+        "CH340, CH341 drivers:": "CH340、CH341 驱动：",
+        "(download via blue button with": "（通过带",
+        "icon)": "图标的蓝色按钮下载）",
+        "Do you want to erase the device before installing": "是否在安装",
+        "? All data on the device will be lost.": " 之前擦除设备？设备上的所有数据都将丢失。",
+        "Your device is running": "当前设备正在运行",
+        "Your browser does not support installing things on ESP devices. Use Google Chrome or Microsoft Edge.": "当前浏览器不支持给 ESP 设备安装固件，请使用 Google Chrome 或 Microsoft Edge。",
+        "You can only install ESP devices on HTTPS websites or on the localhost.": "只能在 HTTPS 网站或 localhost 页面上安装 ESP 设备。",
+        "Serial port is not readable/writable. Close any other application using it and try again.": "串口不可读写。请关闭其它正在使用它的程序后重试。",
+        "Serial port is not ready. Close any other application using it and try again.": "串口尚未就绪。请关闭其它正在使用它的程序后重试。",
+        "Serial port": "串口",
+        "Port is not readable": "串口不可读",
+        "Port is not writable": "串口不可写",
+        "Port is not ready": "串口尚未就绪",
+        "Error reading from serial port": "读取串口出错",
+        "Error while reading serial port": "读取串口时出错",
+        "Failed to connect with the device": "连接设备失败",
+        "No serial data received.": "未收到串口数据。",
+        "Serial data stream stopped: Possible serial noise or corruption.": "串口数据流已停止：可能存在串口噪声或数据损坏。",
+        "Terminal disconnected": "终端已断开",
+        "Starting console read loop": "开始读取终端数据",
+        "Finished console read loop": "终端读取已结束",
+        "Read timeout exceeded": "读取超时",
+        "Failed to download manifest": "下载 manifest 失败",
+        "Downlading firmware": "下载固件",
+        "Failed to initialize. Try resetting your device or holding the BOOT button while clicking INSTALL.": "初始化失败。请尝试重启设备，或在点击安装时按住 BOOT 键。",
+        "board is not supported.": "板子不受支持。",
       }
     };
-    const ewtPrefixes = ["Writing", "Erasing", "Connecting", "Initializing", "Preparing", "Install", "Update"];
+    const ewtPrefixes = [
+      "Writing",
+      "Writing progress",
+      "Erasing",
+      "Connecting",
+      "Initialized. Found",
+      "Initializing",
+      "Preparing",
+      "Install",
+      "INSTALL",
+      "Update",
+      "This will take",
+      "Unknown error",
+      "Serial port",
+      "Port is",
+      "Error reading from serial port",
+      "Error while reading serial port",
+      "Failed to connect with the device",
+      "Writing at",
+      "Chip erase completed successfully in",
+      "Do you want to install",
+      "Do you want to update to",
+    ];
 
     function ewtTranslate(text) {
       const dict = ewtTranslations[getLang()];
       if (!dict || !text) return null;
-      const trimmed = text.trim();
+      // Normalize curly quotes/apostrophes so ASCII dictionary keys match,
+      // and collapse whitespace runs (esp-web-tools wraps long sentences
+      // across source lines, leaving newlines + indentation in text nodes).
+      const norm = text.replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, " ");
+      const trimmed = norm.trim();
       if (!trimmed) return null;
-      if (dict[trimmed]) return text.replace(trimmed, dict[trimmed]);
+      if (dict[trimmed]) return norm.replace(trimmed, dict[trimmed]);
+      if (trimmed.includes("Do you want to install")) {
+        return norm.split("Do you want to install").join(dict["Do you want to install"]);
+      }
       for (const en of ewtPrefixes) {
         if (trimmed.startsWith(en + " ") || trimmed.startsWith(en + "...") || trimmed.startsWith(en + ":")) {
           const rest = trimmed.substring(en.length);
-          if (dict[en]) return text.replace(trimmed, dict[en] + rest);
+          if (dict[en]) return norm.replace(trimmed, dict[en] + rest);
         }
       }
-      return null;
+      // Substring match for long, unambiguous phrases (handles multi-line
+      // message blocks where several sentences share one text node).
+      let result = norm;
+      let changed = false;
+      for (const en in dict) {
+        if (en.length >= 12 && result.includes(en)) {
+          result = result.split(en).join(dict[en]);
+          changed = true;
+        }
+      }
+      return changed ? result : null;
+    }
+
+    function ewtPatchTextBlocks(root) {
+      if (!root) return;
+      const blocks = root.querySelectorAll("p, div, span, h1, h2, h3, mwc-dialog, ewt-install-dialog");
+      blocks.forEach((el) => {
+        const text = el.textContent || "";
+        if (!text.includes("Do you want to install") &&
+            !text.includes("Do you want to update to") &&
+            !text.includes("Do you want to reset your device") &&
+            !text.includes("Your device is running") &&
+            !text.includes("All data on the device will be erased.")) return;
+        if (el.querySelector("button, input, select, textarea, a, esp-web-install-button")) return;
+        if (text.trim().length > 220) return;
+        const translated = ewtTranslate(text);
+        if (translated !== null && translated !== text) {
+          el.textContent = translated;
+        }
+      });
     }
 
     function ewtWalk(root) {
@@ -869,11 +1056,17 @@
           const t = ewtTranslate(node.textContent);
           if (t !== null) node.textContent = t;
         } else if (node.nodeType === Node.ELEMENT_NODE) {
+          ["label", "aria-label", "title"].forEach((attr) => {
+            if (!node.hasAttribute(attr)) return;
+            const t = ewtTranslate(node.getAttribute(attr));
+            if (t !== null) node.setAttribute(attr, t);
+          });
           for (const c of node.childNodes) walk(c);
           if (node.shadowRoot) ewtWalk(node.shadowRoot);
         }
       };
       for (const c of root.childNodes) walk(c);
+      ewtPatchTextBlocks(root);
     }
 
     const ewtDialogObservers = new WeakSet();
@@ -907,9 +1100,27 @@
       obs.observe(dialog.shadowRoot, { childList: true, subtree: true, characterData: true });
     }
 
+    function ewtGlobalWalk(node) {
+      // esp-web-tools renders every dialog (install, no-port help, …) inside
+      // a shadow root. Walking all shadow roots covers them regardless of
+      // tag name, and never touches the page's own light DOM / <script>s.
+      node = node || document.body;
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+      if (node.shadowRoot) ewtWalk(node.shadowRoot);
+      for (let c = node.firstElementChild; c; c = c.nextElementSibling) {
+        ewtGlobalWalk(c);
+      }
+    }
+
     function ewtTranslateExisting() {
       document.querySelectorAll("ewt-install-dialog").forEach(ewtAttachObserver);
+      ewtGlobalWalk();
     }
+
+    // esp-web-tools updates dialog text inside nested shadow roots that
+    // MutationObservers cannot watch across. A periodic re-walk is the only
+    // reliable way to keep every dialog translated.
+    setInterval(ewtGlobalWalk, 500);
 
     new MutationObserver((mutations) => {
       for (const m of mutations) {

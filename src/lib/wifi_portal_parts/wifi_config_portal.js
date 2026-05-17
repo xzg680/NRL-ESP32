@@ -237,23 +237,52 @@ const translations = {
 
     async function scanWifi() {
       const status = document.getElementById('scan-status');
-      const list = document.getElementById('wifi-ssid-options');
+      const select = document.getElementById('wifi-ssid-select');
       status.textContent = t('scanning');
       try {
         const res = await fetch('/scan', {cache: 'no-store'});
         if (!res.ok) throw new Error('scan failed');
         const items = await res.json();
-        list.innerHTML = '';
-        items.forEach((item) => {
-          const opt = document.createElement('option');
-          opt.value = item.ssid;
-          opt.label = item.label;
-          list.appendChild(opt);
-        });
+        renderWifiOptions(select, items);
         status.textContent = items.length ? (t('foundPrefix') + items.length + t('foundSuffix')) : t('noneFound');
       } catch (e) {
         status.textContent = t('scanFailed');
       }
+    }
+
+    function renderWifiOptions(select, items) {
+      let foundSelected = false;
+      const selected = select ? select.value : '';
+      if (select) {
+        select.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = t('selectWifi');
+        placeholder.setAttribute('data-i18n', 'selectWifi');
+        select.appendChild(placeholder);
+      }
+      if (!Array.isArray(items)) {
+        if (select) select.value = selected;
+        return;
+      }
+      items.forEach((item) => {
+        if (!item || !item.ssid) return;
+        const label = item.label || item.ssid;
+        if (select) {
+          const opt = document.createElement('option');
+          opt.value = item.ssid;
+          opt.textContent = label;
+          select.appendChild(opt);
+          if (item.ssid === selected) foundSelected = true;
+        }
+      });
+      if (select && selected && !foundSelected) {
+        const opt = document.createElement('option');
+        opt.value = selected;
+        opt.textContent = selected;
+        select.appendChild(opt);
+      }
+      if (select) select.value = selected;
     }
 
     applyLanguage(currentLang());

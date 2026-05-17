@@ -295,6 +295,7 @@ static void normalizeConfig(void)
     sanitizeString(s_config.wifi_password);
     sanitizeString(s_config.server_host);
     sanitizeCallsign(s_config.callsign);
+    s_config.device_mode = static_cast<uint8_t>(NRL_AUDIO_DEVICE_MODE);
 
     if (s_config.server_port == 0U) {
         s_config.server_port = static_cast<uint16_t>(NRL_AUDIO_SERVER_PORT);
@@ -639,16 +640,6 @@ bool EXTERNAL_RADIO_SetCallsignSsid(const uint8_t value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
     s_config.callsign_ssid = value;
-    if (persist) {
-        return savePersistedConfig();
-    }
-    return true;
-}
-
-bool EXTERNAL_RADIO_SetDeviceMode(const uint8_t value, const bool persist)
-{
-    EXTERNAL_RADIO_Init();
-    s_config.device_mode = value;
     if (persist) {
         return savePersistedConfig();
     }

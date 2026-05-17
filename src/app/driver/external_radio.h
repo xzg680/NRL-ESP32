@@ -68,7 +68,6 @@ bool EXTERNAL_RADIO_SetServerPort(uint16_t value, bool persist);
 bool EXTERNAL_RADIO_SetLocalPort(uint16_t value, bool persist);
 bool EXTERNAL_RADIO_SetCallsign(const char *value, bool persist);
 bool EXTERNAL_RADIO_SetCallsignSsid(uint8_t value, bool persist);
-bool EXTERNAL_RADIO_SetDeviceMode(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetMicVolume(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetLineOutVolume(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetHpDriveEnabled(bool enabled, bool persist);

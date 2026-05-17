@@ -3,4 +3,11 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+managed_components
+__pycache__/
+*.map
 web-flasher/firmware/*.bin
+web-flasher/firmware/bh4tdv/*.bin
+web-flasher/firmware/gezipai/*.bin
+web-flasher/firmware/gezipai_aec/*.bin
+

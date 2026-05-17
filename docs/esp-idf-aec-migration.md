@@ -108,32 +108,34 @@ dependencies:
     version: ">=5.4.0"
 ```
 
-## PlatformIO Version Caveat
+## PlatformIO Status
 
-The current project uses PlatformIO `platform = espressif32`, and the local
-installed platform is `espressif32 6.9.0`.
+The project has been moved to the pioarduino `platform-espressif32` fork:
 
-This local platform declares:
-
-```text
-framework-espidf = ~3.50301.0
+```ini
+platform = https://github.com/pioarduino/platform-espressif32/releases/download/54.03.21/platform-espressif32.zip
 ```
 
-That PlatformIO package line corresponds to the ESP-IDF 5.3.1 generation, not
-ESP-IDF 5.4.x. It is enough to prove that PlatformIO can build ESP-IDF 5.x, but
-it does not match the Xiaozhi 2.0.2 reference requirement of `idf >=5.4.0`.
-
-If the migration stays inside PlatformIO, pin `platform` to a release that
-explicitly supports ESP-IDF 5.4.x or newer, then verify the actual IDF version
-with `IDF_VER` or `idf.py --version` during the first ESP-IDF build. PlatformIO
-Espressif support is also not maintained by Espressif directly, so component
-manager behavior and ESP-SR dependency resolution should be tested early.
-
-Recommended low-risk route:
+The local installed platform reports:
 
 ```text
-Use official ESP-IDF 5.4+ tooling for the AEC migration branch.
-Keep the current PlatformIO Arduino project intact until feature parity.
+platform-espressif32 54.03.21
+framework-arduinoespressif32 3.2.1
+framework-arduinoespressif32-libs 5.4.0
+framework-espidf package URL: esp-idf-v5.4.2.zip
+```
+
+This satisfies the ESP-IDF 5.4+ version requirement for the Xiaozhi 2.0.2 AEC
+reference path. The current project still builds as `framework = arduino`; the
+ESP-IDF framework package is not installed until an `espidf` or mixed
+`arduino, espidf` environment is added and built.
+
+Recommended migration route:
+
+```text
+Keep the existing Arduino gezipai/bh4tdv environments intact.
+Add a new Gezipai-only AEC migration environment using ESP-IDF 5.4.2.
+Do not add AEC code to the BH4TDV build.
 ```
 
 If upgrading to a newer `esp-sr` version, retest AFE config names and memory

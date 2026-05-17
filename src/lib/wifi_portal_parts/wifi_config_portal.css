@@ -53,10 +53,20 @@
       .shell{padding:14px;}
       .topbar{display:block;}
       .status{grid-template-columns:1fr;min-width:0;margin-top:12px;}
+      .nav{overflow-x:auto;gap:4px;padding-bottom:2px;}
+      .nav a{flex:0 0 auto;padding:10px 9px;font-size:13px;white-space:nowrap;}
+      .panel{padding:14px;}
+      .section-head{display:block;}
+      .section-head .hint{display:block;margin-top:5px;}
       .grid{grid-template-columns:1fr;}
       .subgrid{grid-template-columns:1fr;}
+      .subpanel{padding:10px;}
       .span-2{grid-column:auto;}
       .eq-row{grid-template-columns:1fr;}
+      .eq-control{margin:10px 0;}
+      .eq-presets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+      .eq-presets .btn-small{width:100%;min-width:0;padding-left:8px;padding-right:8px;}
+      input.eq-value{font-size:12px;}
       .actions{justify-content:stretch;}
       button,.button{width:100%;}
     }

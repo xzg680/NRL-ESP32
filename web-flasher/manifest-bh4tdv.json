@@ -1,0 +1,28 @@
+{
+  "name": "NRL ESP32 - BH4TDV 3188",
+  "version": "0.0.2",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "firmware/bh4tdv/bootloader.bin",
+          "offset": 0
+        },
+        {
+          "path": "firmware/bh4tdv/partitions.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/bh4tdv/boot_app0.bin",
+          "offset": 57344
+        },
+        {
+          "path": "firmware/bh4tdv/firmware.bin",
+          "offset": 65536
+        }
+      ]
+    }
+  ]
+}

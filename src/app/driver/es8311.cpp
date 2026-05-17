@@ -5,7 +5,8 @@
 #include "driver/i2c1.h"
 
 #include <Arduino.h>
-#include <driver/i2s.h>
+#include <driver/i2s_common.h>
+#include <driver/i2s_std.h>
 #include <esp_err.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -16,8 +17,16 @@
 #include <stdint.h>
 #include <string.h>
 
+#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#include "aec/aec_processor.h"
+#endif
+
 #ifndef ES8311_FORCE_DAC_SILENCE
 #define ES8311_FORCE_DAC_SILENCE 0
+#endif
+
+#ifndef ES8311_ENABLE_MIC_DEBUG_LOG
+#define ES8311_ENABLE_MIC_DEBUG_LOG 0
 #endif
 
 namespace {
@@ -34,7 +43,6 @@ constexpr int kPinPaEn = NRL_PIN_PA_EN;
 constexpr i2s_port_t kI2sPort = I2S_NUM_0;
 constexpr int kSampleRate = 8000;
 constexpr int kMclkRate = kSampleRate * 256;
-constexpr i2s_bits_per_sample_t kBitsPerSample = I2S_BITS_PER_SAMPLE_16BIT;
 constexpr size_t kFrameSamples = 80;
 // I2S bus stays stereo (2 slots/frame) so BCLK timing matches ES8311's clock
 // divider expectations. ES8311 is mono internally �?it reads/writes the LEFT
@@ -42,7 +50,7 @@ constexpr size_t kFrameSamples = 80;
 constexpr size_t kI2sSlotCount = 2;
 constexpr size_t kFrameBytes = kFrameSamples * sizeof(int16_t);
 constexpr size_t kI2sFrameBytes = kFrameSamples * kI2sSlotCount * sizeof(int16_t);
-const TickType_t kI2sWaitTicks = pdMS_TO_TICKS(20);
+constexpr uint32_t kI2sWaitMs = 20;
 
 constexpr float kToneFrequency = 440.0f;
 constexpr float kToneAmplitude = 0.40f;
@@ -140,6 +148,8 @@ struct Es8311ClockConfig {
 static bool s_es8311_ready = false;
 static bool s_i2s_ready = false;
 static bool s_i2s_driver_installed = false;
+static i2s_chan_handle_t s_i2s_tx = nullptr;
+static i2s_chan_handle_t s_i2s_rx = nullptr;
 static TaskHandle_t s_passthrough_task = nullptr;
 static volatile bool s_passthrough_running = false;
 static ES8311_AudioMode_t s_audio_mode = ES8311_AUDIO_MODE_RECEIVE;
@@ -617,86 +627,114 @@ static bool es8311_configure_codec(void) {
     return true;
 }
 
+static void i2s_teardown(void) {
+    if (s_i2s_tx != nullptr) {
+        (void)i2s_channel_disable(s_i2s_tx);
+        (void)i2s_del_channel(s_i2s_tx);
+        s_i2s_tx = nullptr;
+    }
+
+    if (s_i2s_rx != nullptr) {
+        (void)i2s_channel_disable(s_i2s_rx);
+        (void)i2s_del_channel(s_i2s_rx);
+        s_i2s_rx = nullptr;
+    }
+
+    s_i2s_ready = false;
+    s_i2s_driver_installed = false;
+}
+
+static void i2s_clear_dma(void) {
+    if (s_i2s_tx == nullptr) {
+        return;
+    }
+
+    int16_t silence[kFrameSamples * kI2sSlotCount] = {};
+    for (int i = 0; i < 2; ++i) {
+        size_t bytes_written = 0;
+        (void)i2s_channel_write(s_i2s_tx, silence, sizeof(silence), &bytes_written, kI2sWaitMs);
+    }
+}
+
 static bool i2s_setup(void) {
     if (s_i2s_ready) {
         return true;
     }
 
-    if (s_i2s_driver_installed) {
-        i2s_driver_uninstall(kI2sPort);
-        s_i2s_driver_installed = false;
+    if (s_i2s_driver_installed || s_i2s_tx != nullptr || s_i2s_rx != nullptr) {
+        i2s_teardown();
     }
 
-    i2s_config_t config = {};
-    config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX);
-    config.sample_rate = kSampleRate;
-    config.bits_per_sample = kBitsPerSample;
-    config.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
-    config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
-    config.intr_alloc_flags = 0;
-    config.dma_buf_count = 8;
-    config.dma_buf_len = kFrameSamples;
-    config.use_apll = true;
-    config.tx_desc_auto_clear = true;
-    config.fixed_mclk = kMclkRate;
+    i2s_chan_config_t channel_config = I2S_CHANNEL_DEFAULT_CONFIG(kI2sPort, I2S_ROLE_MASTER);
+    channel_config.dma_desc_num = 8;
+    channel_config.dma_frame_num = kFrameSamples;
+    channel_config.auto_clear_after_cb = true;
 
-    const esp_err_t install_err = i2s_driver_install(kI2sPort, &config, 0, nullptr);
-    if (install_err != ESP_OK) {
-        Serial.printf("[ES8311] i2s_driver_install failed: err=%d\n", static_cast<int>(install_err));
+    esp_err_t err = i2s_new_channel(&channel_config, &s_i2s_tx, &s_i2s_rx);
+    if (err != ESP_OK) {
+        Serial.printf("[ES8311] i2s_new_channel failed: err=%d\n", static_cast<int>(err));
+        i2s_teardown();
         return false;
     }
     s_i2s_driver_installed = true;
 
-    i2s_pin_config_t pin_config = {};
-    pin_config.mck_io_num = kPinMclk;
-    pin_config.bck_io_num = kPinBclk;
-    pin_config.ws_io_num = kPinLrclk;
-    pin_config.data_out_num = kPinEspDout;
-    pin_config.data_in_num = kPinEspDin;
+    i2s_std_config_t std_config = {};
+    std_config.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(kSampleRate);
+    std_config.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    std_config.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+    std_config.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT;
+    std_config.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
+    std_config.gpio_cfg.mclk = static_cast<gpio_num_t>(kPinMclk);
+    std_config.gpio_cfg.bclk = static_cast<gpio_num_t>(kPinBclk);
+    std_config.gpio_cfg.ws = static_cast<gpio_num_t>(kPinLrclk);
+    std_config.gpio_cfg.dout = static_cast<gpio_num_t>(kPinEspDout);
+    std_config.gpio_cfg.din = static_cast<gpio_num_t>(kPinEspDin);
+    std_config.gpio_cfg.invert_flags.mclk_inv = false;
+    std_config.gpio_cfg.invert_flags.bclk_inv = false;
+    std_config.gpio_cfg.invert_flags.ws_inv = false;
 
-    const esp_err_t pin_err = i2s_set_pin(kI2sPort, &pin_config);
-    if (pin_err != ESP_OK) {
-        Serial.printf("[ES8311] i2s_set_pin failed: err=%d mclk=%d bclk=%d ws=%d dout=%d din=%d\n",
-                      static_cast<int>(pin_err),
-                      kPinMclk,
-                      kPinBclk,
-                      kPinLrclk,
-                      kPinEspDout,
-                      kPinEspDin);
-        i2s_driver_uninstall(kI2sPort);
-        s_i2s_driver_installed = false;
+    err = i2s_channel_init_std_mode(s_i2s_tx, &std_config);
+    if (err != ESP_OK) {
+        Serial.printf("[ES8311] i2s tx std init failed: err=%d\n", static_cast<int>(err));
+        i2s_teardown();
         return false;
     }
 
-    const esp_err_t clk_err = i2s_set_clk(kI2sPort, kSampleRate, kBitsPerSample, I2S_CHANNEL_STEREO);
-    if (clk_err != ESP_OK) {
-        Serial.printf("[ES8311] i2s_set_clk failed: err=%d rate=%d bits=%d stereo_slots=2\n",
-                      static_cast<int>(clk_err),
-                      kSampleRate,
-                      16);
-        i2s_driver_uninstall(kI2sPort);
-        s_i2s_driver_installed = false;
+    err = i2s_channel_init_std_mode(s_i2s_rx, &std_config);
+    if (err != ESP_OK) {
+        Serial.printf("[ES8311] i2s rx std init failed: err=%d\n", static_cast<int>(err));
+        i2s_teardown();
         return false;
     }
 
-    const esp_err_t start_err = i2s_start(kI2sPort);
-    if (start_err != ESP_OK) {
-        Serial.printf("[ES8311] i2s_start failed: err=%d\n", static_cast<int>(start_err));
-        i2s_driver_uninstall(kI2sPort);
-        s_i2s_driver_installed = false;
+    err = i2s_channel_enable(s_i2s_tx);
+    if (err != ESP_OK) {
+        Serial.printf("[ES8311] i2s tx enable failed: err=%d\n", static_cast<int>(err));
+        i2s_teardown();
         return false;
     }
 
-    i2s_zero_dma_buffer(kI2sPort);
+    err = i2s_channel_enable(s_i2s_rx);
+    if (err != ESP_OK) {
+        Serial.printf("[ES8311] i2s rx enable failed: err=%d\n", static_cast<int>(err));
+        i2s_teardown();
+        return false;
+    }
+
     s_i2s_ready = true;
-    Serial.printf("[ES8311] i2s clocks: rate=%dHz bits=%d stereo mclk=%dHz\n",
+    i2s_clear_dma();
+    Serial.printf("[ES8311] i2s std clocks: rate=%dHz bits=%d stereo mclk=%dHz\n",
                   kSampleRate,
                   16,
                   kMclkRate);
     return true;
 }
 
-static bool i2s_read_frame(int16_t *dst) {
+static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
+    if (s_i2s_rx == nullptr) {
+        return false;
+    }
+
     // Stereo I2S: 2 int16 per LRCK frame (L,R). ES8311 outputs ADC data on
     // LEFT only �?extract LEFT samples into dst.
     static_assert(kI2sSlotCount == 2, "i2s_read_frame assumes stereo I2S frame");
@@ -704,11 +742,11 @@ static bool i2s_read_frame(int16_t *dst) {
     size_t bytes_in_frame = 0;
     while (bytes_in_frame < kI2sFrameBytes) {
         size_t bytes_read = 0;
-        if (i2s_read(kI2sPort,
-                     reinterpret_cast<uint8_t *>(raw) + bytes_in_frame,
-                     kI2sFrameBytes - bytes_in_frame,
-                     &bytes_read,
-                     kI2sWaitTicks) != ESP_OK) {
+        if (i2s_channel_read(s_i2s_rx,
+                             reinterpret_cast<uint8_t *>(raw) + bytes_in_frame,
+                             kI2sFrameBytes - bytes_in_frame,
+                             &bytes_read,
+                             kI2sWaitMs) != ESP_OK) {
             return false;
         }
 
@@ -719,6 +757,7 @@ static bool i2s_read_frame(int16_t *dst) {
         bytes_in_frame += bytes_read;
     }
 
+#if ES8311_ENABLE_MIC_DEBUG_LOG
     // Debug: every ~5 s, compare LEFT vs RIGHT slot energy and dump the first
     // few raw samples. ES8311 should drive ADC data on the LEFT slot only; if
     // RIGHT has the energy instead, the slot mapping / I2S format is wrong.
@@ -743,15 +782,24 @@ static bool i2s_read_frame(int16_t *dst) {
                           raw[4], raw[5], raw[6], raw[7]);
         }
     }
+#endif
 
-    // Take LEFT slot (index 2*i) of each frame.
+    // Take LEFT slot (mic). When dst_ref is given, also take the RIGHT slot,
+    // which on the Gezipai board carries the speaker echo reference for AEC.
     for (size_t i = 0; i < kFrameSamples; ++i) {
         dst[i] = raw[i * 2];
+        if (dst_ref != nullptr) {
+            dst_ref[i] = raw[i * 2 + 1];
+        }
     }
     return true;
 }
 
 static bool i2s_write_frame(const int16_t *src) {
+    if (s_i2s_tx == nullptr) {
+        return false;
+    }
+
     // Stereo I2S: 2 int16 per LRCK frame. Duplicate mono src into both slots.
     static_assert(kI2sSlotCount == 2, "i2s_write_frame assumes stereo I2S frame");
     int16_t raw[kFrameSamples * kI2sSlotCount];  // size = 80*2 = 160
@@ -768,11 +816,11 @@ static bool i2s_write_frame(const int16_t *src) {
     size_t bytes_out_frame = 0;
     while (bytes_out_frame < kI2sFrameBytes) {
         size_t bytes_written = 0;
-        if (i2s_write(kI2sPort,
-                      reinterpret_cast<const uint8_t *>(raw) + bytes_out_frame,
-                      kI2sFrameBytes - bytes_out_frame,
-                      &bytes_written,
-                      kI2sWaitTicks) != ESP_OK) {
+        if (i2s_channel_write(s_i2s_tx,
+                              reinterpret_cast<const uint8_t *>(raw) + bytes_out_frame,
+                              kI2sFrameBytes - bytes_out_frame,
+                              &bytes_written,
+                              kI2sWaitMs) != ESP_OK) {
             return false;
         }
 
@@ -868,6 +916,7 @@ static void output_queue_clear(void) {
 }
 
 static void es8311_log_mic_frame_stats(const int16_t *frame) {
+#if ES8311_ENABLE_MIC_DEBUG_LOG
     // Aggregate peak / RMS / non-zero count over ~1 s of captured frames and
     // print a single summary line. Lets you see at a glance whether the ADC
     // is returning real audio or a flat (all-zero / stuck-DC) signal.
@@ -925,7 +974,20 @@ static void es8311_log_mic_frame_stats(const int16_t *frame) {
         window_samples = 0;
         window_nonzero = 0;
     }
+#else
+    (void)frame;
+#endif
 }
+
+#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+// Sink for echo-cancelled audio from the AEC processor: forward it to the
+// registered frame hook, exactly as raw mic capture would have been.
+static void es8311_aec_output(const int16_t *clean, size_t count, void *) {
+    if (s_frame_hook != nullptr) {
+        s_frame_hook(clean, count, s_audio_mode, s_frame_hook_user_data);
+    }
+}
+#endif
 
 static void es8311_passthrough_task(void *) {
     static int16_t frame[kFrameSamples];
@@ -933,6 +995,26 @@ static void es8311_passthrough_task(void *) {
     while (s_passthrough_running) {
         const ES8311_AudioMode_t mode = s_audio_mode;
 
+#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+        static int16_t ref_frame[kFrameSamples];
+        const bool aec_active = AEC_IsReady();
+        if (!i2s_read_frame(frame, aec_active ? ref_frame : nullptr)) {
+            Serial.println("[ES8311][MIC] i2s_read_frame failed");
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+
+        es8311_log_mic_frame_stats(frame);
+
+        if (aec_active) {
+            // mic = LEFT slot, speaker echo reference = RIGHT slot.
+            // The echo-cancelled result returns via es8311_aec_output.
+            (void)mode;
+            AEC_SubmitCapture(frame, ref_frame, kFrameSamples);
+        } else if (s_frame_hook != nullptr) {
+            s_frame_hook(frame, kFrameSamples, mode, s_frame_hook_user_data);
+        }
+#else
         if (!i2s_read_frame(frame)) {
             Serial.println("[ES8311][MIC] i2s_read_frame failed");
             vTaskDelay(pdMS_TO_TICKS(2));
@@ -944,6 +1026,7 @@ static void es8311_passthrough_task(void *) {
         if (s_frame_hook != nullptr) {
             s_frame_hook(frame, kFrameSamples, mode, s_frame_hook_user_data);
         }
+#endif
 
         // ADC and DAC are physically independent paths in this hardware.
         // Do NOT echo captured ADC audio back to DAC �?that would re-transmit
@@ -958,7 +1041,7 @@ static void es8311_passthrough_task(void *) {
         }
     }
 
-    i2s_zero_dma_buffer(kI2sPort);
+    i2s_clear_dma();
     s_passthrough_task = nullptr;
     vTaskDelete(nullptr);
 }
@@ -975,7 +1058,8 @@ static bool es8311_start_passthrough(void) {
     s_passthrough_running = true;
     if (xTaskCreate(es8311_passthrough_task,
                     "es8311_passthrough",
-                    4096,
+                    // 8 KB: the AEC build calls into esp-sr feed() from here.
+                    8192,
                     nullptr,
                     3,
                     &s_passthrough_task) != pdPASS) {
@@ -1048,6 +1132,16 @@ bool ES8311_Init(void) {
                           ok_fe ? "" : "ERR:", static_cast<unsigned>(reg_fe));
         }
     }
+
+#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+    // Bring up the esp-sr AEC before the passthrough task starts feeding it.
+    AEC_SetOutputCallback(es8311_aec_output, nullptr);
+    if (AEC_Init()) {
+        Serial.println("[ES8311] AEC active: mic uplink is echo-cancelled");
+    } else {
+        Serial.println("[ES8311] AEC init failed -- mic uplink falls back to raw");
+    }
+#endif
 
     if (!es8311_start_passthrough()) {
         s_es8311_ready = false;
@@ -1259,7 +1353,7 @@ bool ES8311_PlayTestTone(const uint32_t durationMs) {
         produced += samples_this;
     }
 
-    i2s_zero_dma_buffer(kI2sPort);
+    i2s_clear_dma();
 
     if (was_passthrough_running && !es8311_start_passthrough()) {
         ok = false;
@@ -1303,7 +1397,7 @@ bool ES8311_RecordMicAndPlayback(uint32_t durationMs) {
 
     // Capture mic audio.
     es8311_apply_switch_level(ES8311_AUDIO_MODE_RECEIVE);
-    i2s_zero_dma_buffer(kI2sPort);
+    i2s_clear_dma();
     while (captured < total_samples) {
         if (!i2s_read_frame(frame)) {
             ok = false;
@@ -1320,7 +1414,7 @@ bool ES8311_RecordMicAndPlayback(uint32_t durationMs) {
     // Playback captured audio to speaker.
     if (ok) {
         es8311_apply_switch_level(ES8311_AUDIO_MODE_RECEIVE);
-        i2s_zero_dma_buffer(kI2sPort);
+        i2s_clear_dma();
 
         size_t played = 0U;
         while (played < captured) {
@@ -1342,7 +1436,7 @@ bool ES8311_RecordMicAndPlayback(uint32_t durationMs) {
             played += samples_this;
         }
 
-        i2s_zero_dma_buffer(kI2sPort);
+        i2s_clear_dma();
     }
 
     free(recorded);
