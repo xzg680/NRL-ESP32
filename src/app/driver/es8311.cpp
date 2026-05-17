@@ -1,6 +1,7 @@
 #include "driver/es8311.h"
 
 #include "driver/board_pins.h"
+#include "driver/es7210.h"
 #include "driver/i2c1.h"
 
 #include <Arduino.h>
@@ -585,6 +586,34 @@ static bool es8311_configure_codec(void) {
         return false;
     }
 
+    // ---- Debug: read back ADC/mic-path registers to verify the codec
+    //      actually accepted the values. If the mic is silent, compare
+    //      these against the expected values printed alongside.
+    {
+        struct RegCheck { uint8_t reg; const char *name; uint8_t expect; };
+        const RegCheck checks[] = {
+            { ES8311_REG0A_SDPOUT, "0A SDPOUT(ADC fmt)", 0x0C },
+            { ES8311_REG0D_SYSTEM, "0D PDN_ANA",         kEs8311PowerUpAnalog },
+            { ES8311_REG0E_SYSTEM, "0E PDN_PGA/ADC",     kEs8311PowerUpPgaAdc },
+            { ES8311_REG14_SYSTEM, "14 mic PGA/select",  0x1A },
+            { ES8311_REG15_ADC,    "15 ADC ramp",        0x40 },
+            { ES8311_REG16_ADC,    "16 ADC gain",        kEs8311AdcGainScaleUp },
+            { ES8311_REG17_ADC,    "17 ADC volume",      s_mic_volume },
+            { ES8311_REG1B_ADC,    "1B ADC HPF",         0x0A },
+            { ES8311_REG1C_ADC,    "1C ADC EQ",          kEs8311AdcEqBypass },
+        };
+        for (const RegCheck &c : checks) {
+            uint8_t v = 0;
+            const bool ok = es8311_read_reg(c.reg, &v);
+            Serial.printf("[ES8311] REG%-22s = %s0x%02X (expect 0x%02X)%s\n",
+                          c.name,
+                          ok ? "" : "READ-ERR ",
+                          static_cast<unsigned>(v),
+                          static_cast<unsigned>(c.expect),
+                          (ok && v == c.expect) ? "" : "  <-- MISMATCH");
+        }
+    }
+
     return true;
 }
 
@@ -688,6 +717,31 @@ static bool i2s_read_frame(int16_t *dst) {
         }
 
         bytes_in_frame += bytes_read;
+    }
+
+    // Debug: every ~5 s, compare LEFT vs RIGHT slot energy and dump the first
+    // few raw samples. ES8311 should drive ADC data on the LEFT slot only; if
+    // RIGHT has the energy instead, the slot mapping / I2S format is wrong.
+    {
+        static uint32_t last_dump_ms = 0;
+        const uint32_t now = millis();
+        if ((now - last_dump_ms) >= 5000u) {
+            last_dump_ms = now;
+            int32_t left_peak = 0;
+            int32_t right_peak = 0;
+            for (size_t i = 0; i < kFrameSamples; ++i) {
+                const int32_t l = abs(static_cast<int32_t>(raw[i * 2]));
+                const int32_t r = abs(static_cast<int32_t>(raw[i * 2 + 1]));
+                if (l > left_peak) { left_peak = l; }
+                if (r > right_peak) { right_peak = r; }
+            }
+            Serial.printf("[ES8311][MIC] raw I2S slots: LEFT peak=%ld RIGHT peak=%ld | "
+                          "raw[0..7]=%d,%d %d,%d %d,%d %d,%d\n",
+                          static_cast<long>(left_peak),
+                          static_cast<long>(right_peak),
+                          raw[0], raw[1], raw[2], raw[3],
+                          raw[4], raw[5], raw[6], raw[7]);
+        }
     }
 
     // Take LEFT slot (index 2*i) of each frame.
@@ -813,6 +867,66 @@ static void output_queue_clear(void) {
     xSemaphoreGive(s_output_queue_mutex);
 }
 
+static void es8311_log_mic_frame_stats(const int16_t *frame) {
+    // Aggregate peak / RMS / non-zero count over ~1 s of captured frames and
+    // print a single summary line. Lets you see at a glance whether the ADC
+    // is returning real audio or a flat (all-zero / stuck-DC) signal.
+    static uint32_t window_start_ms = 0;
+    static uint32_t frame_count = 0;
+    static int16_t window_peak = 0;
+    static int16_t window_min = 0;
+    static int16_t window_max = 0;
+    static uint64_t window_sum_sq = 0;
+    static uint32_t window_samples = 0;
+    static uint32_t window_nonzero = 0;
+
+    const uint32_t now = millis();
+    if (window_start_ms == 0) {
+        window_start_ms = now;
+        window_min = frame[0];
+        window_max = frame[0];
+    }
+
+    for (size_t i = 0; i < kFrameSamples; ++i) {
+        const int16_t s = frame[i];
+        const int32_t mag = (s < 0) ? -static_cast<int32_t>(s) : static_cast<int32_t>(s);
+        if (mag > window_peak) {
+            window_peak = static_cast<int16_t>(mag);
+        }
+        if (s < window_min) { window_min = s; }
+        if (s > window_max) { window_max = s; }
+        if (s != 0) { ++window_nonzero; }
+        window_sum_sq += static_cast<uint64_t>(static_cast<int32_t>(s) * static_cast<int32_t>(s));
+        ++window_samples;
+    }
+    ++frame_count;
+
+    if ((now - window_start_ms) >= 1000u && window_samples > 0) {
+        const uint32_t rms = static_cast<uint32_t>(
+            sqrt(static_cast<double>(window_sum_sq) / static_cast<double>(window_samples)));
+        Serial.printf("[ES8311][MIC] frames=%lu samples=%lu peak=%d rms=%lu "
+                      "min=%d max=%d nonzero=%lu/%lu%s\n",
+                      static_cast<unsigned long>(frame_count),
+                      static_cast<unsigned long>(window_samples),
+                      static_cast<int>(window_peak),
+                      static_cast<unsigned long>(rms),
+                      static_cast<int>(window_min),
+                      static_cast<int>(window_max),
+                      static_cast<unsigned long>(window_nonzero),
+                      static_cast<unsigned long>(window_samples),
+                      (window_peak == 0) ? "  <-- SILENT (ADC all zero)" : "");
+
+        window_start_ms = now;
+        frame_count = 0;
+        window_peak = 0;
+        window_min = frame[0];
+        window_max = frame[0];
+        window_sum_sq = 0;
+        window_samples = 0;
+        window_nonzero = 0;
+    }
+}
+
 static void es8311_passthrough_task(void *) {
     static int16_t frame[kFrameSamples];
 
@@ -820,9 +934,12 @@ static void es8311_passthrough_task(void *) {
         const ES8311_AudioMode_t mode = s_audio_mode;
 
         if (!i2s_read_frame(frame)) {
+            Serial.println("[ES8311][MIC] i2s_read_frame failed");
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
+
+        es8311_log_mic_frame_stats(frame);
 
         if (s_frame_hook != nullptr) {
             s_frame_hook(frame, kFrameSamples, mode, s_frame_hook_user_data);
@@ -1023,6 +1140,12 @@ bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
     s_mic_volume = mic_volume;
     s_line_out_volume = line_out_volume;
     s_hp_drive_enabled = hp_drive_enabled;
+
+    // On boards with a separate ES7210 mic ADC, the microphone is captured
+    // by the ES7210, not the ES8311 -- route the mic volume there too. The
+    // ES8311 REG17 write below is then harmless (its ADC path is unused).
+    // On boards without an ES7210 this call is a no-op.
+    ES7210_SetMicVolume(mic_volume);
     s_drc_enabled = drc_enabled;
     s_drc_winsize = drc_winsize & 0x0Fu;
     s_drc_maxlevel = drc_maxlevel & 0x0Fu;

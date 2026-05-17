@@ -4,6 +4,8 @@
 #include "../lib/nrl_audio_bridge.h"
 #include "../lib/nrl_version.h"
 #include "../lib/wifi_config_portal.h"
+#include "driver/board_pins.h"
+#include "driver/es7210.h"
 #include "driver/es8311.h"
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
@@ -50,6 +52,17 @@ void setup()
     if (!ES8311_SetReceiveMode()) {
         Serial.println("ES8311 set receive mode failed.");
     }
+
+#if NRL_HAS_ES7210
+    // The mic ADC on this board is a separate ES7210 chip. ES8311_Init()
+    // above has already started I2S, so MCLK/BCLK/LRCK are running and the
+    // ES7210 can lock its clock. Configure it now so I2S DIN carries audio.
+    if (ES7210_Init()) {
+        Serial.println("ES7210 mic ADC ready.");
+    } else {
+        Serial.println("ES7210 mic ADC initialization failed.");
+    }
+#endif
 
     if (!NRLAudioBridge_Init()) {
         Serial.println("NRL audio bridge init failed.");

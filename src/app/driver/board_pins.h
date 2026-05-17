@@ -49,6 +49,10 @@
 // (-1 disables it; es8311.cpp guards with `if (kPinPaEn >= 0)`)
 #define NRL_PIN_PA_EN           -1
 
+// Microphone codec: BH4TDV captures mic audio through the ES8311's own
+// ADC, so it has no separate ES7210.
+#define NRL_HAS_ES7210          0
+
 // I2C bus -- BH4TDV 3188 NRL
 #define NRL_PIN_I2C_SCL         14
 #define NRL_PIN_I2C_SDA         21
@@ -74,6 +78,11 @@
 
 // Power amplifier (PA) enable pin -- 格子派
 #define NRL_PIN_PA_EN           46
+
+// Microphone codec: 格子派 has a dedicated ES7210 4-channel mic ADC whose
+// SDOUT1 drives I2S DIN (GPIO21). The ES8311 is used as DAC only, so the
+// ES7210 must be configured over I2C for the microphone to work.
+#define NRL_HAS_ES7210          1
 
 // I2C bus -- 格子派
 #define NRL_PIN_I2C_SCL         47
