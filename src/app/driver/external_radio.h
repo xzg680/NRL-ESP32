@@ -48,6 +48,7 @@ struct ExternalRadioConfig {
     uint32_t wifi_gateway;
     uint32_t wifi_dns;
     bool wifi_dhcp_enabled;
+    bool aec_enabled;
     SciSerialConfig sci;
     char wifi_ssid[33];
     char wifi_password[65];
@@ -79,6 +80,9 @@ bool EXTERNAL_RADIO_SetDacRamprate(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetDacEqBypass(bool enabled, bool persist);
 bool EXTERNAL_RADIO_SetDacEqCoefficients(uint32_t b0, uint32_t b1, uint32_t a1, bool persist);
 bool EXTERNAL_RADIO_SetSciConfig(uint32_t baud, uint8_t data_bits, char parity, uint8_t stop_bits, bool persist);
+// Acoustic echo cancellation (Gezipai/esp-sr AEC). Persisted only; the ES8311
+// driver reads it at boot, so a toggle takes effect after the next restart.
+bool EXTERNAL_RADIO_SetAecEnabled(bool enabled, bool persist);
 #endif
 
 #endif // DRIVER_EXTERNAL_RADIO_H

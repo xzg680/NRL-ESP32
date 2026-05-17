@@ -383,9 +383,8 @@
         <p data-i18n="recommendedText">Use this when you just want to install the official firmware provided by this page. Connect the device with USB, click the button, choose the serial port, and follow the browser prompts.</p>
         <span class="lang-label" data-i18n="boardLabel">Board model</span>
         <div id="board-select" class="board-radio">
-          <label><input type="radio" name="board" value="gezipai_aec">格子派 AEC (Gezipai AEC)</label>
           <label><input type="radio" name="board" value="gezipai">格子派 (Gezipai)</label>
-          <label><input type="radio" name="board" value="bh4tdv">BH4TDV 3188</label>
+          <label><input type="radio" name="board" value="bh4tdv">NRL-ESP32-3188(BH4TDV)</label>
         </div>
       </div>
       <esp-web-install-button id="install-ewt">
@@ -582,7 +581,7 @@
     // Each board has its own esp-web-tools manifest; the selector swaps which
     // one the install button uses before the user clicks Install.
     function applyBoard(board) {
-      if (board !== "gezipai_aec" && board !== "gezipai" && board !== "bh4tdv") board = "";
+      if (board !== "gezipai" && board !== "bh4tdv") board = "";
       boardRadios.forEach((radio) => { radio.checked = (radio.value === board); });
       if (board) {
         localStorage.setItem("nrl_board", board);

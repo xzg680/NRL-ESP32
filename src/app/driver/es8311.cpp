@@ -19,6 +19,7 @@
 
 #if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
 #include "aec/aec_processor.h"
+#include "driver/external_radio.h"
 #endif
 
 #ifndef ES8311_FORCE_DAC_SILENCE
@@ -1135,11 +1136,18 @@ bool ES8311_Init(void) {
 
 #if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
     // Bring up the esp-sr AEC before the passthrough task starts feeding it.
-    AEC_SetOutputCallback(es8311_aec_output, nullptr);
-    if (AEC_Init()) {
-        Serial.println("[ES8311] AEC active: mic uplink is echo-cancelled");
+    // The AEC switch (AT+AEC / web portal) is persisted in the radio config and
+    // read here at boot, so toggling it takes effect after the next restart.
+    const ExternalRadioConfig *aec_cfg = EXTERNAL_RADIO_GetConfig();
+    if (aec_cfg != nullptr && aec_cfg->aec_enabled) {
+        AEC_SetOutputCallback(es8311_aec_output, nullptr);
+        if (AEC_Init()) {
+            Serial.println("[ES8311] AEC active: mic uplink is echo-cancelled");
+        } else {
+            Serial.println("[ES8311] AEC init failed -- mic uplink falls back to raw");
+        }
     } else {
-        Serial.println("[ES8311] AEC init failed -- mic uplink falls back to raw");
+        Serial.println("[ES8311] AEC disabled by config -- mic uplink is raw");
     }
 #endif
 

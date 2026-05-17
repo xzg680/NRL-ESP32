@@ -9,5 +9,6 @@ __pycache__/
 web-flasher/firmware/*.bin
 web-flasher/firmware/bh4tdv/*.bin
 web-flasher/firmware/gezipai/*.bin
-web-flasher/firmware/gezipai_aec/*.bin
 
+web-flasher/index.html
+.claude/settings.json

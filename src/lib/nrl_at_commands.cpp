@@ -198,6 +198,10 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendUnsignedLine(payload, capacity, used, "MIC_GAIN", (config != nullptr) ? config->mic_volume : 0u) &&
            appendUnsignedLine(payload, capacity, used, "VOLUME", (config != nullptr) ? config->line_out_volume : 0u) &&
            appendKeyValueLine(payload, capacity, used, "HP_DRIVE", hp_drive) &&
+#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+           appendKeyValueLine(payload, capacity, used, "AEC",
+                              (config != nullptr && config->aec_enabled) ? "ON" : "OFF") &&
+#endif
            appendKeyValueLine(payload, capacity, used, "REBOOT", "1");
 }
 
@@ -392,7 +396,11 @@ static bool appendAllConfigLines(NrlAtCommandResult *result)
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "SSID", config->callsign_ssid) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", config->mic_volume) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOLUME", config->line_out_volume) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", config->hp_drive_enabled ? "ON" : "OFF");
+           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", config->hp_drive_enabled ? "ON" : "OFF")
+#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+           && appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AEC", config->aec_enabled ? "ON" : "OFF")
+#endif
+           ;
 }
 
 static bool applyCurrentAudioConfig(void)
@@ -710,6 +718,29 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", updated->hp_drive_enabled ? "ON" : "OFF");
         return;
     }
+
+#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+    if (stringEqualsIgnoreCase(command.command, "AEC")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AEC", config->aec_enabled ? "ON" : "OFF");
+            return;
+        }
+        bool enabled = false;
+        if (!parseBoolValue(command.value, &enabled)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "AEC");
+            return;
+        }
+        if (!EXTERNAL_RADIO_SetAecEnabled(enabled, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "AEC");
+            return;
+        }
+        // AEC is brought up by the ES8311 driver at boot; the new value takes
+        // effect after a restart.
+        const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AEC", updated->aec_enabled ? "ON" : "OFF");
+        return;
+    }
+#endif
 
     if (stringEqualsIgnoreCase(command.command, "SCI")) {
         char sci_config[32];

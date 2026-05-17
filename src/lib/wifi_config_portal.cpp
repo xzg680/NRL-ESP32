@@ -498,8 +498,17 @@ static String buildAudioSections(const ExternalRadioConfig *config)
     if (config->hp_drive_enabled) {
         html += F("checked");
     }
-    html += F("><span data-i18n=\"hpDriveText\">Enable headphone output drive (REG13 HPSW)</span></label></form></div></div>"
-              "<div class=\"subpanel\"><h3>Volume</h3><div class=\"subgrid\">");
+    html += F("><span data-i18n=\"hpDriveText\">Enable headphone output drive (REG13 HPSW)</span></label></form></div></div>");
+#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+    html += F("<div class=\"subpanel\"><h3>AEC</h3><div class=\"subgrid\">"
+              "<form class=\"item-form span-2\" method=\"post\" action=\"/save_nrl\"><label>Acoustic Echo Cancellation</label><input type=\"hidden\" name=\"aec_present\" value=\"1\"><label class=\"hint\">"
+              "<input type=\"checkbox\" name=\"aec_enabled\" value=\"1\" onchange=\"submitSwitch(this)\" ");
+    if (config->aec_enabled) {
+        html += F("checked");
+    }
+    html += F("><span>Enable esp-sr echo cancellation on mic uplink (restart to apply)</span></label></form></div></div>");
+#endif
+    html += F("<div class=\"subpanel\"><h3>Volume</h3><div class=\"subgrid\">");
     html += buildAutoSubmitSlider("mic_volume", "Mic Volume (0-255)", "micVolume", 0u, 255u, config->mic_volume);
     html += buildAutoSubmitSlider("line_out_volume", "Line Out Volume (0-255)", "lineOutVolume", 0u, 255u, config->line_out_volume);
     html += F("</div></div>"
@@ -851,6 +860,11 @@ static void handleSaveNrl()
     if (ok && s_server.hasArg("hp_drive_present")) {
         ok = EXTERNAL_RADIO_SetHpDriveEnabled(s_server.hasArg("hp_drive_enabled"), false);
     }
+#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+    if (ok && s_server.hasArg("aec_present")) {
+        ok = EXTERNAL_RADIO_SetAecEnabled(s_server.hasArg("aec_enabled"), false);
+    }
+#endif
     if (ok && s_server.hasArg("drc_present")) {
         ok = EXTERNAL_RADIO_SetDrcEnabled(s_server.hasArg("drc_enabled"), false);
     }
@@ -977,6 +991,7 @@ static void handleSaveNrl()
     const bool audio_request = s_server.hasArg("mic_volume") ||
                                s_server.hasArg("line_out_volume") ||
                                s_server.hasArg("hp_drive_present") ||
+                               s_server.hasArg("aec_present") ||
                                s_server.hasArg("drc_present") ||
                                s_server.hasArg("drc_winsize") ||
                                s_server.hasArg("drc_maxlevel") ||

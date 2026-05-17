@@ -13,7 +13,6 @@ BOOT_APP0_CANDIDATES = [
 
 # PlatformIO env name -> display name shown in the web flasher manifest.
 BOARDS = {
-    "gezipai_aec": "NRL ESP32 - 格子派 AEC",
     "gezipai": "NRL ESP32 - 格子派",
     "bh4tdv": "NRL ESP32 - BH4TDV 3188",
 }

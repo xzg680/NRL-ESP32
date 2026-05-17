@@ -269,6 +269,7 @@ static void applyDefaults(void)
     s_config.wifi_gateway = 0U;
     s_config.wifi_dns = 0U;
     s_config.wifi_dhcp_enabled = true;
+    s_config.aec_enabled = true;
     copyBounded(s_config.server_host, sizeof(s_config.server_host), NRL_AUDIO_SERVER_HOST);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), NRL_AUDIO_CALLSIGN);
     sanitizeCallsign(s_config.callsign);
@@ -378,12 +379,16 @@ static bool loadPersistedConfig(void)
         s_config.wifi_gateway = persisted.wifi_gateway;
         s_config.wifi_dns = persisted.wifi_dns;
         s_config.wifi_dhcp_enabled = persisted.wifi_dhcp_enabled != kPersistedFlagOff;
+        // reserved3[0] holds the AEC flag; 0 (configs written before the flag
+        // existed) reads as "default on".
+        s_config.aec_enabled = persisted.reserved3[0] != kPersistedFlagOff;
     } else {
         s_config.wifi_ip = 0U;
         s_config.wifi_netmask = 0U;
         s_config.wifi_gateway = 0U;
         s_config.wifi_dns = 0U;
         s_config.wifi_dhcp_enabled = true;
+        s_config.aec_enabled = true;
     }
     normalizeConfig();
     return true;
@@ -423,6 +428,7 @@ static bool savePersistedConfig(void)
     persisted.wifi_gateway = s_config.wifi_gateway;
     persisted.wifi_dns = s_config.wifi_dns;
     persisted.wifi_dhcp_enabled = s_config.wifi_dhcp_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.reserved3[0] = s_config.aec_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
@@ -793,6 +799,16 @@ bool EXTERNAL_RADIO_SetSciConfig(const uint32_t baud,
     s_config.sci.data_bits = data_bits;
     s_config.sci.parity = normalized_parity;
     s_config.sci.stop_bits = stop_bits;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAecEnabled(const bool enabled, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.aec_enabled = enabled;
     if (persist) {
         return savePersistedConfig();
     }
