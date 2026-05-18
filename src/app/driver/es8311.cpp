@@ -83,8 +83,12 @@ enum : uint8_t {
     ES8311_REG15_ADC = 0x15,
     ES8311_REG16_ADC = 0x16,
     ES8311_REG17_ADC = 0x17,
+    ES8311_REG18_ADC = 0x18,
+    ES8311_REG19_ADC = 0x19,
+    ES8311_REG1A_ADC = 0x1A,
     ES8311_REG1B_ADC = 0x1B,
     ES8311_REG1C_ADC = 0x1C,
+    ES8311_REG1D_ADCEQ = 0x1D,
     ES8311_REG31_DAC = 0x31,
     ES8311_REG32_DAC = 0x32,
     ES8311_REG33_DAC = 0x33,
@@ -111,6 +115,7 @@ enum : uint8_t {
 constexpr uint8_t kEs8311ClockEnableAll = 0x3F;
 constexpr uint8_t kEs8311AnalogMicPgaEnable = 0x1A; // mic gain from test.cpp
 constexpr uint8_t kEs8311AdcGainScaleUp = 0x24;
+constexpr uint8_t kDefaultAdcRamprate = 0x04;
 constexpr uint8_t kEs8311AdcVolumeDefault = 0xBF;  // reference es8311_start: REG17 = 0xBF
 constexpr uint8_t kEs8311DacVolumeDefault = 180U;
 // REG0D bits: PDN_ANA(7) PDN_IBIASGEN(6) PDN_ADCBIASGEN(5) PDN_ADCVERFGEN(4)
@@ -131,6 +136,7 @@ constexpr uint8_t kDefaultDrcWinsize = 0x00;
 constexpr uint8_t kDefaultDrcLevel = 0x00;
 constexpr uint8_t kDefaultDacRamprate = 0x00;
 constexpr uint32_t kDacEqCoefficientMask = 0x3FFFFFFFUL;
+constexpr uint32_t kAdcEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint8_t kEs8311DacUnmute = 0x00;
 
 struct Es8311ClockConfig {
@@ -176,6 +182,32 @@ static bool s_dac_eq_bypass = true;
 static uint32_t s_daceq_b0 = 0U;
 static uint32_t s_daceq_b1 = 0U;
 static uint32_t s_daceq_a1 = 0U;
+static bool s_adc_dmic_enabled = false;
+static bool s_adc_linsel = true;
+static uint8_t s_adc_pga_gain = 10U;
+static uint8_t s_adc_ramprate = kDefaultAdcRamprate;
+static bool s_adc_dmic_sense = false;
+static bool s_adc_sync = true;
+static bool s_adc_inv = false;
+static bool s_adc_ramclr = false;
+static uint8_t s_adc_scale = 4U;
+static bool s_alc_enabled = false;
+static bool s_adc_automute_enabled = false;
+static uint8_t s_alc_winsize = 0U;
+static uint8_t s_alc_maxlevel = 0U;
+static uint8_t s_alc_minlevel = 0U;
+static uint8_t s_adc_automute_winsize = 0U;
+static uint8_t s_adc_automute_noise_gate = 0U;
+static uint8_t s_adc_automute_volume = 0U;
+static uint8_t s_adc_hpfs1 = 10U;
+static bool s_adc_eq_bypass = true;
+static bool s_adc_hpf = true;
+static uint8_t s_adc_hpfs2 = 10U;
+static uint32_t s_adceq_b0 = 0U;
+static uint32_t s_adceq_a1 = 0U;
+static uint32_t s_adceq_a2 = 0U;
+static uint32_t s_adceq_b1 = 0U;
+static uint32_t s_adceq_b2 = 0U;
 
 static bool es8311_write_reg(uint8_t reg, uint8_t value) {
     bool ok = false;
@@ -383,6 +415,85 @@ static bool es8311_apply_daceq_coefficients(void)
            es8311_write_daceq_coeff(ES8311_REG40_DACEQ, s_daceq_a1);
 }
 
+static uint8_t es8311_adc_reg14(void)
+{
+    return static_cast<uint8_t>((s_adc_dmic_enabled ? 0x40u : 0x00u) |
+                                (s_adc_linsel ? 0x10u : 0x00u) |
+                                (s_adc_pga_gain & 0x0Fu));
+}
+
+static uint8_t es8311_adc_reg15(void)
+{
+    return static_cast<uint8_t>(((s_adc_ramprate & 0x0Fu) << 4) |
+                                (s_adc_dmic_sense ? 0x01u : 0x00u));
+}
+
+static uint8_t es8311_adc_reg16(void)
+{
+    return static_cast<uint8_t>((s_adc_sync ? 0x20u : 0x00u) |
+                                (s_adc_inv ? 0x10u : 0x00u) |
+                                (s_adc_ramclr ? 0x08u : 0x00u) |
+                                (s_adc_scale & 0x07u));
+}
+
+static uint8_t es8311_adc_reg18(void)
+{
+    return static_cast<uint8_t>((s_alc_enabled ? 0x80u : 0x00u) |
+                                (s_adc_automute_enabled ? 0x40u : 0x00u) |
+                                (s_alc_winsize & 0x0Fu));
+}
+
+static uint8_t es8311_adc_reg19(void)
+{
+    return static_cast<uint8_t>(((s_alc_maxlevel & 0x0Fu) << 4) |
+                                (s_alc_minlevel & 0x0Fu));
+}
+
+static uint8_t es8311_adc_reg1a(void)
+{
+    return static_cast<uint8_t>(((s_adc_automute_winsize & 0x0Fu) << 4) |
+                                (s_adc_automute_noise_gate & 0x0Fu));
+}
+
+static uint8_t es8311_adc_reg1b(void)
+{
+    return static_cast<uint8_t>(((s_adc_automute_volume & 0x07u) << 5) |
+                                (s_adc_hpfs1 & 0x1Fu));
+}
+
+static uint8_t es8311_adc_reg1c(void)
+{
+    return static_cast<uint8_t>((s_adc_eq_bypass ? 0x40u : 0x00u) |
+                                (s_adc_hpf ? 0x20u : 0x00u) |
+                                (s_adc_hpfs2 & 0x1Fu));
+}
+
+static bool es8311_write_adceq_coeff(const uint8_t first_reg, const uint32_t value)
+{
+    const uint32_t coeff = value & kAdcEqCoefficientMask;
+    return es8311_write_reg(first_reg, static_cast<uint8_t>((coeff >> 24) & 0x3Fu)) &&
+           es8311_write_reg(static_cast<uint8_t>(first_reg + 1U), static_cast<uint8_t>((coeff >> 16) & 0xFFu)) &&
+           es8311_write_reg(static_cast<uint8_t>(first_reg + 2U), static_cast<uint8_t>((coeff >> 8) & 0xFFu)) &&
+           es8311_write_reg(static_cast<uint8_t>(first_reg + 3U), static_cast<uint8_t>(coeff & 0xFFu));
+}
+
+static bool es8311_apply_adc_config(void)
+{
+    return es8311_write_reg(ES8311_REG14_SYSTEM, es8311_adc_reg14()) &&
+           es8311_write_reg(ES8311_REG15_ADC, es8311_adc_reg15()) &&
+           es8311_write_reg(ES8311_REG16_ADC, es8311_adc_reg16()) &&
+           es8311_write_reg(ES8311_REG18_ADC, es8311_adc_reg18()) &&
+           es8311_write_reg(ES8311_REG19_ADC, es8311_adc_reg19()) &&
+           es8311_write_reg(ES8311_REG1A_ADC, es8311_adc_reg1a()) &&
+           es8311_write_reg(ES8311_REG1B_ADC, es8311_adc_reg1b()) &&
+           es8311_write_reg(ES8311_REG1C_ADC, es8311_adc_reg1c()) &&
+           es8311_write_adceq_coeff(ES8311_REG1D_ADCEQ, s_adceq_b0) &&
+           es8311_write_adceq_coeff(static_cast<uint8_t>(ES8311_REG1D_ADCEQ + 4U), s_adceq_a1) &&
+           es8311_write_adceq_coeff(static_cast<uint8_t>(ES8311_REG1D_ADCEQ + 8U), s_adceq_a2) &&
+           es8311_write_adceq_coeff(static_cast<uint8_t>(ES8311_REG1D_ADCEQ + 12U), s_adceq_b1) &&
+           es8311_write_adceq_coeff(static_cast<uint8_t>(ES8311_REG1D_ADCEQ + 16U), s_adceq_b2);
+}
+
 static bool es8311_config_dac_output_path(const uint8_t reg12,
                                           const uint8_t reg13,
                                           const uint8_t reg31,
@@ -436,7 +547,7 @@ static bool es8311_configure_codec(void) {
         Serial.println("[ES8311] REG03 init failed");
         return false;
     }
-    if (!es8311_write_reg(ES8311_REG16_ADC, kEs8311AdcGainScaleUp)) {
+    if (!es8311_write_reg(ES8311_REG16_ADC, es8311_adc_reg16())) {
         Serial.println("[ES8311] REG16 init failed");
         return false;
     }
@@ -511,11 +622,11 @@ static bool es8311_configure_codec(void) {
         Serial.println("[ES8311] REG13 failed");
         return false;
     }
-    if (!es8311_write_reg(ES8311_REG1B_ADC, 0x0A)) {
+    if (!es8311_write_reg(ES8311_REG1B_ADC, es8311_adc_reg1b())) {
         Serial.println("[ES8311] REG1B (ADC HPF) failed");
         return false;
     }
-    if (!es8311_write_reg(ES8311_REG1C_ADC, kEs8311AdcEqBypass)) {
+    if (!es8311_write_reg(ES8311_REG1C_ADC, es8311_adc_reg1c())) {
         Serial.println("[ES8311] REG1C (ADC EQ) failed");
         return false;
     }
@@ -560,22 +671,15 @@ static bool es8311_configure_codec(void) {
         Serial.println("[ES8311] REG12 enable DAC failed");
         return false;
     }
-    if (!es8311_write_reg(ES8311_REG14_SYSTEM, kEs8311AnalogMicPgaEnable)) {
+    if (!es8311_write_reg(ES8311_REG14_SYSTEM, es8311_adc_reg14())) {
         Serial.println("[ES8311] REG14 analog mic PGA failed");
         return false;
-    }
-    if (es8311_read_reg(ES8311_REG14_SYSTEM, &regv)) {
-        regv = static_cast<uint8_t>(regv & ~0x40u);
-        if (!es8311_write_reg(ES8311_REG14_SYSTEM, regv)) {
-            Serial.println("[ES8311] REG14 analog mic select failed");
-            return false;
-        }
     }
     if (!es8311_write_reg(ES8311_REG0D_SYSTEM, kEs8311PowerUpAnalog)) {
         Serial.println("[ES8311] REG0D power-up analog failed");
         return false;
     }
-    if (!es8311_write_reg(ES8311_REG15_ADC, 0x40)) {
+    if (!es8311_apply_adc_config()) {
         Serial.println("[ES8311] REG15 ADC ramp rate failed");
         return false;
     }
@@ -606,12 +710,12 @@ static bool es8311_configure_codec(void) {
             { ES8311_REG0A_SDPOUT, "0A SDPOUT(ADC fmt)", 0x0C },
             { ES8311_REG0D_SYSTEM, "0D PDN_ANA",         kEs8311PowerUpAnalog },
             { ES8311_REG0E_SYSTEM, "0E PDN_PGA/ADC",     kEs8311PowerUpPgaAdc },
-            { ES8311_REG14_SYSTEM, "14 mic PGA/select",  0x1A },
-            { ES8311_REG15_ADC,    "15 ADC ramp",        0x40 },
-            { ES8311_REG16_ADC,    "16 ADC gain",        kEs8311AdcGainScaleUp },
+            { ES8311_REG14_SYSTEM, "14 mic PGA/select",  es8311_adc_reg14() },
+            { ES8311_REG15_ADC,    "15 ADC ramp",        es8311_adc_reg15() },
+            { ES8311_REG16_ADC,    "16 ADC gain",        es8311_adc_reg16() },
             { ES8311_REG17_ADC,    "17 ADC volume",      s_mic_volume },
-            { ES8311_REG1B_ADC,    "1B ADC HPF",         0x0A },
-            { ES8311_REG1C_ADC,    "1C ADC EQ",          kEs8311AdcEqBypass },
+            { ES8311_REG1B_ADC,    "1B ADC HPF",         es8311_adc_reg1b() },
+            { ES8311_REG1C_ADC,    "1C ADC EQ",          es8311_adc_reg1c() },
         };
         for (const RegCheck &c : checks) {
             uint8_t v = 0;
@@ -1238,7 +1342,33 @@ bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
                              const bool dac_eq_bypass,
                              const uint32_t daceq_b0,
                              const uint32_t daceq_b1,
-                             const uint32_t daceq_a1) {
+                             const uint32_t daceq_a1,
+                             const bool adc_dmic_enabled,
+                             const bool adc_linsel,
+                             const uint8_t adc_pga_gain,
+                             const uint8_t adc_ramprate,
+                             const bool adc_dmic_sense,
+                             const bool adc_sync,
+                             const bool adc_inv,
+                             const bool adc_ramclr,
+                             const uint8_t adc_scale,
+                             const bool alc_enabled,
+                             const bool adc_automute_enabled,
+                             const uint8_t alc_winsize,
+                             const uint8_t alc_maxlevel,
+                             const uint8_t alc_minlevel,
+                             const uint8_t adc_automute_winsize,
+                             const uint8_t adc_automute_noise_gate,
+                             const uint8_t adc_automute_volume,
+                             const uint8_t adc_hpfs1,
+                             const bool adc_eq_bypass,
+                             const bool adc_hpf,
+                             const uint8_t adc_hpfs2,
+                             const uint32_t adceq_b0,
+                             const uint32_t adceq_a1,
+                             const uint32_t adceq_a2,
+                             const uint32_t adceq_b1,
+                             const uint32_t adceq_b2) {
     s_mic_volume = mic_volume;
     s_line_out_volume = line_out_volume;
     s_hp_drive_enabled = hp_drive_enabled;
@@ -1257,6 +1387,32 @@ bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
     s_daceq_b0 = daceq_b0 & kDacEqCoefficientMask;
     s_daceq_b1 = daceq_b1 & kDacEqCoefficientMask;
     s_daceq_a1 = daceq_a1 & kDacEqCoefficientMask;
+    s_adc_dmic_enabled = adc_dmic_enabled;
+    s_adc_linsel = adc_linsel;
+    s_adc_pga_gain = adc_pga_gain & 0x0Fu;
+    s_adc_ramprate = adc_ramprate & 0x0Fu;
+    s_adc_dmic_sense = adc_dmic_sense;
+    s_adc_sync = adc_sync;
+    s_adc_inv = adc_inv;
+    s_adc_ramclr = adc_ramclr;
+    s_adc_scale = adc_scale & 0x07u;
+    s_alc_enabled = alc_enabled;
+    s_adc_automute_enabled = adc_automute_enabled;
+    s_alc_winsize = alc_winsize & 0x0Fu;
+    s_alc_maxlevel = alc_maxlevel & 0x0Fu;
+    s_alc_minlevel = alc_minlevel & 0x0Fu;
+    s_adc_automute_winsize = adc_automute_winsize & 0x0Fu;
+    s_adc_automute_noise_gate = adc_automute_noise_gate & 0x0Fu;
+    s_adc_automute_volume = adc_automute_volume & 0x07u;
+    s_adc_hpfs1 = adc_hpfs1 & 0x1Fu;
+    s_adc_eq_bypass = adc_eq_bypass;
+    s_adc_hpf = adc_hpf;
+    s_adc_hpfs2 = adc_hpfs2 & 0x1Fu;
+    s_adceq_b0 = adceq_b0 & kAdcEqCoefficientMask;
+    s_adceq_a1 = adceq_a1 & kAdcEqCoefficientMask;
+    s_adceq_a2 = adceq_a2 & kAdcEqCoefficientMask;
+    s_adceq_b1 = adceq_b1 & kAdcEqCoefficientMask;
+    s_adceq_b2 = adceq_b2 & kAdcEqCoefficientMask;
 
     if (!s_es8311_ready) {
         Serial.printf("[ES8311] audio config pending: mic=0x%02X line_out=0x%02X hp_drive=%u drc=%u,%u,%u,%u ramp=%u eq_bypass=%u eq=%lu,%lu,%lu\n",
@@ -1282,7 +1438,8 @@ bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
                                       kEs8311DacUnmute,
                                       s_line_out_volume) &&
         es8311_apply_drc_config() &&
-        es8311_apply_daceq_coefficients();
+        es8311_apply_daceq_coefficients() &&
+        es8311_apply_adc_config();
     if (!ok) {
         Serial.printf("[ES8311] audio config apply failed: mic=0x%02X line_out=0x%02X hp_drive=%u drc=%u,%u,%u,%u ramp=%u eq_bypass=%u eq=%lu,%lu,%lu\n",
                       static_cast<unsigned>(s_mic_volume),

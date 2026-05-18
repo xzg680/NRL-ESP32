@@ -212,29 +212,6 @@ const translations = {
       }
     }
 
-    function setEqField(name, value) {
-      const slider = document.querySelector('input.eq-slider[name="' + name + '"]');
-      if (!slider) return;
-      slider.value = clampEqValue(value);
-      syncEqValue(slider);
-    }
-
-    function applyDacEqPreset(name) {
-      const bypass = document.querySelector('input[name="dac_eq_bypass"]');
-      const presets = {
-        flat: {bypass: true, b0: 0, b1: 0, a1: 0},
-        neutral: {bypass: false, b0: 536870912, b1: 0, a1: 0},
-        voice_bright: {bypass: false, b0: 570425344, b1: 33554432, a1: 503316480},
-        voice_soft: {bypass: false, b0: 503316480, b1: 67108864, a1: 469762048},
-        low_cut: {bypass: false, b0: 536870912, b1: 1040187392, a1: 503316480}
-      };
-      const p = presets[name] || presets.flat;
-      if (bypass) bypass.checked = p.bypass;
-      setEqField('daceq_b0', p.b0);
-      setEqField('daceq_b1', p.b1);
-      setEqField('daceq_a1', p.a1);
-    }
-
     async function scanWifi() {
       const status = document.getElementById('scan-status');
       const select = document.getElementById('wifi-ssid-select');

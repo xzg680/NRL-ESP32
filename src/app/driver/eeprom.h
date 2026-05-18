@@ -18,6 +18,7 @@
 #define DRIVER_EEPROM_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 // EEPROM 设备地址
@@ -32,6 +33,8 @@ extern "C" {
 void EEPROM_Init(void);
 void EEPROM_ReadBuffer(uint32_t Address, void *pBuffer, uint8_t Size);
 void EEPROM_WriteBuffer(uint32_t Address, const void *pBuffer, uint8_t Size);
+void EEPROM_ReadBufferLarge(uint32_t Address, void *pBuffer, size_t Size);
+void EEPROM_WriteBufferLarge(uint32_t Address, const void *pBuffer, size_t Size);
 
 // 仅用于诊断：返回指定地址所在块是否在 I2C 上应答
 bool EEPROM_Probe(uint32_t Address);

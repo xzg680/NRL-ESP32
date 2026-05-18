@@ -1,6 +1,6 @@
 {
   "name": "NRL ESP32 - BH4TDV 3188",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "new_install_prompt_erase": true,
   "builds": [
     {

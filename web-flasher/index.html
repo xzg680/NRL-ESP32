@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>NRL ESP32 USB Web Flasher</title>
-  <script type="module" src="esp-web-tools/install-button.js"></script>
+  <script type="module" src="esp-web-tools/install-button.js?v=2"></script>
   <style>
     :root {
       color-scheme: light dark;
@@ -510,7 +510,7 @@
       boardRadios.forEach((radio) => { radio.checked = (radio.value === board); });
       if (board) {
         localStorage.setItem("nrl_board", board);
-        installEwts.forEach((el) => el.setAttribute("manifest", "manifest-" + board + ".json"));
+        installEwts.forEach((el) => el.setAttribute("manifest", "manifest-" + board + ".json?v=" + Date.now()));
         installBtns.forEach((btn) => { btn.disabled = false; });
       } else {
         localStorage.removeItem("nrl_board");

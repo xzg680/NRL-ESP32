@@ -418,3 +418,96 @@ void EEPROM_WriteBuffer(uint32_t Address, const void *pBuffer, uint8_t WRITE_SIZ
     }
 
 }
+
+void EEPROM_ReadBufferLarge(uint32_t Address, void *pBuffer, size_t Size) {
+    if (Size == 0U || pBuffer == nullptr) {
+        return;
+    }
+
+    uint8_t *dst = (uint8_t *)pBuffer;
+    while (Size > 0U) {
+        size_t chunk = Size;
+        if (chunk > 128U) {
+            chunk = 128U;
+        }
+
+        EEPROM_ReadBuffer(Address, dst, (uint8_t)chunk);
+        Address += (uint32_t)chunk;
+        dst += chunk;
+        Size -= chunk;
+        delay(0);
+    }
+}
+
+void EEPROM_WriteBufferLarge(uint32_t Address, const void *pBuffer, size_t Size) {
+    if (Size == 0U || pBuffer == nullptr) {
+        return;
+    }
+
+#if defined(ARDUINO_ARCH_ESP32) && !defined(ENABLE_OPENCV)
+    if (Address < EEPROM_DIRECT_EEPROM_LIMIT &&
+        Size > (size_t)(EEPROM_DIRECT_EEPROM_LIMIT - Address) &&
+        EEPROM_SharedLogicalSize() > 0U) {
+        const size_t firstChunk = (size_t)(EEPROM_DIRECT_EEPROM_LIMIT - Address);
+        EEPROM_WriteBufferLarge(Address, pBuffer, firstChunk);
+        EEPROM_WriteBufferLarge(EEPROM_DIRECT_EEPROM_LIMIT,
+                                (const uint8_t *)pBuffer + firstChunk,
+                                Size - firstChunk);
+        return;
+    }
+
+    if (!EEPROM_IsDirectEepromRange(Address, (uint32_t)Size) && EEPROM_SharedLogicalSize() > 0U) {
+        const uint8_t *src = (const uint8_t *)pBuffer;
+        uint8_t *verify = (uint8_t *)malloc(Size);
+        uint32_t remaining = (uint32_t)Size;
+
+        while (remaining > 0U) {
+            const uint32_t span = EEPROM_ContiguousSpan(Address);
+            uint32_t chunk = span;
+            uint32_t off = 0U;
+
+            if (chunk == 0U) {
+                free(verify);
+                return;
+            }
+            if (chunk > remaining) {
+                chunk = remaining;
+            }
+            if (!EEPROM_AddressToSharedOffset(Address, chunk, &off)) {
+                free(verify);
+                return;
+            }
+
+            bool same = false;
+            if (verify != nullptr && shared_read((size_t)off, verify, (size_t)chunk)) {
+                same = memcmp(src, verify, (size_t)chunk) == 0;
+            }
+            if (!same) {
+                (void)shared_write((size_t)off, src, (size_t)chunk);
+            }
+
+            Address += chunk;
+            src += chunk;
+            remaining -= chunk;
+            delay(0);
+        }
+
+        free(verify);
+        return;
+    }
+#endif
+
+    const uint8_t *src = (const uint8_t *)pBuffer;
+    while (Size > 0U) {
+        size_t chunk = Size;
+        if (chunk > 8U) {
+            chunk = 8U;
+        }
+
+        EEPROM_WriteBuffer(Address, src, (uint8_t)chunk);
+        Address += (uint32_t)chunk;
+        src += chunk;
+        Size -= chunk;
+        delay(0);
+    }
+}

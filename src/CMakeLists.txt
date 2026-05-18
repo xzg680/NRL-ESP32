@@ -13,6 +13,7 @@ set(app_sources
     lib/nrl_at_commands.cpp
     lib/nrl_audio_bridge.cpp
     lib/wifi_config_portal.cpp
+    lib/wifi_config_portal_view.cpp
 )
 
 idf_component_register(

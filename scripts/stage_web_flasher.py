@@ -1,11 +1,13 @@
 from pathlib import Path
 import json
+import re
 import shutil
 import sys
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = PROJECT_DIR / "web-flasher"
+VERSION_HEADER = PROJECT_DIR / "src" / "lib" / "nrl_version.h"
 BOOT_APP0_CANDIDATES = [
     PROJECT_DIR / ".platformio" / "packages" / "framework-arduinoespressif32" / "tools" / "partitions" / "boot_app0.bin",
     Path.home() / ".platformio" / "packages" / "framework-arduinoespressif32" / "tools" / "partitions" / "boot_app0.bin",
@@ -13,7 +15,7 @@ BOOT_APP0_CANDIDATES = [
 
 # PlatformIO env name -> display name shown in the web flasher manifest.
 BOARDS = {
-    "gezipai": "NRL ESP32 - 格子派",
+    "gezipai": "NRL ESP32 - Gezipai",
     "bh4tdv": "NRL ESP32 - BH4TDV 3188",
 }
 
@@ -72,12 +74,28 @@ def stage_board(board, display_name, version, boot_app0):
     return True
 
 
+def read_firmware_version():
+    if not VERSION_HEADER.exists():
+        return None
+
+    text = VERSION_HEADER.read_text(encoding="utf-8", errors="ignore")
+    match = re.search(r'^\s*#\s*define\s+NRL_FIRMWARE_VERSION\s+"([^"]+)"', text, re.MULTILINE)
+    if match:
+        return match.group(1)
+    return None
+
+
 def parse_version(args):
+    for arg in args:
+        if arg.startswith("--version="):
+            value = arg.split("=", 1)[1].strip()
+            if value:
+                return value
     if "--version" in args:
         i = args.index("--version")
         if i + 1 < len(args):
             return args[i + 1]
-    return "0.0.0"
+    return read_firmware_version() or "0.0.0"
 
 
 def parse_boards(args):

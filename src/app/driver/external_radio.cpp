@@ -19,10 +19,11 @@ namespace {
 
 constexpr uint32_t kConfigAddress = 0x2C00U;
 constexpr uint32_t kConfigMagic = 0x58455655U;
-constexpr uint8_t kConfigVersion = 4U;
+constexpr uint8_t kConfigVersion = 5U;
 constexpr uint8_t kLegacyConfigVersion1 = 1U;
 constexpr uint8_t kLegacyConfigVersion2 = 2U;
 constexpr uint8_t kLegacyConfigVersion3 = 3U;
+constexpr uint8_t kLegacyConfigVersion4 = 4U;
 constexpr uint8_t kMinChannel = 0U;
 constexpr uint8_t kMaxChannel = 7U;
 constexpr uint8_t kDefaultMicVolume = 0xE0U;
@@ -36,6 +37,7 @@ constexpr uint8_t kDefaultDrcMaxlevel = 0U;
 constexpr uint8_t kDefaultDrcMinlevel = 0U;
 constexpr uint8_t kDefaultDacRamprate = 0U;
 constexpr uint32_t kDacEqCoefficientMask = 0x3FFFFFFFUL;
+constexpr uint32_t kAdcEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint32_t kDefaultSciBaud = 9600U;
 constexpr uint8_t kDefaultSciDataBits = 8U;
 constexpr char kDefaultSciParity = 'N';
@@ -72,6 +74,20 @@ struct PersistedExternalRadioConfig {
     uint32_t wifi_dns;
     uint8_t wifi_dhcp_enabled;
     uint8_t reserved3[7];
+    uint8_t adc_reg14;
+    uint8_t adc_reg15;
+    uint8_t adc_reg16;
+    uint8_t adc_reg18;
+    uint8_t adc_reg19;
+    uint8_t adc_reg1a;
+    uint8_t adc_reg1b;
+    uint8_t adc_reg1c;
+    uint32_t adceq_b0;
+    uint32_t adceq_a1;
+    uint32_t adceq_a2;
+    uint32_t adceq_b1;
+    uint32_t adceq_b2;
+    uint8_t reserved4[4];
 } __attribute__((packed));
 
 static_assert((sizeof(PersistedExternalRadioConfig) % 8U) == 0U, "config must stay 8-byte aligned");
@@ -212,6 +228,121 @@ static void applyDefaultDrcConfig(void)
     s_config.daceq_a1 = 0U;
 }
 
+static uint8_t adcReg14(void)
+{
+    return static_cast<uint8_t>((s_config.adc_dmic_enabled ? 0x40U : 0x00U) |
+                                (s_config.adc_linsel ? 0x10U : 0x00U) |
+                                (s_config.adc_pga_gain & 0x0FU));
+}
+
+static uint8_t adcReg15(void)
+{
+    return static_cast<uint8_t>(((s_config.adc_ramprate & 0x0FU) << 4) |
+                                (s_config.adc_dmic_sense ? 0x01U : 0x00U));
+}
+
+static uint8_t adcReg16(void)
+{
+    return static_cast<uint8_t>((s_config.adc_sync ? 0x20U : 0x00U) |
+                                (s_config.adc_inv ? 0x10U : 0x00U) |
+                                (s_config.adc_ramclr ? 0x08U : 0x00U) |
+                                (s_config.adc_scale & 0x07U));
+}
+
+static uint8_t adcReg18(void)
+{
+    return static_cast<uint8_t>((s_config.alc_enabled ? 0x80U : 0x00U) |
+                                (s_config.adc_automute_enabled ? 0x40U : 0x00U) |
+                                (s_config.alc_winsize & 0x0FU));
+}
+
+static uint8_t adcReg19(void)
+{
+    return static_cast<uint8_t>(((s_config.alc_maxlevel & 0x0FU) << 4) |
+                                (s_config.alc_minlevel & 0x0FU));
+}
+
+static uint8_t adcReg1a(void)
+{
+    return static_cast<uint8_t>(((s_config.adc_automute_winsize & 0x0FU) << 4) |
+                                (s_config.adc_automute_noise_gate & 0x0FU));
+}
+
+static uint8_t adcReg1b(void)
+{
+    return static_cast<uint8_t>(((s_config.adc_automute_volume & 0x07U) << 5) |
+                                (s_config.adc_hpfs1 & 0x1FU));
+}
+
+static uint8_t adcReg1c(void)
+{
+    return static_cast<uint8_t>((s_config.adc_eq_bypass ? 0x40U : 0x00U) |
+                                (s_config.adc_hpf ? 0x20U : 0x00U) |
+                                (s_config.adc_hpfs2 & 0x1FU));
+}
+
+static void applyDefaultAdcConfig(void)
+{
+    s_config.adc_dmic_enabled = false;
+    s_config.adc_linsel = true;
+    s_config.adc_pga_gain = 10U;
+    s_config.adc_ramprate = 4U;
+    s_config.adc_dmic_sense = false;
+    s_config.adc_sync = true;
+    s_config.adc_inv = false;
+    s_config.adc_ramclr = false;
+    s_config.adc_scale = 4U;
+    s_config.alc_enabled = false;
+    s_config.adc_automute_enabled = false;
+    s_config.alc_winsize = 0U;
+    s_config.alc_maxlevel = 0U;
+    s_config.alc_minlevel = 0U;
+    s_config.adc_automute_winsize = 0U;
+    s_config.adc_automute_noise_gate = 0U;
+    s_config.adc_automute_volume = 0U;
+    s_config.adc_hpfs1 = 10U;
+    s_config.adc_eq_bypass = true;
+    s_config.adc_hpf = true;
+    s_config.adc_hpfs2 = 10U;
+    s_config.adceq_b0 = 0U;
+    s_config.adceq_a1 = 0U;
+    s_config.adceq_a2 = 0U;
+    s_config.adceq_b1 = 0U;
+    s_config.adceq_b2 = 0U;
+}
+
+static void loadAdcRegisters(const uint8_t reg14,
+                             const uint8_t reg15,
+                             const uint8_t reg16,
+                             const uint8_t reg18,
+                             const uint8_t reg19,
+                             const uint8_t reg1a,
+                             const uint8_t reg1b,
+                             const uint8_t reg1c)
+{
+    s_config.adc_dmic_enabled = (reg14 & 0x40U) != 0U;
+    s_config.adc_linsel = (reg14 & 0x10U) != 0U;
+    s_config.adc_pga_gain = reg14 & 0x0FU;
+    s_config.adc_ramprate = (reg15 >> 4) & 0x0FU;
+    s_config.adc_dmic_sense = (reg15 & 0x01U) != 0U;
+    s_config.adc_sync = (reg16 & 0x20U) != 0U;
+    s_config.adc_inv = (reg16 & 0x10U) != 0U;
+    s_config.adc_ramclr = (reg16 & 0x08U) != 0U;
+    s_config.adc_scale = reg16 & 0x07U;
+    s_config.alc_enabled = (reg18 & 0x80U) != 0U;
+    s_config.adc_automute_enabled = (reg18 & 0x40U) != 0U;
+    s_config.alc_winsize = reg18 & 0x0FU;
+    s_config.alc_maxlevel = (reg19 >> 4) & 0x0FU;
+    s_config.alc_minlevel = reg19 & 0x0FU;
+    s_config.adc_automute_winsize = (reg1a >> 4) & 0x0FU;
+    s_config.adc_automute_noise_gate = reg1a & 0x0FU;
+    s_config.adc_automute_volume = (reg1b >> 5) & 0x07U;
+    s_config.adc_hpfs1 = reg1b & 0x1FU;
+    s_config.adc_eq_bypass = (reg1c & 0x40U) != 0U;
+    s_config.adc_hpf = (reg1c & 0x20U) != 0U;
+    s_config.adc_hpfs2 = reg1c & 0x1FU;
+}
+
 static void applyAudioConfigToCodec(void)
 {
     ES8311_ApplyAudioConfig(s_config.mic_volume,
@@ -225,7 +356,33 @@ static void applyAudioConfigToCodec(void)
                             s_config.dac_eq_bypass,
                             s_config.daceq_b0,
                             s_config.daceq_b1,
-                            s_config.daceq_a1);
+                            s_config.daceq_a1,
+                            s_config.adc_dmic_enabled,
+                            s_config.adc_linsel,
+                            s_config.adc_pga_gain,
+                            s_config.adc_ramprate,
+                            s_config.adc_dmic_sense,
+                            s_config.adc_sync,
+                            s_config.adc_inv,
+                            s_config.adc_ramclr,
+                            s_config.adc_scale,
+                            s_config.alc_enabled,
+                            s_config.adc_automute_enabled,
+                            s_config.alc_winsize,
+                            s_config.alc_maxlevel,
+                            s_config.alc_minlevel,
+                            s_config.adc_automute_winsize,
+                            s_config.adc_automute_noise_gate,
+                            s_config.adc_automute_volume,
+                            s_config.adc_hpfs1,
+                            s_config.adc_eq_bypass,
+                            s_config.adc_hpf,
+                            s_config.adc_hpfs2,
+                            s_config.adceq_b0,
+                            s_config.adceq_a1,
+                            s_config.adceq_a2,
+                            s_config.adceq_b1,
+                            s_config.adceq_b2);
 }
 
 // Drives the BH4TDV radio's channel-select GPIOs. 格子派 has no channel-
@@ -261,6 +418,7 @@ static void applyDefaults(void)
     s_config.line_out_volume = kDefaultLineOutVolume;
     s_config.hp_drive_enabled = false;
     applyDefaultDrcConfig();
+    applyDefaultAdcConfig();
     applyDefaultSciConfig();
     s_config.wifi_ssid[0] = '\0';
     s_config.wifi_password[0] = '\0';
@@ -318,20 +476,37 @@ static void normalizeConfig(void)
     s_config.daceq_b0 &= kDacEqCoefficientMask;
     s_config.daceq_b1 &= kDacEqCoefficientMask;
     s_config.daceq_a1 &= kDacEqCoefficientMask;
+    if (s_config.adc_pga_gain > 10U) {
+        s_config.adc_pga_gain = 10U;
+    }
+    s_config.adc_ramprate &= 0x0FU;
+    s_config.adc_scale &= 0x07U;
+    s_config.alc_winsize &= 0x0FU;
+    s_config.alc_maxlevel &= 0x0FU;
+    s_config.alc_minlevel &= 0x0FU;
+    s_config.adc_automute_winsize &= 0x0FU;
+    s_config.adc_automute_noise_gate &= 0x0FU;
+    s_config.adc_automute_volume &= 0x07U;
+    s_config.adc_hpfs1 &= 0x1FU;
+    s_config.adc_hpfs2 &= 0x1FU;
+    s_config.adceq_b0 &= kAdcEqCoefficientMask;
+    s_config.adceq_a1 &= kAdcEqCoefficientMask;
+    s_config.adceq_a2 &= kAdcEqCoefficientMask;
+    s_config.adceq_b1 &= kAdcEqCoefficientMask;
+    s_config.adceq_b2 &= kAdcEqCoefficientMask;
 }
 
 static bool loadPersistedConfig(void)
 {
     PersistedExternalRadioConfig persisted = {};
-    for (uint8_t offset = 0U; offset < sizeof(persisted); offset += 8U) {
-        EEPROM_ReadBuffer(kConfigAddress + offset, reinterpret_cast<uint8_t *>(&persisted) + offset, 8U);
-    }
+    EEPROM_ReadBufferLarge(kConfigAddress, &persisted, sizeof(persisted));
 
     if (persisted.magic != kConfigMagic ||
         (persisted.version != kConfigVersion &&
          persisted.version != kLegacyConfigVersion1 &&
          persisted.version != kLegacyConfigVersion2 &&
-         persisted.version != kLegacyConfigVersion3)) {
+         persisted.version != kLegacyConfigVersion3 &&
+         persisted.version != kLegacyConfigVersion4)) {
         return false;
     }
 
@@ -373,7 +548,7 @@ static bool loadPersistedConfig(void)
         s_config.daceq_b1 = 0U;
         s_config.daceq_a1 = 0U;
     }
-    if (persisted.version == kConfigVersion) {
+    if (persisted.version >= kLegacyConfigVersion4) {
         s_config.wifi_ip = persisted.wifi_ip;
         s_config.wifi_netmask = persisted.wifi_netmask;
         s_config.wifi_gateway = persisted.wifi_gateway;
@@ -389,6 +564,23 @@ static bool loadPersistedConfig(void)
         s_config.wifi_dns = 0U;
         s_config.wifi_dhcp_enabled = true;
         s_config.aec_enabled = true;
+    }
+    if (persisted.version == kConfigVersion) {
+        loadAdcRegisters(persisted.adc_reg14,
+                         persisted.adc_reg15,
+                         persisted.adc_reg16,
+                         persisted.adc_reg18,
+                         persisted.adc_reg19,
+                         persisted.adc_reg1a,
+                         persisted.adc_reg1b,
+                         persisted.adc_reg1c);
+        s_config.adceq_b0 = persisted.adceq_b0;
+        s_config.adceq_a1 = persisted.adceq_a1;
+        s_config.adceq_a2 = persisted.adceq_a2;
+        s_config.adceq_b1 = persisted.adceq_b1;
+        s_config.adceq_b2 = persisted.adceq_b2;
+    } else {
+        applyDefaultAdcConfig();
     }
     normalizeConfig();
     return true;
@@ -429,14 +621,25 @@ static bool savePersistedConfig(void)
     persisted.wifi_dns = s_config.wifi_dns;
     persisted.wifi_dhcp_enabled = s_config.wifi_dhcp_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[0] = s_config.aec_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.adc_reg14 = adcReg14();
+    persisted.adc_reg15 = adcReg15();
+    persisted.adc_reg16 = adcReg16();
+    persisted.adc_reg18 = adcReg18();
+    persisted.adc_reg19 = adcReg19();
+    persisted.adc_reg1a = adcReg1a();
+    persisted.adc_reg1b = adcReg1b();
+    persisted.adc_reg1c = adcReg1c();
+    persisted.adceq_b0 = s_config.adceq_b0 & kAdcEqCoefficientMask;
+    persisted.adceq_a1 = s_config.adceq_a1 & kAdcEqCoefficientMask;
+    persisted.adceq_a2 = s_config.adceq_a2 & kAdcEqCoefficientMask;
+    persisted.adceq_b1 = s_config.adceq_b1 & kAdcEqCoefficientMask;
+    persisted.adceq_b2 = s_config.adceq_b2 & kAdcEqCoefficientMask;
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
     copyBounded(persisted.callsign, sizeof(persisted.callsign), s_config.callsign);
 
-    for (uint8_t offset = 0U; offset < sizeof(persisted); offset += 8U) {
-        EEPROM_WriteBuffer(kConfigAddress + offset, reinterpret_cast<const uint8_t *>(&persisted) + offset, 8U);
-    }
+    EEPROM_WriteBufferLarge(kConfigAddress, &persisted, sizeof(persisted));
     return true;
 }
 
@@ -776,6 +979,153 @@ bool EXTERNAL_RADIO_SetDacEqCoefficients(const uint32_t b0,
     s_config.daceq_b0 = b0;
     s_config.daceq_b1 = b1;
     s_config.daceq_a1 = a1;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAdcSystemConfig(const bool dmic_enabled,
+                                       const bool linsel,
+                                       const uint8_t pga_gain,
+                                       const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (pga_gain > 10U) {
+        return false;
+    }
+    s_config.adc_dmic_enabled = dmic_enabled;
+    s_config.adc_linsel = linsel;
+    s_config.adc_pga_gain = pga_gain;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAdcRampConfig(const uint8_t ramprate,
+                                     const bool dmic_sense,
+                                     const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (ramprate > 15U) {
+        return false;
+    }
+    s_config.adc_ramprate = ramprate;
+    s_config.adc_dmic_sense = dmic_sense;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAdcScaleConfig(const bool sync,
+                                      const bool inv,
+                                      const bool ramclr,
+                                      const uint8_t scale,
+                                      const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (scale > 7U) {
+        return false;
+    }
+    s_config.adc_sync = sync;
+    s_config.adc_inv = inv;
+    s_config.adc_ramclr = ramclr;
+    s_config.adc_scale = scale;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAlcConfig(const bool enabled,
+                                 const bool automute_enabled,
+                                 const uint8_t winsize,
+                                 const uint8_t maxlevel,
+                                 const uint8_t minlevel,
+                                 const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (winsize > 15U || maxlevel > 15U || minlevel > 15U) {
+        return false;
+    }
+    s_config.alc_enabled = enabled;
+    s_config.adc_automute_enabled = automute_enabled;
+    s_config.alc_winsize = winsize;
+    s_config.alc_maxlevel = maxlevel;
+    s_config.alc_minlevel = minlevel;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAdcAutomuteConfig(const uint8_t winsize,
+                                         const uint8_t noise_gate,
+                                         const uint8_t volume,
+                                         const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (winsize > 15U || noise_gate > 15U || volume > 7U) {
+        return false;
+    }
+    s_config.adc_automute_winsize = winsize;
+    s_config.adc_automute_noise_gate = noise_gate;
+    s_config.adc_automute_volume = volume;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAdcHpfConfig(const uint8_t hpfs1,
+                                    const bool eq_bypass,
+                                    const bool hpf,
+                                    const uint8_t hpfs2,
+                                    const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (hpfs1 > 31U || hpfs2 > 31U) {
+        return false;
+    }
+    s_config.adc_hpfs1 = hpfs1;
+    s_config.adc_eq_bypass = eq_bypass;
+    s_config.adc_hpf = hpf;
+    s_config.adc_hpfs2 = hpfs2;
+    applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAdcEqCoefficients(const uint32_t b0,
+                                         const uint32_t a1,
+                                         const uint32_t a2,
+                                         const uint32_t b1,
+                                         const uint32_t b2,
+                                         const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if ((b0 & ~kAdcEqCoefficientMask) != 0U ||
+        (a1 & ~kAdcEqCoefficientMask) != 0U ||
+        (a2 & ~kAdcEqCoefficientMask) != 0U ||
+        (b1 & ~kAdcEqCoefficientMask) != 0U ||
+        (b2 & ~kAdcEqCoefficientMask) != 0U) {
+        return false;
+    }
+    s_config.adceq_b0 = b0;
+    s_config.adceq_a1 = a1;
+    s_config.adceq_a2 = a2;
+    s_config.adceq_b1 = b1;
+    s_config.adceq_b2 = b2;
     applyAudioConfigToCodec();
     if (persist) {
         return savePersistedConfig();

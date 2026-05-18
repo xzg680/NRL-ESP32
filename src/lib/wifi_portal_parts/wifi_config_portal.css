@@ -40,10 +40,11 @@
     .subpanel{grid-column:1/-1;border:1px solid var(--line);border-radius:8px;padding:12px;background:#f8fafc;}
     .subpanel h3{margin:0 0 12px;font-size:15px;letter-spacing:0;}
     .subgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px;}
+    .group-label{border-top:1px solid var(--line);padding-top:12px;margin-top:2px;color:var(--accent-2);font-size:13px;font-weight:700;}
+    .subgrid>.group-label:first-child{border-top:0;padding-top:0;margin-top:0;}
     .eq-panel{border:1px solid var(--line);border-radius:8px;padding:12px;background:#f8fafc;}
     .eq-control{margin:12px 0;}
     .eq-row{display:grid;grid-template-columns:minmax(0,1fr) 170px;gap:12px;align-items:center;}
-    .eq-presets{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px;}
     input.eq-slider{padding:0;min-height:32px;}
     input.eq-value{min-height:36px;font-size:13px;}
     input.auto-slider{padding:0;min-height:32px;}
@@ -61,11 +62,10 @@
       .grid{grid-template-columns:1fr;}
       .subgrid{grid-template-columns:1fr;}
       .subpanel{padding:10px;}
+      .group-label{padding-top:10px;}
       .span-2{grid-column:auto;}
       .eq-row{grid-template-columns:1fr;}
       .eq-control{margin:10px 0;}
-      .eq-presets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
-      .eq-presets .btn-small{width:100%;min-width:0;padding-left:8px;padding-right:8px;}
       input.eq-value{font-size:12px;}
       .actions{justify-content:stretch;}
       button,.button{width:100%;}
