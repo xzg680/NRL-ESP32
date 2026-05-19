@@ -43,6 +43,69 @@ const translations = {
         audio: 'Audio',
         micVolume: 'Mic Volume (0-255)',
         lineOutVolume: 'Line Out Volume (0-255)',
+        volume: 'Volume',
+        adc: 'ADC',
+        dac: 'DAC',
+        aec: 'AEC',
+        drc: 'DRC',
+        eq: 'EQ',
+        input: 'Input',
+        aecLabel: 'Acoustic Echo Cancellation',
+        aecText: 'Enable esp-sr echo cancellation on mic uplink (restart to apply)',
+        dmic: 'DMIC',
+        dmicText: 'REG14 bit6 select DMIC from MIC1P',
+        micInput: 'MIC1P-MIC1N Input',
+        micInputText: 'REG14 bit4 line input select',
+        adcPgaGain: 'ADC PGA Gain (0-10)',
+        adcRampRate: 'ADC VC Ramp Rate (0-15)',
+        adcGainScale: 'ADC Gain Scale (0-7)',
+        dmicLatchSense: 'DMIC Latch Sense',
+        dmicLatchSenseText: 'REG15 bit0 latch on negative edge',
+        adcSync: 'ADC Sync',
+        adcSyncText: 'REG16 bit5 standard audio clock',
+        adcInvert: 'ADC Invert',
+        adcInvertText: 'REG16 bit4 ADC polarity inverted',
+        adcRamClear: 'ADC RAM Clear',
+        adcRamClearText: 'REG16 bit3 clear ADC RAM',
+        alcAutomute: 'ALC / Automute',
+        alcEnable: 'ALC Enable',
+        alcEnableText: 'REG18 bit7 auto level control',
+        adcAutomuteEnable: 'ADC Automute Enable',
+        adcAutomuteEnableText: 'REG18 bit6 automute',
+        alcWindowSize: 'ALC Window Size (0-15)',
+        alcMaxLevel: 'ALC Max Level (0-15)',
+        alcMinLevel: 'ALC Min Level (0-15)',
+        adcAutomuteWindow: 'ADC Automute Window (0-15)',
+        adcAutomuteNoiseGate: 'ADC Automute Noise Gate (0-15)',
+        adcAutomuteVolume: 'ADC Automute Volume (0-7)',
+        hpfEq: 'HPF / EQ',
+        adcHpfStage1: 'ADC HPF Stage 1 (0-31)',
+        adcHpfStage2: 'ADC HPF Stage 2 (0-31)',
+        adcEqBypass: 'ADC EQ Bypass',
+        adcEqBypassText: 'REG1C bit6 bypass ADC EQ',
+        adcDynamicHpf: 'ADC Dynamic HPF',
+        adcDynamicHpfText: 'REG1C bit5 dynamic HPF',
+        adcEqCoefficients: 'ADC EQ Coefficients',
+        adcEqCoefficientsText: '30-bit unsigned register values for B0/A1/A2/B1/B2',
+        adceqB0: 'ADCEQ B0 (REG1D-20)',
+        adceqA1: 'ADCEQ A1 (REG21-24)',
+        adceqA2: 'ADCEQ A2 (REG25-28)',
+        adceqB1: 'ADCEQ B1 (REG29-2C)',
+        adceqB2: 'ADCEQ B2 (REG2D-30)',
+        output: 'Output',
+        drcEnable: 'ES8311 DRC Enable',
+        drcEnableText: 'Enable DAC DRC (REG34 bit7)',
+        drcWindowSize: 'DRC Window Size (0-15)',
+        drcMaxLevel: 'DRC Max Level (0-15)',
+        drcMinLevel: 'DRC Min Level (0-15)',
+        dacRampRate: 'DAC Ramp Rate (0-15)',
+        dacEqBypass: 'DAC EQ Bypass',
+        dacEqBypassText: 'Bypass DAC EQ (REG37 bit3)',
+        dacEqCoefficients: 'DAC EQ Coefficients',
+        dacEqCoefficientsText: '30-bit unsigned register values for B0/B1/A1',
+        daceqB0: 'DACEQ B0 (REG38-3B)',
+        daceqB1: 'DACEQ B1 (REG3C-3F)',
+        daceqA1: 'DACEQ A1 (REG40-43)',
         saveNrl: 'Save NRL Config',
         scanning: 'Scanning...',
         foundPrefix: 'Found ',
@@ -95,6 +158,69 @@ const translations = {
         audio: '音频',
         micVolume: '麦克风音量 (0-255)',
         lineOutVolume: '线路输出音量 (0-255)',
+        volume: '音量',
+        adc: 'ADC 输入',
+        dac: 'DAC 输出',
+        aec: 'AEC 回声消除',
+        drc: 'DRC 动态范围控制',
+        eq: 'EQ 均衡',
+        input: '输入',
+        aecLabel: '声学回声消除',
+        aecText: '启用 esp-sr 麦克风上行回声消除（重启后生效）',
+        dmic: '数字麦克风',
+        dmicText: 'REG14 bit6 从 MIC1P 选择 DMIC',
+        micInput: 'MIC1P-MIC1N 输入',
+        micInputText: 'REG14 bit4 选择线路输入',
+        adcPgaGain: 'ADC PGA 增益 (0-10)',
+        adcRampRate: 'ADC 音量爬升速率 (0-15)',
+        adcGainScale: 'ADC 增益缩放 (0-7)',
+        dmicLatchSense: 'DMIC 锁存边沿',
+        dmicLatchSenseText: 'REG15 bit0 负边沿锁存',
+        adcSync: 'ADC 同步',
+        adcSyncText: 'REG16 bit5 标准音频时钟',
+        adcInvert: 'ADC 反相',
+        adcInvertText: 'REG16 bit4 ADC 极性反相',
+        adcRamClear: '清除 ADC RAM',
+        adcRamClearText: 'REG16 bit3 清除 ADC RAM',
+        alcAutomute: 'ALC / 自动静音',
+        alcEnable: '启用 ALC',
+        alcEnableText: 'REG18 bit7 自动电平控制',
+        adcAutomuteEnable: '启用 ADC 自动静音',
+        adcAutomuteEnableText: 'REG18 bit6 自动静音',
+        alcWindowSize: 'ALC 窗口大小 (0-15)',
+        alcMaxLevel: 'ALC 最大电平 (0-15)',
+        alcMinLevel: 'ALC 最小电平 (0-15)',
+        adcAutomuteWindow: 'ADC 自动静音窗口 (0-15)',
+        adcAutomuteNoiseGate: 'ADC 自动静音噪声门限 (0-15)',
+        adcAutomuteVolume: 'ADC 自动静音音量 (0-7)',
+        hpfEq: '高通滤波 / EQ',
+        adcHpfStage1: 'ADC 高通滤波 1 级 (0-31)',
+        adcHpfStage2: 'ADC 高通滤波 2 级 (0-31)',
+        adcEqBypass: '旁路 ADC EQ',
+        adcEqBypassText: 'REG1C bit6 旁路 ADC EQ',
+        adcDynamicHpf: 'ADC 动态高通滤波',
+        adcDynamicHpfText: 'REG1C bit5 动态高通滤波',
+        adcEqCoefficients: 'ADC EQ 系数',
+        adcEqCoefficientsText: 'B0/A1/A2/B1/B2 的 30 位无符号寄存器值',
+        adceqB0: 'ADCEQ B0 (REG1D-20)',
+        adceqA1: 'ADCEQ A1 (REG21-24)',
+        adceqA2: 'ADCEQ A2 (REG25-28)',
+        adceqB1: 'ADCEQ B1 (REG29-2C)',
+        adceqB2: 'ADCEQ B2 (REG2D-30)',
+        output: '输出',
+        drcEnable: '启用 ES8311 DRC',
+        drcEnableText: '启用 DAC DRC (REG34 bit7)',
+        drcWindowSize: 'DRC 窗口大小 (0-15)',
+        drcMaxLevel: 'DRC 最大电平 (0-15)',
+        drcMinLevel: 'DRC 最小电平 (0-15)',
+        dacRampRate: 'DAC 爬升速率 (0-15)',
+        dacEqBypass: '旁路 DAC EQ',
+        dacEqBypassText: '旁路 DAC EQ (REG37 bit3)',
+        dacEqCoefficients: 'DAC EQ 系数',
+        dacEqCoefficientsText: 'B0/B1/A1 的 30 位无符号寄存器值',
+        daceqB0: 'DACEQ B0 (REG38-3B)',
+        daceqB1: 'DACEQ B1 (REG3C-3F)',
+        daceqA1: 'DACEQ A1 (REG40-43)',
         saveNrl: '保存NRL配置',
         scanning: '正在扫描...',
         foundPrefix: '找到 ',
@@ -262,14 +388,22 @@ const translations = {
       if (select) select.value = selected;
     }
 
-    applyLanguage(currentLang());
-    syncDhcpFields();
-    restoreScrollPosition();
-    document.querySelectorAll('form').forEach((form) => {
-      form.addEventListener('submit', saveScrollPosition);
-    });
-    document.querySelectorAll('input[name="lang"]').forEach((r) => {
-      r.addEventListener('change', function () {
-        if (this.checked) applyLanguage(this.value);
+    function initPortal() {
+      applyLanguage(currentLang());
+      syncDhcpFields();
+      restoreScrollPosition();
+      document.querySelectorAll('form').forEach((form) => {
+        form.addEventListener('submit', saveScrollPosition);
       });
-    });
+      document.querySelectorAll('input[name="lang"]').forEach((r) => {
+        r.addEventListener('change', function () {
+          if (this.checked) applyLanguage(this.value);
+        });
+      });
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initPortal);
+    } else {
+      initPortal();
+    }

@@ -56,6 +56,27 @@ static void replaceToken(String &html, const char *token, const String &value)
     html.replace(token, value);
 }
 
+static String buildPageWithFormSections(const String &form_sections)
+{
+    static const char kFormSectionsToken[] = "{{FORM_SECTIONS}}";
+    const char *template_html = kWifiConfigPortalHtmlTemplate;
+    const char *token = strstr(template_html, kFormSectionsToken);
+    if (token == nullptr) {
+        return String(template_html);
+    }
+
+    const size_t token_len = strlen(kFormSectionsToken);
+    const size_t prefix_len = static_cast<size_t>(token - template_html);
+    const size_t template_len = strlen(template_html);
+
+    String html;
+    html.reserve(template_len - token_len + form_sections.length() + 64);
+    html.concat(template_html, prefix_len);
+    html += form_sections;
+    html += token + token_len;
+    return html;
+}
+
 static String checkedAttr(const bool checked)
 {
     return checked ? String("checked") : String("");
@@ -81,9 +102,17 @@ static String wifiDisplayIp(const ExternalRadioConfig *config,
     return ipToString(configured_value);
 }
 
-static String buildDacEqSlider(const char *field_name, const char *label, const uint32_t value)
+static String buildDacEqSlider(const char *field_name,
+                               const char *label,
+                               const char *i18n_key,
+                               const uint32_t value)
 {
     String html = String(kWifiConfigPortalEqSliderTemplate);
+    String i18n_attr;
+    if (i18n_key != nullptr && i18n_key[0] != '\0') {
+        i18n_attr = String(" data-i18n=\"") + i18n_key + "\"";
+    }
+    replaceToken(html, "{{I18N_ATTR}}", i18n_attr);
     replaceToken(html, "{{LABEL}}", label);
     replaceToken(html, "{{FIELD}}", field_name);
     replaceToken(html, "{{MAX}}", String(kDacEqCoefficientMax));
@@ -166,6 +195,7 @@ String WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *confi
 String WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config)
 {
     String html = String(kWifiConfigPortalAudioSectionsTemplate);
+    html.reserve(strlen(kWifiConfigPortalAudioSectionsTemplate) + 9000u);
 #if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
     String aec_section = String(kWifiConfigPortalAecSectionTemplate);
     replaceToken(aec_section, "{{AEC_CHECKED}}", checkedAttr(config->aec_enabled));
@@ -187,9 +217,9 @@ String WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config
     replaceToken(html, "{{ADC_PGA_GAIN}}", String(config->adc_pga_gain));
     replaceToken(html, "{{ADC_RAMPRATE}}", String(config->adc_ramprate));
     replaceToken(html, "{{ADC_SCALE}}", String(config->adc_scale));
-    replaceToken(html, "{{ADC_PGA_GAIN_SLIDER}}", buildAutoSubmitSlider("adc_pga_gain", "ADC PGA Gain (0-10)", nullptr, 0u, 10u, config->adc_pga_gain));
-    replaceToken(html, "{{ADC_RAMPRATE_SLIDER}}", buildAutoSubmitSlider("adc_ramprate", "ADC VC Ramp Rate (0-15)", nullptr, 0u, 15u, config->adc_ramprate));
-    replaceToken(html, "{{ADC_SCALE_SLIDER}}", buildAutoSubmitSlider("adc_scale", "ADC Gain Scale (0-7)", nullptr, 0u, 7u, config->adc_scale));
+    replaceToken(html, "{{ADC_PGA_GAIN_SLIDER}}", buildAutoSubmitSlider("adc_pga_gain", "ADC PGA Gain (0-10)", "adcPgaGain", 0u, 10u, config->adc_pga_gain));
+    replaceToken(html, "{{ADC_RAMPRATE_SLIDER}}", buildAutoSubmitSlider("adc_ramprate", "ADC VC Ramp Rate (0-15)", "adcRampRate", 0u, 15u, config->adc_ramprate));
+    replaceToken(html, "{{ADC_SCALE_SLIDER}}", buildAutoSubmitSlider("adc_scale", "ADC Gain Scale (0-7)", "adcGainScale", 0u, 7u, config->adc_scale));
     replaceToken(html, "{{ADC_DMIC_SENSE_CHECKED}}", checkedAttr(config->adc_dmic_sense));
     replaceToken(html, "{{ADC_SYNC_CHECKED}}", checkedAttr(config->adc_sync));
     replaceToken(html, "{{ADC_SYNC_VALUE}}", boolValue(config->adc_sync));
@@ -201,34 +231,34 @@ String WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config
     replaceToken(html, "{{ALC_ENABLED_VALUE}}", boolValue(config->alc_enabled));
     replaceToken(html, "{{ADC_AUTOMUTE_CHECKED}}", checkedAttr(config->adc_automute_enabled));
     replaceToken(html, "{{ADC_AUTOMUTE_ENABLED_VALUE}}", boolValue(config->adc_automute_enabled));
-    replaceToken(html, "{{ALC_WINSIZE_SLIDER}}", buildAutoSubmitSlider("alc_winsize", "ALC Window Size (0-15)", nullptr, 0u, 15u, config->alc_winsize));
-    replaceToken(html, "{{ALC_MAXLEVEL_SLIDER}}", buildAutoSubmitSlider("alc_maxlevel", "ALC Max Level (0-15)", nullptr, 0u, 15u, config->alc_maxlevel));
-    replaceToken(html, "{{ALC_MINLEVEL_SLIDER}}", buildAutoSubmitSlider("alc_minlevel", "ALC Min Level (0-15)", nullptr, 0u, 15u, config->alc_minlevel));
-    replaceToken(html, "{{ADC_AUTOMUTE_WINSIZE_SLIDER}}", buildAutoSubmitSlider("adc_automute_winsize", "ADC Automute Window (0-15)", nullptr, 0u, 15u, config->adc_automute_winsize));
-    replaceToken(html, "{{ADC_AUTOMUTE_NOISE_GATE_SLIDER}}", buildAutoSubmitSlider("adc_automute_noise_gate", "ADC Automute Noise Gate (0-15)", nullptr, 0u, 15u, config->adc_automute_noise_gate));
-    replaceToken(html, "{{ADC_AUTOMUTE_VOLUME_SLIDER}}", buildAutoSubmitSlider("adc_automute_volume", "ADC Automute Volume (0-7)", nullptr, 0u, 7u, config->adc_automute_volume));
+    replaceToken(html, "{{ALC_WINSIZE_SLIDER}}", buildAutoSubmitSlider("alc_winsize", "ALC Window Size (0-15)", "alcWindowSize", 0u, 15u, config->alc_winsize));
+    replaceToken(html, "{{ALC_MAXLEVEL_SLIDER}}", buildAutoSubmitSlider("alc_maxlevel", "ALC Max Level (0-15)", "alcMaxLevel", 0u, 15u, config->alc_maxlevel));
+    replaceToken(html, "{{ALC_MINLEVEL_SLIDER}}", buildAutoSubmitSlider("alc_minlevel", "ALC Min Level (0-15)", "alcMinLevel", 0u, 15u, config->alc_minlevel));
+    replaceToken(html, "{{ADC_AUTOMUTE_WINSIZE_SLIDER}}", buildAutoSubmitSlider("adc_automute_winsize", "ADC Automute Window (0-15)", "adcAutomuteWindow", 0u, 15u, config->adc_automute_winsize));
+    replaceToken(html, "{{ADC_AUTOMUTE_NOISE_GATE_SLIDER}}", buildAutoSubmitSlider("adc_automute_noise_gate", "ADC Automute Noise Gate (0-15)", "adcAutomuteNoiseGate", 0u, 15u, config->adc_automute_noise_gate));
+    replaceToken(html, "{{ADC_AUTOMUTE_VOLUME_SLIDER}}", buildAutoSubmitSlider("adc_automute_volume", "ADC Automute Volume (0-7)", "adcAutomuteVolume", 0u, 7u, config->adc_automute_volume));
     replaceToken(html, "{{ADC_HPFS1}}", String(config->adc_hpfs1));
     replaceToken(html, "{{ADC_HPFS2}}", String(config->adc_hpfs2));
-    replaceToken(html, "{{ADC_HPFS1_SLIDER}}", buildAutoSubmitSlider("adc_hpfs1", "ADC HPF Stage 1 (0-31)", nullptr, 0u, 31u, config->adc_hpfs1));
-    replaceToken(html, "{{ADC_HPFS2_SLIDER}}", buildAutoSubmitSlider("adc_hpfs2", "ADC HPF Stage 2 (0-31)", nullptr, 0u, 31u, config->adc_hpfs2));
+    replaceToken(html, "{{ADC_HPFS1_SLIDER}}", buildAutoSubmitSlider("adc_hpfs1", "ADC HPF Stage 1 (0-31)", "adcHpfStage1", 0u, 31u, config->adc_hpfs1));
+    replaceToken(html, "{{ADC_HPFS2_SLIDER}}", buildAutoSubmitSlider("adc_hpfs2", "ADC HPF Stage 2 (0-31)", "adcHpfStage2", 0u, 31u, config->adc_hpfs2));
     replaceToken(html, "{{ADC_EQ_BYPASS_CHECKED}}", checkedAttr(config->adc_eq_bypass));
     replaceToken(html, "{{ADC_EQ_BYPASS_VALUE}}", boolValue(config->adc_eq_bypass));
     replaceToken(html, "{{ADC_HPF_CHECKED}}", checkedAttr(config->adc_hpf));
     replaceToken(html, "{{ADC_HPF_VALUE}}", boolValue(config->adc_hpf));
-    replaceToken(html, "{{ADCEQ_B0_SLIDER}}", buildDacEqSlider("adceq_b0", "ADCEQ B0 (REG1D-20)", config->adceq_b0));
-    replaceToken(html, "{{ADCEQ_A1_SLIDER}}", buildDacEqSlider("adceq_a1", "ADCEQ A1 (REG21-24)", config->adceq_a1));
-    replaceToken(html, "{{ADCEQ_A2_SLIDER}}", buildDacEqSlider("adceq_a2", "ADCEQ A2 (REG25-28)", config->adceq_a2));
-    replaceToken(html, "{{ADCEQ_B1_SLIDER}}", buildDacEqSlider("adceq_b1", "ADCEQ B1 (REG29-2C)", config->adceq_b1));
-    replaceToken(html, "{{ADCEQ_B2_SLIDER}}", buildDacEqSlider("adceq_b2", "ADCEQ B2 (REG2D-30)", config->adceq_b2));
+    replaceToken(html, "{{ADCEQ_B0_SLIDER}}", buildDacEqSlider("adceq_b0", "ADCEQ B0 (REG1D-20)", "adceqB0", config->adceq_b0));
+    replaceToken(html, "{{ADCEQ_A1_SLIDER}}", buildDacEqSlider("adceq_a1", "ADCEQ A1 (REG21-24)", "adceqA1", config->adceq_a1));
+    replaceToken(html, "{{ADCEQ_A2_SLIDER}}", buildDacEqSlider("adceq_a2", "ADCEQ A2 (REG25-28)", "adceqA2", config->adceq_a2));
+    replaceToken(html, "{{ADCEQ_B1_SLIDER}}", buildDacEqSlider("adceq_b1", "ADCEQ B1 (REG29-2C)", "adceqB1", config->adceq_b1));
+    replaceToken(html, "{{ADCEQ_B2_SLIDER}}", buildDacEqSlider("adceq_b2", "ADCEQ B2 (REG2D-30)", "adceqB2", config->adceq_b2));
     replaceToken(html, "{{DRC_CHECKED}}", checkedAttr(config->drc_enabled));
-    replaceToken(html, "{{DRC_WINSIZE_SLIDER}}", buildAutoSubmitSlider("drc_winsize", "DRC Window Size (0-15)", nullptr, 0u, 15u, config->drc_winsize));
-    replaceToken(html, "{{DRC_MAXLEVEL_SLIDER}}", buildAutoSubmitSlider("drc_maxlevel", "DRC Max Level (0-15)", nullptr, 0u, 15u, config->drc_maxlevel));
-    replaceToken(html, "{{DRC_MINLEVEL_SLIDER}}", buildAutoSubmitSlider("drc_minlevel", "DRC Min Level (0-15)", nullptr, 0u, 15u, config->drc_minlevel));
-    replaceToken(html, "{{DAC_RAMPRATE_SLIDER}}", buildAutoSubmitSlider("dac_ramprate", "DAC Ramp Rate (0-15)", nullptr, 0u, 15u, config->dac_ramprate));
+    replaceToken(html, "{{DRC_WINSIZE_SLIDER}}", buildAutoSubmitSlider("drc_winsize", "DRC Window Size (0-15)", "drcWindowSize", 0u, 15u, config->drc_winsize));
+    replaceToken(html, "{{DRC_MAXLEVEL_SLIDER}}", buildAutoSubmitSlider("drc_maxlevel", "DRC Max Level (0-15)", "drcMaxLevel", 0u, 15u, config->drc_maxlevel));
+    replaceToken(html, "{{DRC_MINLEVEL_SLIDER}}", buildAutoSubmitSlider("drc_minlevel", "DRC Min Level (0-15)", "drcMinLevel", 0u, 15u, config->drc_minlevel));
+    replaceToken(html, "{{DAC_RAMPRATE_SLIDER}}", buildAutoSubmitSlider("dac_ramprate", "DAC Ramp Rate (0-15)", "dacRampRate", 0u, 15u, config->dac_ramprate));
     replaceToken(html, "{{DAC_EQ_BYPASS_CHECKED}}", checkedAttr(config->dac_eq_bypass));
-    replaceToken(html, "{{DACEQ_B0_SLIDER}}", buildDacEqSlider("daceq_b0", "DACEQ B0 (REG38-3B)", config->daceq_b0));
-    replaceToken(html, "{{DACEQ_B1_SLIDER}}", buildDacEqSlider("daceq_b1", "DACEQ B1 (REG3C-3F)", config->daceq_b1));
-    replaceToken(html, "{{DACEQ_A1_SLIDER}}", buildDacEqSlider("daceq_a1", "DACEQ A1 (REG40-43)", config->daceq_a1));
+    replaceToken(html, "{{DACEQ_B0_SLIDER}}", buildDacEqSlider("daceq_b0", "DACEQ B0 (REG38-3B)", "daceqB0", config->daceq_b0));
+    replaceToken(html, "{{DACEQ_B1_SLIDER}}", buildDacEqSlider("daceq_b1", "DACEQ B1 (REG3C-3F)", "daceqB1", config->daceq_b1));
+    replaceToken(html, "{{DACEQ_A1_SLIDER}}", buildDacEqSlider("daceq_a1", "DACEQ A1 (REG40-43)", "daceqA1", config->daceq_a1));
     return html;
 }
 
@@ -236,7 +266,7 @@ String WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
                                             const WifiConfigPortalPageState &state,
                                             const String &form_sections)
 {
-    String html = String(kWifiConfigPortalHtmlTemplate);
+    String html = buildPageWithFormSections(form_sections);
     replaceToken(html, "{{TITLE}}", state.title);
     replaceToken(html, "{{HEADLINE}}", state.headline);
     replaceToken(html, "{{HEADLINE_KEY}}", state.headline_key);
@@ -259,7 +289,6 @@ String WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
     replaceToken(html, "{{LINE_OUT_VOLUME}}", String(config->line_out_volume));
     replaceToken(html, "{{HP_DRIVE_CHECKED}}", config->hp_drive_enabled ? "checked" : "");
     replaceToken(html, "{{FORM_ACTION}}", state.form_action);
-    replaceToken(html, "{{FORM_SECTIONS}}", form_sections);
     replaceToken(html, "{{FOOTER}}", state.footer);
     replaceToken(html, "{{VERSION}}", NRL_FIRMWARE_VERSION);
     return html;
