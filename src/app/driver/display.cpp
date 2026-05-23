@@ -1,0 +1,685 @@
+// On-device LCD UI for the 格子派 board.
+//
+// Hardware: ST7789 240x240 SPI panel, identical wiring to the 小智 (xiaozhi)
+// 格子派 board (see src/app/driver/board_pins.h). The panel is an IDF esp_lcd
+// ST7789 device; rendering uses LVGL. LVGL is vendored as a local component
+// (components/lvgl) and driven directly here -- no esp_lvgl_port -- so the
+// build never has to download anything from the component registry.
+//
+// Layout (clean, dark "tech" theme):
+//   +------------------------------------------+
+//   | -72dB            75%             4.05V   |  <- status bar
+//   |------------------------------------------|
+//   |                RECEIVING                 |  <- caption (TX/RX state)
+//   |               B G 7 X Y Z                 |  <- callsign (large)
+//   |                 SSID 5                    |  <- callsign SSID (smaller)
+//   |                10:24:37                   |  <- current time
+//   |                                           |
+//   |               192.168.1.50               |  <- address bar
+//   +------------------------------------------+
+//
+// The callsign area shows the remote caller while a voice stream is being
+// received, and this device's own callsign/SSID otherwise. The caption tracks
+// the live state: STANDBY / RECEIVING / TRANSMITTING / FULL DUPLEX. Heartbeat
+// packets never count as "receiving".
+//
+// The address bar normally shows the station IP; while transmitting OR
+// receiving voice it shows the NRL server host instead (red for TX, cyan for
+// RX). When WiFi cannot join a router and the device falls back to its config
+// AP, the bar shows the AP hotspot address (192.168.4.1) in amber.
+
+#include "display.h"
+
+#include "board_pins.h"
+
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+
+#include "../../lib/nrl_audio_bridge.h"
+#include "external_radio.h"
+#include "status_io.h"
+
+#include <Arduino.h>
+#include <WiFi.h>
+
+#include <time.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <driver/gpio.h>
+#include <driver/spi_master.h>
+#include <esp_heap_caps.h>
+#include <esp_adc/adc_cali.h>
+#include <esp_adc/adc_cali_scheme.h>
+#include <esp_adc/adc_oneshot.h>
+#include <esp_lcd_panel_io.h>
+#include <esp_lcd_panel_ops.h>
+#include <esp_lcd_panel_vendor.h>
+
+#include <lvgl.h>
+
+namespace {
+
+constexpr int kWidth = NRL_DISPLAY_WIDTH;
+constexpr int kHeight = NRL_DISPLAY_HEIGHT;
+
+// LVGL partial render buffer height, in scan lines.
+constexpr int kBufLines = 60;
+
+// ---- Tech-style palette (0xRRGGBB) ----
+constexpr uint32_t kColorBg       = 0x070B11;  // near-black screen background
+constexpr uint32_t kColorBar      = 0x0E1622;  // status/IP bar fill
+constexpr uint32_t kColorAccent   = 0x22D3EE;  // cyan accent line
+constexpr uint32_t kColorCallIdle = 0xE6EDF3;  // callsign while idle
+constexpr uint32_t kColorCallLive = 0x22D3EE;  // callsign while receiving
+constexpr uint32_t kColorSub      = 0x6F8BA0;  // muted blue-gray (SSID, bars)
+constexpr uint32_t kColorTime     = 0xBFE9F5;  // clock
+constexpr uint32_t kColorCaption  = 0x46627A;  // dim caption above callsign
+constexpr uint32_t kColorIp       = 0x46D6E6;  // IP address (STA mode)
+constexpr uint32_t kColorApWarn   = 0xF5B453;  // amber: config / AP mode
+constexpr uint32_t kColorGood     = 0x4ADE80;  // strong signal
+constexpr uint32_t kColorWeak     = 0xF87171;  // weak signal / low battery
+constexpr uint32_t kColorTx       = 0xFF6B6B;  // transmitting (PTT held)
+constexpr uint32_t kColorDuplex   = 0xA78BFA;  // transmitting + receiving
+
+// Battery pack assumed to be a single Li-ion cell (3.0 V .. 4.2 V).
+constexpr int kBatteryMinMv = 3000;
+constexpr int kBatteryMaxMv = 4200;
+
+constexpr uint32_t kRefreshIntervalMs = 500u;
+constexpr uint32_t kBatteryIntervalMs = 10000u;
+
+bool s_ready = false;
+
+esp_lcd_panel_io_handle_t s_panel_io = nullptr;
+esp_lcd_panel_handle_t s_panel = nullptr;
+
+lv_display_t *s_disp = nullptr;
+uint8_t *s_draw_buf = nullptr;
+
+lv_obj_t *s_lbl_caption = nullptr;
+lv_obj_t *s_lbl_callsign = nullptr;
+lv_obj_t *s_lbl_ssid = nullptr;
+lv_obj_t *s_lbl_time = nullptr;
+lv_obj_t *s_lbl_wifi = nullptr;
+lv_obj_t *s_lbl_vol = nullptr;
+lv_obj_t *s_lbl_batt = nullptr;
+lv_obj_t *s_lbl_ip = nullptr;
+
+adc_oneshot_unit_handle_t s_adc = nullptr;
+adc_cali_handle_t s_adc_cali = nullptr;
+bool s_adc_ready = false;
+
+uint32_t s_last_refresh_ms = 0u;
+uint32_t s_last_battery_ms = 0u;
+int s_battery_mv = 0;
+bool s_time_sync_started = false;
+
+// Cached on-screen text, so labels are only rewritten when a value changes.
+char s_shown_callsign[16] = {};
+char s_shown_ssid[16] = {};
+char s_shown_time[16] = {};
+char s_shown_wifi[28] = {};
+char s_shown_vol[16] = {};
+char s_shown_batt[20] = {};
+char s_shown_ip[96] = {};
+int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
+
+//============================ Panel bring-up =================================
+
+bool initPanel()
+{
+    // Backlight off until the first frame is drawn, to avoid a white flash.
+    gpio_config_t bl_cfg = {};
+    bl_cfg.pin_bit_mask = 1ULL << NRL_PIN_DISPLAY_BL;
+    bl_cfg.mode = GPIO_MODE_OUTPUT;
+    gpio_config(&bl_cfg);
+    gpio_set_level(static_cast<gpio_num_t>(NRL_PIN_DISPLAY_BL), 0);
+
+    spi_bus_config_t bus_cfg = {};
+    bus_cfg.sclk_io_num = NRL_PIN_DISPLAY_SCLK;
+    bus_cfg.mosi_io_num = NRL_PIN_DISPLAY_MOSI;
+    bus_cfg.miso_io_num = -1;
+    bus_cfg.quadwp_io_num = -1;
+    bus_cfg.quadhd_io_num = -1;
+    bus_cfg.max_transfer_sz = kWidth * kBufLines * static_cast<int>(sizeof(uint16_t));
+    if (spi_bus_initialize(SPI3_HOST, &bus_cfg, SPI_DMA_CH_AUTO) != ESP_OK) {
+        Serial.println("[LCD] SPI bus init failed");
+        return false;
+    }
+
+    esp_lcd_panel_io_spi_config_t io_cfg = {};
+    io_cfg.cs_gpio_num = NRL_PIN_DISPLAY_CS;
+    io_cfg.dc_gpio_num = NRL_PIN_DISPLAY_DC;
+    io_cfg.spi_mode = 3;
+    io_cfg.pclk_hz = 80 * 1000 * 1000;
+    io_cfg.trans_queue_depth = 10;
+    io_cfg.lcd_cmd_bits = 8;
+    io_cfg.lcd_param_bits = 8;
+    if (esp_lcd_new_panel_io_spi(SPI3_HOST, &io_cfg, &s_panel_io) != ESP_OK) {
+        Serial.println("[LCD] panel IO init failed");
+        return false;
+    }
+
+    esp_lcd_panel_dev_config_t panel_cfg = {};
+    panel_cfg.reset_gpio_num = NRL_PIN_DISPLAY_RST;
+    panel_cfg.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
+    panel_cfg.bits_per_pixel = 16;
+    if (esp_lcd_new_panel_st7789(s_panel_io, &panel_cfg, &s_panel) != ESP_OK) {
+        Serial.println("[LCD] ST7789 init failed");
+        return false;
+    }
+
+    esp_lcd_panel_reset(s_panel);
+    esp_lcd_panel_init(s_panel);
+    esp_lcd_panel_invert_color(s_panel, true);
+    esp_lcd_panel_swap_xy(s_panel, false);
+    esp_lcd_panel_mirror(s_panel, false, false);
+    esp_lcd_panel_disp_on_off(s_panel, true);
+    return true;
+}
+
+//============================ LVGL <-> esp_lcd ===============================
+
+// LVGL time base: millis() is a 32-bit millisecond counter, exactly what LVGL
+// wants from its tick callback.
+uint32_t lvglTick()
+{
+    return static_cast<uint32_t>(millis());
+}
+
+// esp_lcd finished pushing a chunk over SPI -> let LVGL reuse the buffer.
+// Runs in the SPI ISR; lv_display_flush_ready() only flips a flag, so this is
+// safe here.
+bool onColorTransDone(esp_lcd_panel_io_handle_t /*io*/,
+                      esp_lcd_panel_io_event_data_t * /*edata*/,
+                      void *user_ctx)
+{
+    lv_display_flush_ready(static_cast<lv_display_t *>(user_ctx));
+    return false;
+}
+
+// LVGL hands us a rendered chunk; byte-swap it (ST7789-over-SPI is big-endian
+// RGB565, LVGL renders little-endian) and DMA it to the panel.
+void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    esp_lcd_panel_handle_t panel =
+        static_cast<esp_lcd_panel_handle_t>(lv_display_get_user_data(disp));
+
+    const int32_t count = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
+    uint16_t *pixels = reinterpret_cast<uint16_t *>(px_map);
+    for (int32_t i = 0; i < count; ++i) {
+        pixels[i] = static_cast<uint16_t>((pixels[i] >> 8) | (pixels[i] << 8));
+    }
+
+    esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1,
+                              area->x2 + 1, area->y2 + 1, px_map);
+}
+
+bool initLvgl()
+{
+    lv_init();
+
+    const size_t buf_bytes = static_cast<size_t>(kWidth) * kBufLines * 2u;
+    s_draw_buf = static_cast<uint8_t *>(heap_caps_malloc(buf_bytes, MALLOC_CAP_DMA));
+    if (s_draw_buf == nullptr) {
+        Serial.println("[LCD] draw buffer alloc failed");
+        return false;
+    }
+
+    s_disp = lv_display_create(kWidth, kHeight);
+    if (s_disp == nullptr) {
+        Serial.println("[LCD] lv_display_create failed");
+        return false;
+    }
+    lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_user_data(s_disp, s_panel);
+    lv_display_set_flush_cb(s_disp, lvglFlush);
+    lv_display_set_buffers(s_disp, s_draw_buf, nullptr, buf_bytes,
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_tick_set_cb(lvglTick);
+
+    esp_lcd_panel_io_callbacks_t io_cbs = {};
+    io_cbs.on_color_trans_done = onColorTransDone;
+    esp_lcd_panel_io_register_event_callbacks(s_panel_io, &io_cbs, s_disp);
+    return true;
+}
+
+//============================ ADC battery sense ==============================
+
+void initBatteryAdc()
+{
+    adc_oneshot_unit_init_cfg_t unit_cfg = {};
+    unit_cfg.unit_id = ADC_UNIT_1;
+    if (adc_oneshot_new_unit(&unit_cfg, &s_adc) != ESP_OK) {
+        Serial.println("[LCD] battery ADC unit init failed");
+        return;
+    }
+
+    adc_oneshot_chan_cfg_t chan_cfg = {};
+    chan_cfg.atten = ADC_ATTEN_DB_12;
+    chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_oneshot_config_channel(s_adc, ADC_CHANNEL_2, &chan_cfg) != ESP_OK) {
+        Serial.println("[LCD] battery ADC channel config failed");
+        return;
+    }
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_curve_fitting_config_t cali_cfg = {};
+    cali_cfg.unit_id = ADC_UNIT_1;
+    cali_cfg.chan = ADC_CHANNEL_2;
+    cali_cfg.atten = ADC_ATTEN_DB_12;
+    cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_adc_cali) == ESP_OK) {
+        s_adc_ready = true;
+    }
+#endif
+#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    if (!s_adc_ready) {
+        adc_cali_line_fitting_config_t cali_cfg = {};
+        cali_cfg.unit_id = ADC_UNIT_1;
+        cali_cfg.atten = ADC_ATTEN_DB_12;
+        cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+        if (adc_cali_create_scheme_line_fitting(&cali_cfg, &s_adc_cali) == ESP_OK) {
+            s_adc_ready = true;
+        }
+    }
+#endif
+    if (!s_adc_ready) {
+        Serial.println("[LCD] battery ADC not calibrated (eFuse missing) -- voltage hidden");
+    }
+}
+
+// Reads the battery voltage in millivolts, or 0 if unavailable. The sense pin
+// sits behind a 1:2 divider, so the calibrated reading is multiplied by 3 to
+// match the 小智 格子派 board's measurement.
+int readBatteryMv()
+{
+    if (!s_adc_ready || s_adc == nullptr || s_adc_cali == nullptr) {
+        return 0;
+    }
+
+    long sum = 0;
+    int samples = 0;
+    for (int i = 0; i < 16; ++i) {
+        int raw = 0;
+        if (adc_oneshot_read(s_adc, ADC_CHANNEL_2, &raw) == ESP_OK) {
+            sum += raw;
+            ++samples;
+        }
+    }
+    if (samples == 0) {
+        return 0;
+    }
+
+    int voltage = 0;
+    if (adc_cali_raw_to_voltage(s_adc_cali, static_cast<int>(sum / samples), &voltage) != ESP_OK) {
+        return 0;
+    }
+    return voltage * 3;
+}
+
+//================================ UI build ===================================
+
+lv_obj_t *makeBar(lv_obj_t *parent, int y, int height)
+{
+    lv_obj_t *bar = lv_obj_create(parent);
+    lv_obj_remove_style_all(bar);
+    lv_obj_set_size(bar, kWidth, height);
+    lv_obj_set_pos(bar, 0, y);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(kColorBar), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    return bar;
+}
+
+lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+    return label;
+}
+
+void buildUi()
+{
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    // ---- Top status bar ----
+    lv_obj_t *top = makeBar(scr, 0, 34);
+
+    lv_obj_t *accent = lv_obj_create(scr);
+    lv_obj_remove_style_all(accent);
+    lv_obj_set_size(accent, kWidth, 2);
+    lv_obj_set_pos(accent, 0, 34);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(kColorAccent), 0);
+    lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+
+    s_lbl_wifi = makeLabel(top, &lv_font_montserrat_14, kColorSub);
+    lv_obj_align(s_lbl_wifi, LV_ALIGN_LEFT_MID, 10, 0);
+    lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI "  --");
+
+    s_lbl_vol = makeLabel(top, &lv_font_montserrat_14, kColorSub);
+    lv_obj_align(s_lbl_vol, LV_ALIGN_CENTER, 0, 0);
+    lv_label_set_text(s_lbl_vol, LV_SYMBOL_VOLUME_MID " --");
+
+    s_lbl_batt = makeLabel(top, &lv_font_montserrat_14, kColorSub);
+    lv_obj_align(s_lbl_batt, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_label_set_text(s_lbl_batt, "--  " LV_SYMBOL_BATTERY_EMPTY);
+
+    // ---- Centre content ----
+    s_lbl_caption = makeLabel(scr, &lv_font_montserrat_14, kColorCaption);
+    lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_MID, 0, 50);
+    lv_label_set_text(s_lbl_caption, "STANDBY");
+
+    s_lbl_callsign = makeLabel(scr, &lv_font_montserrat_48, kColorCallIdle);
+    lv_obj_set_width(s_lbl_callsign, kWidth);
+    lv_obj_set_style_text_align(s_lbl_callsign, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lbl_callsign, LV_ALIGN_TOP_MID, 0, 68);
+    lv_label_set_text(s_lbl_callsign, "----");
+
+    s_lbl_ssid = makeLabel(scr, &lv_font_montserrat_20, kColorSub);
+    lv_obj_align(s_lbl_ssid, LV_ALIGN_TOP_MID, 0, 130);
+    lv_label_set_text(s_lbl_ssid, "SSID -");
+
+    s_lbl_time = makeLabel(scr, &lv_font_montserrat_28, kColorTime);
+    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 164);
+    lv_label_set_text(s_lbl_time, "--:--:--");
+
+    // ---- Bottom IP bar ----
+    lv_obj_t *bottom = makeBar(scr, kHeight - 34, 34);
+    s_lbl_ip = makeLabel(bottom, &lv_font_montserrat_16, kColorIp);
+    lv_obj_center(s_lbl_ip);
+    lv_label_set_text(s_lbl_ip, "---");
+}
+
+//================================ Refresh ====================================
+
+// Updates a label only when its text actually changed (avoids redraw churn).
+bool setLabel(lv_obj_t *label, char *cache, size_t cache_size, const char *text)
+{
+    if (strncmp(cache, text, cache_size) == 0) {
+        return false;
+    }
+    strncpy(cache, text, cache_size - 1u);
+    cache[cache_size - 1u] = '\0';
+    lv_label_set_text(label, text);
+    return true;
+}
+
+void refreshCaller()
+{
+    char voice_call[8] = {};
+    unsigned voice_ssid = 0u;
+    const bool rx = NRLAudioBridge_GetRemoteCaller(voice_call, sizeof(voice_call), &voice_ssid);
+    const bool tx = STATUS_IO_IsSqlActive();
+
+    // While a voice stream is actually being received, the main area shows the
+    // remote caller. Otherwise it shows this device's own callsign/SSID, read
+    // straight from the local config -- heartbeats never feed this.
+    char call_text[16];
+    char ssid_text[16];
+    if (rx && voice_call[0] != '\0') {
+        snprintf(call_text, sizeof(call_text), "%s", voice_call);
+        snprintf(ssid_text, sizeof(ssid_text), "SSID %u", voice_ssid);
+    } else {
+        const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+        if (cfg != nullptr && cfg->callsign[0] != '\0') {
+            snprintf(call_text, sizeof(call_text), "%s", cfg->callsign);
+            snprintf(ssid_text, sizeof(ssid_text), "SSID %u",
+                     static_cast<unsigned>(cfg->callsign_ssid));
+        } else {
+            snprintf(call_text, sizeof(call_text), "----");
+            snprintf(ssid_text, sizeof(ssid_text), "SSID -");
+        }
+    }
+
+    setLabel(s_lbl_callsign, s_shown_callsign, sizeof(s_shown_callsign), call_text);
+    setLabel(s_lbl_ssid, s_shown_ssid, sizeof(s_shown_ssid), ssid_text);
+
+    // Status caption above the callsign. Transmitting while also receiving is
+    // shown as full duplex; otherwise TX wins over RX wins over standby.
+    int state;
+    if (tx && rx) {
+        state = 4;  // full duplex
+    } else if (tx) {
+        state = 3;  // transmitting
+    } else if (rx) {
+        state = 2;  // receiving
+    } else {
+        state = 0;  // standby
+    }
+
+    if (state != s_shown_state) {
+        s_shown_state = state;
+        const char *caption;
+        uint32_t caption_color;
+        uint32_t call_color;
+        switch (state) {
+            case 4:
+                caption = "FULL DUPLEX";  caption_color = kColorDuplex;
+                call_color = kColorCallLive;
+                break;
+            case 3:
+                caption = "TRANSMITTING"; caption_color = kColorTx;
+                call_color = kColorCallIdle;
+                break;
+            case 2:
+                caption = "RECEIVING";    caption_color = kColorAccent;
+                call_color = kColorCallLive;
+                break;
+            default:
+                caption = "STANDBY";      caption_color = kColorCaption;
+                call_color = kColorCallIdle;
+                break;
+        }
+        lv_label_set_text(s_lbl_caption, caption);
+        lv_obj_set_style_text_color(s_lbl_caption, lv_color_hex(caption_color), 0);
+        lv_obj_set_style_text_color(s_lbl_callsign, lv_color_hex(call_color), 0);
+    }
+}
+
+void refreshClock()
+{
+    if (!s_time_sync_started && WiFi.status() == WL_CONNECTED) {
+        // CST-8 == UTC+8 (China). NTP servers are tried in order.
+        configTzTime("CST-8", "ntp.aliyun.com", "ntp.ntsc.ac.cn", "pool.ntp.org");
+        s_time_sync_started = true;
+    }
+
+    char time_text[16];
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    if (tm_now.tm_year + 1900 >= 2024) {
+        snprintf(time_text, sizeof(time_text), "%02d:%02d:%02d",
+                 tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
+    } else {
+        snprintf(time_text, sizeof(time_text), "--:--:--");
+    }
+    setLabel(s_lbl_time, s_shown_time, sizeof(s_shown_time), time_text);
+}
+
+void refreshWifi()
+{
+    char wifi_text[28];
+    uint32_t color = kColorSub;
+    if (WiFi.status() == WL_CONNECTED) {
+        const int rssi = WiFi.RSSI();
+        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "  %ddB", rssi);
+        if (rssi >= -65) {
+            color = kColorGood;
+        } else if (rssi >= -78) {
+            color = kColorApWarn;
+        } else {
+            color = kColorWeak;
+        }
+    } else {
+        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "  AP");
+        color = kColorApWarn;
+    }
+    if (setLabel(s_lbl_wifi, s_shown_wifi, sizeof(s_shown_wifi), wifi_text)) {
+        lv_obj_set_style_text_color(s_lbl_wifi, lv_color_hex(color), 0);
+    }
+}
+
+void refreshVolume()
+{
+    char vol_text[16];
+    uint32_t color = kColorSub;
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg != nullptr) {
+        // line_out_volume is the ES8311 speaker volume, stored 0..255.
+        const int pct = (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255;
+        const char *symbol = LV_SYMBOL_VOLUME_MAX;
+        if (pct == 0) {
+            symbol = LV_SYMBOL_MUTE;
+            color = kColorWeak;
+        } else if (pct < 55) {
+            symbol = LV_SYMBOL_VOLUME_MID;
+        }
+        snprintf(vol_text, sizeof(vol_text), "%s %d%%", symbol, pct);
+    } else {
+        snprintf(vol_text, sizeof(vol_text), LV_SYMBOL_VOLUME_MID " --");
+    }
+    if (setLabel(s_lbl_vol, s_shown_vol, sizeof(s_shown_vol), vol_text)) {
+        lv_obj_set_style_text_color(s_lbl_vol, lv_color_hex(color), 0);
+    }
+}
+
+void refreshBattery()
+{
+    char batt_text[20];
+    uint32_t color = kColorSub;
+    if (s_adc_ready && s_battery_mv > 0) {
+        int pct = (s_battery_mv - kBatteryMinMv) * 100 / (kBatteryMaxMv - kBatteryMinMv);
+        if (pct < 0) {
+            pct = 0;
+        } else if (pct > 100) {
+            pct = 100;
+        }
+        const char *symbol = LV_SYMBOL_BATTERY_EMPTY;
+        if (pct >= 80) {
+            symbol = LV_SYMBOL_BATTERY_FULL;
+        } else if (pct >= 55) {
+            symbol = LV_SYMBOL_BATTERY_3;
+        } else if (pct >= 30) {
+            symbol = LV_SYMBOL_BATTERY_2;
+        } else if (pct >= 12) {
+            symbol = LV_SYMBOL_BATTERY_1;
+        }
+        snprintf(batt_text, sizeof(batt_text), "%d.%02dV  %s",
+                 s_battery_mv / 1000, (s_battery_mv % 1000) / 10, symbol);
+        color = (pct <= 15) ? kColorWeak : kColorSub;
+    } else {
+        snprintf(batt_text, sizeof(batt_text), "--  %s", LV_SYMBOL_BATTERY_EMPTY);
+    }
+    if (setLabel(s_lbl_batt, s_shown_batt, sizeof(s_shown_batt), batt_text)) {
+        lv_obj_set_style_text_color(s_lbl_batt, lv_color_hex(color), 0);
+    }
+}
+
+void refreshIp()
+{
+    char ip_text[96];
+    uint32_t color;
+    // The bar shows the bare address only -- no icon, no prefix label -- so a
+    // long host/IP still fits. The text colour alone marks the state:
+    // red = transmitting, cyan = receiving voice, blue = STA IP, amber = AP.
+    char rx_call[8];
+    unsigned rx_ssid = 0u;
+    const bool rx = NRLAudioBridge_GetRemoteCaller(rx_call, sizeof(rx_call), &rx_ssid);
+    const bool tx = STATUS_IO_IsSqlActive();
+    if (tx || rx) {
+        // Transmitting or receiving voice -> show the configured NRL server
+        // host (the host string as configured, not a resolved IP address).
+        const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+        const char *host = (cfg != nullptr && cfg->server_host[0] != '\0')
+                               ? cfg->server_host
+                               : "---";
+        snprintf(ip_text, sizeof(ip_text), "%s", host);
+        color = tx ? kColorTx : kColorAccent;
+    } else if (WiFi.status() == WL_CONNECTED) {
+        snprintf(ip_text, sizeof(ip_text), "%s", WiFi.localIP().toString().c_str());
+        color = kColorIp;
+    } else {
+        const wifi_mode_t mode = WiFi.getMode();
+        if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
+            // WiFi join failed -> config AP is up; show the hotspot address.
+            snprintf(ip_text, sizeof(ip_text), "%s",
+                     WiFi.softAPIP().toString().c_str());
+            color = kColorApWarn;
+        } else {
+            snprintf(ip_text, sizeof(ip_text), "---");
+            color = kColorSub;
+        }
+    }
+    if (setLabel(s_lbl_ip, s_shown_ip, sizeof(s_shown_ip), ip_text)) {
+        lv_obj_set_style_text_color(s_lbl_ip, lv_color_hex(color), 0);
+    }
+}
+
+} // namespace
+
+//================================ Public API =================================
+
+extern "C" void Display_Init(void)
+{
+    if (s_ready) {
+        return;
+    }
+    if (!initPanel()) {
+        return;
+    }
+    if (!initLvgl()) {
+        return;
+    }
+
+    initBatteryAdc();
+    s_battery_mv = readBatteryMv();
+
+    buildUi();
+    lv_refr_now(nullptr);  // paint the first frame before the backlight is lit
+
+    gpio_set_level(static_cast<gpio_num_t>(NRL_PIN_DISPLAY_BL), 1);
+    s_ready = true;
+    Serial.println("[LCD] ST7789 display ready");
+}
+
+extern "C" void Display_Poll(void)
+{
+    if (!s_ready) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (s_last_battery_ms == 0u || (now - s_last_battery_ms) >= kBatteryIntervalMs) {
+        s_last_battery_ms = now;
+        s_battery_mv = readBatteryMv();
+    }
+
+    // The caller caption, IP bar and volume readout react to PTT / button
+    // presses, so refresh them every poll for snappy feedback. setLabel()
+    // still only redraws when the text actually changed.
+    refreshCaller();
+    refreshIp();
+    refreshVolume();
+
+    if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
+        s_last_refresh_ms = now;
+        refreshClock();
+        refreshWifi();
+        refreshBattery();
+    }
+
+    lv_timer_handler();
+}
+
+#else // !NRL_HAS_DISPLAY
+
+extern "C" void Display_Init(void) {}
+extern "C" void Display_Poll(void) {}
+
+#endif // NRL_HAS_DISPLAY

@@ -3,6 +3,7 @@ set(app_sources
     app/aec/aec_processor.cpp
     app/aec/esp_sr_probe.cpp
     app/driver/eeprom.cpp
+    app/driver/display.cpp
     app/driver/es7210.cpp
     app/driver/es8311.cpp
     app/driver/external_radio.cpp

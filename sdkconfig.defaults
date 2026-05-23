@@ -65,3 +65,25 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 # CONFIG_ESP32S3_DEFAULT_CPU_FREQ_160 is not set
 CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
 CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ=240
+
+# --- LVGL (格子派 ST7789 LCD UI; see src/app/driver/display.cpp) ---
+# LVGL is vendored at components/lvgl and driven straight from the Arduino
+# loop(), so it runs with no OS layer (LV_OS_NONE). These options configure
+# LVGL through Kconfig (LV_CONF_SKIP=y, the default), so no lv_conf.h is used.
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_OS_NONE=y
+CONFIG_LV_USE_OS=0
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_FONT_FMT_TXT_LARGE=y
+# Montserrat sizes used by the UI: status bar (14), IP bar (16), SSID (20),
+# clock (28) and the large caller callsign (48).
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+CONFIG_LV_BUILD_EXAMPLES=n
+CONFIG_LV_BUILD_DEMOS=n

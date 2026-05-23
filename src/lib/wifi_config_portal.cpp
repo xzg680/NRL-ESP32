@@ -1,5 +1,6 @@
 ﻿#include "wifi_config_portal.h"
 #include "wifi_config_portal_view.h"
+#include "wifi_portal_assets.generated.h"
 #include "nrl_audio_bridge.h"
 #include "nrl_version.h"
 
@@ -336,6 +337,448 @@ static String buildAudioSections(const ExternalRadioConfig *config)
     return WifiConfigPortalView_BuildAudioSections(config);
 }
 
+// Look up the canonical, just-saved value for one form field name. The save
+// handler echoes these back so the client can refresh its inputs from device
+// truth (post-clamp, post-sanitize) without re-rendering the whole page.
+static String savedValueForArg(const ExternalRadioConfig *config, const String &name)
+{
+    if (config == nullptr) {
+        return String();
+    }
+    if (name == "wifi_ssid") return String(config->wifi_ssid);
+    if (name == "wifi_password") return String(config->wifi_password);
+    if (name == "wifi_dhcp_enabled") return config->wifi_dhcp_enabled ? "1" : "0";
+    if (name == "wifi_ip") return ipToString(config->wifi_ip);
+    if (name == "wifi_mask") return ipToString(config->wifi_netmask);
+    if (name == "wifi_gateway") return ipToString(config->wifi_gateway);
+    if (name == "wifi_dns") return ipToString(config->wifi_dns);
+    if (name == "server_host") return String(config->server_host);
+    if (name == "server_port") return String(config->server_port);
+    if (name == "channel") return String(config->channel);
+    if (name == "callsign") return String(config->callsign);
+    if (name == "callsign_ssid") return String(config->callsign_ssid);
+    if (name == "ptt_timeout") return String(config->ptt_timeout_s);
+    if (name == "mic_volume") return String(config->mic_volume);
+    if (name == "line_out_volume") return String(config->line_out_volume);
+    if (name == "hp_drive_enabled") return config->hp_drive_enabled ? "1" : "0";
+    if (name == "aec_enabled") return config->aec_enabled ? "1" : "0";
+    if (name == "adc_dmic_enabled") return config->adc_dmic_enabled ? "1" : "0";
+    if (name == "adc_linsel") return config->adc_linsel ? "1" : "0";
+    if (name == "adc_pga_gain") return String(config->adc_pga_gain);
+    if (name == "adc_ramprate") return String(config->adc_ramprate);
+    if (name == "adc_scale") return String(config->adc_scale);
+    if (name == "adc_dmic_sense") return config->adc_dmic_sense ? "1" : "0";
+    if (name == "adc_sync") return config->adc_sync ? "1" : "0";
+    if (name == "adc_inv") return config->adc_inv ? "1" : "0";
+    if (name == "adc_ramclr") return config->adc_ramclr ? "1" : "0";
+    if (name == "alc_enabled") return config->alc_enabled ? "1" : "0";
+    if (name == "adc_automute_enabled") return config->adc_automute_enabled ? "1" : "0";
+    if (name == "alc_winsize") return String(config->alc_winsize);
+    if (name == "alc_maxlevel") return String(config->alc_maxlevel);
+    if (name == "alc_minlevel") return String(config->alc_minlevel);
+    if (name == "adc_automute_winsize") return String(config->adc_automute_winsize);
+    if (name == "adc_automute_noise_gate") return String(config->adc_automute_noise_gate);
+    if (name == "adc_automute_volume") return String(config->adc_automute_volume);
+    if (name == "adc_hpfs1") return String(config->adc_hpfs1);
+    if (name == "adc_hpfs2") return String(config->adc_hpfs2);
+    if (name == "adc_eq_bypass") return config->adc_eq_bypass ? "1" : "0";
+    if (name == "adc_hpf") return config->adc_hpf ? "1" : "0";
+    if (name == "adceq_b0") return String(config->adceq_b0);
+    if (name == "adceq_a1") return String(config->adceq_a1);
+    if (name == "adceq_a2") return String(config->adceq_a2);
+    if (name == "adceq_b1") return String(config->adceq_b1);
+    if (name == "adceq_b2") return String(config->adceq_b2);
+    if (name == "drc_enabled") return config->drc_enabled ? "1" : "0";
+    if (name == "drc_winsize") return String(config->drc_winsize);
+    if (name == "drc_maxlevel") return String(config->drc_maxlevel);
+    if (name == "drc_minlevel") return String(config->drc_minlevel);
+    if (name == "dac_ramprate") return String(config->dac_ramprate);
+    if (name == "dac_eq_bypass") return config->dac_eq_bypass ? "1" : "0";
+    if (name == "daceq_b0") return String(config->daceq_b0);
+    if (name == "daceq_b1") return String(config->daceq_b1);
+    if (name == "daceq_a1") return String(config->daceq_a1);
+    return String();
+}
+
+// Diff the config snapshot taken before save against the live config and log
+// every field whose value actually changed. Keeps the serial trace honest:
+// each save line lists exactly the fields the user touched, nothing else.
+static void logChangedFields(const ExternalRadioConfig *before,
+                             const ExternalRadioConfig *after)
+{
+    if (before == nullptr || after == nullptr) {
+        return;
+    }
+    String out;
+    auto sep = [&out]() {
+        if (out.length() > 0) out += ' ';
+    };
+#define LOG_BOOL(field) \
+    if (before->field != after->field) { \
+        sep(); \
+        out += #field "="; \
+        out += after->field ? "1" : "0"; \
+    }
+#define LOG_UINT(field) \
+    if (before->field != after->field) { \
+        sep(); \
+        out += #field "="; \
+        out += String(static_cast<unsigned>(after->field)); \
+    }
+#define LOG_U32(field) \
+    if (before->field != after->field) { \
+        sep(); \
+        out += #field "="; \
+        out += String(static_cast<unsigned long>(after->field)); \
+    }
+#define LOG_IP(field) \
+    if (before->field != after->field) { \
+        sep(); \
+        out += #field "="; \
+        out += ipToString(after->field); \
+    }
+#define LOG_STR(field) \
+    if (strcmp(before->field, after->field) != 0) { \
+        sep(); \
+        out += #field "=\""; \
+        out += after->field; \
+        out += '"'; \
+    }
+    LOG_STR(wifi_ssid);
+    if (strcmp(before->wifi_password, after->wifi_password) != 0) {
+        sep();
+        out += "wifi_password=";
+        out += maskSecret(after->wifi_password);
+    }
+    LOG_BOOL(wifi_dhcp_enabled);
+    LOG_IP(wifi_ip);
+    LOG_IP(wifi_netmask);
+    LOG_IP(wifi_gateway);
+    LOG_IP(wifi_dns);
+    LOG_STR(server_host);
+    LOG_UINT(server_port);
+    LOG_UINT(channel);
+    LOG_STR(callsign);
+    LOG_UINT(callsign_ssid);
+    LOG_UINT(ptt_timeout_s);
+    LOG_UINT(mic_volume);
+    LOG_UINT(line_out_volume);
+    LOG_BOOL(hp_drive_enabled);
+    LOG_BOOL(aec_enabled);
+    LOG_BOOL(drc_enabled);
+    LOG_UINT(drc_winsize);
+    LOG_UINT(drc_maxlevel);
+    LOG_UINT(drc_minlevel);
+    LOG_UINT(dac_ramprate);
+    LOG_BOOL(dac_eq_bypass);
+    LOG_U32(daceq_b0);
+    LOG_U32(daceq_b1);
+    LOG_U32(daceq_a1);
+    LOG_BOOL(adc_dmic_enabled);
+    LOG_BOOL(adc_linsel);
+    LOG_UINT(adc_pga_gain);
+    LOG_UINT(adc_ramprate);
+    LOG_BOOL(adc_dmic_sense);
+    LOG_BOOL(adc_sync);
+    LOG_BOOL(adc_inv);
+    LOG_BOOL(adc_ramclr);
+    LOG_UINT(adc_scale);
+    LOG_BOOL(alc_enabled);
+    LOG_BOOL(adc_automute_enabled);
+    LOG_UINT(alc_winsize);
+    LOG_UINT(alc_maxlevel);
+    LOG_UINT(alc_minlevel);
+    LOG_UINT(adc_automute_winsize);
+    LOG_UINT(adc_automute_noise_gate);
+    LOG_UINT(adc_automute_volume);
+    LOG_UINT(adc_hpfs1);
+    LOG_UINT(adc_hpfs2);
+    LOG_BOOL(adc_eq_bypass);
+    LOG_BOOL(adc_hpf);
+    LOG_U32(adceq_b0);
+    LOG_U32(adceq_a1);
+    LOG_U32(adceq_a2);
+    LOG_U32(adceq_b1);
+    LOG_U32(adceq_b2);
+#undef LOG_BOOL
+#undef LOG_UINT
+#undef LOG_U32
+#undef LOG_IP
+#undef LOG_STR
+    if (out.length() > 0) {
+        Serial.print(F("[CFG] saved: "));
+        Serial.println(out);
+    } else {
+        Serial.println(F("[CFG] saved: (no change)"));
+        return;
+    }
+
+    // For ES8311-backed fields, print the affected register address, its full
+    // 8-bit value (hex + binary), and the bit breakdown so the change can be
+    // cross-checked against the datasheet without having to recompute the
+    // packed value. Register layouts mirror es8311.cpp's es8311_*_regNN().
+    auto bin8 = [](uint8_t v) -> String {
+        String s;
+        s.reserve(8);
+        for (int i = 7; i >= 0; --i) {
+            s += (v & (1u << i)) ? '1' : '0';
+        }
+        return s;
+    };
+    auto bin32 = [](uint32_t v) -> String {
+        // Group 32 bits by byte ("0b00000000_00000000_00110000_00111001")
+        // so 30-bit EQ coefficients stay legible.
+        String s;
+        s.reserve(35);
+        for (int i = 31; i >= 0; --i) {
+            s += (v & (1u << i)) ? '1' : '0';
+            if (i > 0 && (i % 8) == 0) s += '_';
+        }
+        return s;
+    };
+    auto reg13 = [](const ExternalRadioConfig *c) -> uint8_t {
+        // REG13 HPSW = bit4; 0x10 = drive HP, 0x00 = drive line.
+        return c->hp_drive_enabled ? 0x10u : 0x00u;
+    };
+    auto reg14 = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>((c->adc_dmic_enabled ? 0x40u : 0u) |
+                                    (c->adc_linsel ? 0x10u : 0u) |
+                                    (c->adc_pga_gain & 0x0fu));
+    };
+    auto reg15 = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>(((c->adc_ramprate & 0x0fu) << 4) |
+                                    (c->adc_dmic_sense ? 0x01u : 0u));
+    };
+    auto reg16 = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>((c->adc_sync ? 0x20u : 0u) |
+                                    (c->adc_inv ? 0x10u : 0u) |
+                                    (c->adc_ramclr ? 0x08u : 0u) |
+                                    (c->adc_scale & 0x07u));
+    };
+    auto reg18 = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>((c->alc_enabled ? 0x80u : 0u) |
+                                    (c->adc_automute_enabled ? 0x40u : 0u) |
+                                    (c->alc_winsize & 0x0fu));
+    };
+    auto reg19 = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>(((c->alc_maxlevel & 0x0fu) << 4) |
+                                    (c->alc_minlevel & 0x0fu));
+    };
+    auto reg1a = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>(((c->adc_automute_winsize & 0x0fu) << 4) |
+                                    (c->adc_automute_noise_gate & 0x0fu));
+    };
+    auto reg1b = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>(((c->adc_automute_volume & 0x07u) << 5) |
+                                    (c->adc_hpfs1 & 0x1fu));
+    };
+    auto reg1c = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>((c->adc_eq_bypass ? 0x40u : 0u) |
+                                    (c->adc_hpf ? 0x20u : 0u) |
+                                    (c->adc_hpfs2 & 0x1fu));
+    };
+    auto reg34 = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>((c->drc_enabled ? 0x80u : 0u) |
+                                    (c->drc_winsize & 0x0fu));
+    };
+    auto reg35 = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>(((c->drc_maxlevel & 0x0fu) << 4) |
+                                    (c->drc_minlevel & 0x0fu));
+    };
+    auto reg37 = [](const ExternalRadioConfig *c) -> uint8_t {
+        return static_cast<uint8_t>(((c->dac_ramprate & 0x0fu) << 4) |
+                                    (c->dac_eq_bypass ? 0x08u : 0u));
+    };
+
+    if (before->hp_drive_enabled != after->hp_drive_enabled) {
+        const uint8_t v = reg13(after);
+        Serial.printf("[CFG]   REG13=0x%02X 0b%s (hp_drive=%u)\n",
+                      v, bin8(v).c_str(),
+                      after->hp_drive_enabled ? 1u : 0u);
+    }
+    if (before->adc_dmic_enabled != after->adc_dmic_enabled ||
+        before->adc_linsel != after->adc_linsel ||
+        before->adc_pga_gain != after->adc_pga_gain) {
+        const uint8_t v = reg14(after);
+        Serial.printf("[CFG]   REG14=0x%02X 0b%s (dmic_enabled=%u linsel=%u pga_gain=%u)\n",
+                      v, bin8(v).c_str(),
+                      after->adc_dmic_enabled ? 1u : 0u,
+                      after->adc_linsel ? 1u : 0u,
+                      static_cast<unsigned>(after->adc_pga_gain));
+    }
+    if (before->adc_ramprate != after->adc_ramprate ||
+        before->adc_dmic_sense != after->adc_dmic_sense) {
+        const uint8_t v = reg15(after);
+        Serial.printf("[CFG]   REG15=0x%02X 0b%s (adc_ramprate=%u dmic_sense=%u)\n",
+                      v, bin8(v).c_str(),
+                      static_cast<unsigned>(after->adc_ramprate),
+                      after->adc_dmic_sense ? 1u : 0u);
+    }
+    if (before->adc_sync != after->adc_sync ||
+        before->adc_inv != after->adc_inv ||
+        before->adc_ramclr != after->adc_ramclr ||
+        before->adc_scale != after->adc_scale) {
+        const uint8_t v = reg16(after);
+        Serial.printf("[CFG]   REG16=0x%02X 0b%s (sync=%u inv=%u ramclr=%u scale=%u)\n",
+                      v, bin8(v).c_str(),
+                      after->adc_sync ? 1u : 0u,
+                      after->adc_inv ? 1u : 0u,
+                      after->adc_ramclr ? 1u : 0u,
+                      static_cast<unsigned>(after->adc_scale));
+    }
+    if (before->mic_volume != after->mic_volume) {
+        Serial.printf("[CFG]   REG17=0x%02X 0b%s (mic_volume=%u)\n",
+                      after->mic_volume, bin8(after->mic_volume).c_str(),
+                      static_cast<unsigned>(after->mic_volume));
+    }
+    if (before->alc_enabled != after->alc_enabled ||
+        before->adc_automute_enabled != after->adc_automute_enabled ||
+        before->alc_winsize != after->alc_winsize) {
+        const uint8_t v = reg18(after);
+        Serial.printf("[CFG]   REG18=0x%02X 0b%s (alc_enabled=%u automute_enabled=%u alc_winsize=%u)\n",
+                      v, bin8(v).c_str(),
+                      after->alc_enabled ? 1u : 0u,
+                      after->adc_automute_enabled ? 1u : 0u,
+                      static_cast<unsigned>(after->alc_winsize));
+    }
+    if (before->alc_maxlevel != after->alc_maxlevel ||
+        before->alc_minlevel != after->alc_minlevel) {
+        const uint8_t v = reg19(after);
+        Serial.printf("[CFG]   REG19=0x%02X 0b%s (alc_maxlevel=%u alc_minlevel=%u)\n",
+                      v, bin8(v).c_str(),
+                      static_cast<unsigned>(after->alc_maxlevel),
+                      static_cast<unsigned>(after->alc_minlevel));
+    }
+    if (before->adc_automute_winsize != after->adc_automute_winsize ||
+        before->adc_automute_noise_gate != after->adc_automute_noise_gate) {
+        const uint8_t v = reg1a(after);
+        Serial.printf("[CFG]   REG1A=0x%02X 0b%s (automute_winsize=%u automute_noise_gate=%u)\n",
+                      v, bin8(v).c_str(),
+                      static_cast<unsigned>(after->adc_automute_winsize),
+                      static_cast<unsigned>(after->adc_automute_noise_gate));
+    }
+    if (before->adc_automute_volume != after->adc_automute_volume ||
+        before->adc_hpfs1 != after->adc_hpfs1) {
+        const uint8_t v = reg1b(after);
+        Serial.printf("[CFG]   REG1B=0x%02X 0b%s (automute_volume=%u hpfs1=%u)\n",
+                      v, bin8(v).c_str(),
+                      static_cast<unsigned>(after->adc_automute_volume),
+                      static_cast<unsigned>(after->adc_hpfs1));
+    }
+    if (before->adc_eq_bypass != after->adc_eq_bypass ||
+        before->adc_hpf != after->adc_hpf ||
+        before->adc_hpfs2 != after->adc_hpfs2) {
+        const uint8_t v = reg1c(after);
+        Serial.printf("[CFG]   REG1C=0x%02X 0b%s (eq_bypass=%u dynamic_hpf=%u hpfs2=%u)\n",
+                      v, bin8(v).c_str(),
+                      after->adc_eq_bypass ? 1u : 0u,
+                      after->adc_hpf ? 1u : 0u,
+                      static_cast<unsigned>(after->adc_hpfs2));
+    }
+    if (before->line_out_volume != after->line_out_volume) {
+        Serial.printf("[CFG]   REG32=0x%02X 0b%s (line_out_volume=%u)\n",
+                      after->line_out_volume, bin8(after->line_out_volume).c_str(),
+                      static_cast<unsigned>(after->line_out_volume));
+    }
+    if (before->drc_enabled != after->drc_enabled ||
+        before->drc_winsize != after->drc_winsize) {
+        const uint8_t v = reg34(after);
+        Serial.printf("[CFG]   REG34=0x%02X 0b%s (drc_enabled=%u drc_winsize=%u)\n",
+                      v, bin8(v).c_str(),
+                      after->drc_enabled ? 1u : 0u,
+                      static_cast<unsigned>(after->drc_winsize));
+    }
+    if (before->drc_maxlevel != after->drc_maxlevel ||
+        before->drc_minlevel != after->drc_minlevel) {
+        const uint8_t v = reg35(after);
+        Serial.printf("[CFG]   REG35=0x%02X 0b%s (drc_maxlevel=%u drc_minlevel=%u)\n",
+                      v, bin8(v).c_str(),
+                      static_cast<unsigned>(after->drc_maxlevel),
+                      static_cast<unsigned>(after->drc_minlevel));
+    }
+    if (before->dac_ramprate != after->dac_ramprate ||
+        before->dac_eq_bypass != after->dac_eq_bypass) {
+        const uint8_t v = reg37(after);
+        Serial.printf("[CFG]   REG37=0x%02X 0b%s (dac_ramprate=%u dac_eq_bypass=%u)\n",
+                      v, bin8(v).c_str(),
+                      static_cast<unsigned>(after->dac_ramprate),
+                      after->dac_eq_bypass ? 1u : 0u);
+    }
+    // 30-bit EQ coefficients occupy 4 consecutive registers each. Print the
+    // raw 32-bit value (top 2 bits unused) in hex + binary, plus the address
+    // range.
+    auto log_eq = [&bin32](const char *range, uint32_t value, const char *field_name) {
+        const uint32_t v = value & kDacEqCoefficientMax;
+        Serial.printf("[CFG]   %s=0x%08lX 0b%s (%s=%lu)\n",
+                      range,
+                      static_cast<unsigned long>(v),
+                      bin32(v).c_str(),
+                      field_name,
+                      static_cast<unsigned long>(value));
+    };
+    if (before->adceq_b0 != after->adceq_b0) log_eq("REG1D-20", after->adceq_b0, "adceq_b0");
+    if (before->adceq_a1 != after->adceq_a1) log_eq("REG21-24", after->adceq_a1, "adceq_a1");
+    if (before->adceq_a2 != after->adceq_a2) log_eq("REG25-28", after->adceq_a2, "adceq_a2");
+    if (before->adceq_b1 != after->adceq_b1) log_eq("REG29-2C", after->adceq_b1, "adceq_b1");
+    if (before->adceq_b2 != after->adceq_b2) log_eq("REG2D-30", after->adceq_b2, "adceq_b2");
+    if (before->daceq_b0 != after->daceq_b0) log_eq("REG38-3B", after->daceq_b0, "daceq_b0");
+    if (before->daceq_b1 != after->daceq_b1) log_eq("REG3C-3F", after->daceq_b1, "daceq_b1");
+    if (before->daceq_a1 != after->daceq_a1) log_eq("REG40-43", after->daceq_a1, "daceq_a1");
+}
+
+// Reply to /save_* with {"ok": bool, "fields": {name: stored_value, ...}}.
+// Only fields that the client actually submitted are echoed (skipping the
+// hidden _present markers). The client updates its inputs from these values
+// so the form always reflects on-device truth without a page reload.
+static void sendSavedFieldsJson(const bool ok)
+{
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    String body;
+    body.reserve(1024);
+    body += "{\"ok\":";
+    body += ok ? "true" : "false";
+    body += ",\"fields\":{";
+    bool first = true;
+    for (int i = 0; i < s_server.args(); ++i) {
+        const String name = s_server.argName(i);
+        if (name.endsWith("_present")) {
+            continue;
+        }
+        const String value = savedValueForArg(config, name);
+        if (!first) {
+            body += ",";
+        }
+        first = false;
+        body += "\"";
+        body += jsonEscape(name);
+        body += "\":\"";
+        body += jsonEscape(value);
+        body += "\"";
+    }
+    body += "}}";
+    s_server.send(ok ? 200 : 400, "application/json; charset=utf-8", body);
+}
+
+static void sendChunkedHtml(const int code, const String &html)
+{
+    // WebServer::send writes the body in a single _currentClientWrite() call
+    // and ignores the return value, so a body that overflows the TCP send
+    // buffer (~5.7 KB by default) gets silently truncated. Switch to chunked
+    // transfer encoding and feed the body in 1 KB pieces so each write fits.
+    s_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    s_server.send(code, "text/html; charset=utf-8", "");
+    constexpr size_t kChunkSize = 1024;
+    const char *data = html.c_str();
+    size_t remaining = html.length();
+    while (remaining > 0) {
+        const size_t n = (remaining < kChunkSize) ? remaining : kChunkSize;
+        s_server.sendContent(data, n);
+        data += n;
+        remaining -= n;
+    }
+    s_server.sendContent("");
+}
+
 static void sendConfigPage(const char *title,
                            const char *headline,
                            const char *headline_key,
@@ -361,9 +804,7 @@ static void sendConfigPage(const char *title,
         .audio_active = audio_active,
         .footer = footer,
     };
-    s_server.send(200,
-                  "text/html; charset=utf-8",
-                  WifiConfigPortalView_BuildConfigPage(config, state, form_sections));
+    sendChunkedHtml(200, WifiConfigPortalView_BuildConfigPage(config, state, form_sections));
 }
 
 static String buildUpdatePageI18n(const char *headline,
@@ -477,22 +918,11 @@ static void handleSaveWifi()
 {
     bool ok = true;
 
-    const ExternalRadioConfig *before = EXTERNAL_RADIO_GetConfig();
-    char old_wifi_ssid[33] = {};
-    char old_wifi_password[65] = {};
-    bool old_wifi_dhcp_enabled = true;
-    uint32_t old_wifi_ip = 0u;
-    uint32_t old_wifi_netmask = 0u;
-    uint32_t old_wifi_gateway = 0u;
-    uint32_t old_wifi_dns = 0u;
-    if (before != nullptr) {
-        strncpy(old_wifi_ssid, before->wifi_ssid, sizeof(old_wifi_ssid) - 1u);
-        strncpy(old_wifi_password, before->wifi_password, sizeof(old_wifi_password) - 1u);
-        old_wifi_dhcp_enabled = before->wifi_dhcp_enabled;
-        old_wifi_ip = before->wifi_ip;
-        old_wifi_netmask = before->wifi_netmask;
-        old_wifi_gateway = before->wifi_gateway;
-        old_wifi_dns = before->wifi_dns;
+    ExternalRadioConfig before_snapshot = {};
+    bool have_snapshot = false;
+    if (const ExternalRadioConfig *p = EXTERNAL_RADIO_GetConfig()) {
+        before_snapshot = *p;
+        have_snapshot = true;
     }
 
     if (ok && s_server.hasArg("wifi_ssid")) {
@@ -529,79 +959,35 @@ static void handleSaveWifi()
     }
 
     const ExternalRadioConfig *after = EXTERNAL_RADIO_GetConfig();
-    if (ok && after != nullptr) {
-        if (s_server.hasArg("wifi_ssid") || s_server.hasArg("wifi_password")) {
-            Serial.printf("[CFG] WiFi account saved via web: ssid=\"%s\" password=%s\n",
-                          after->wifi_ssid, maskSecret(after->wifi_password).c_str());
-        }
-        if (s_server.hasArg("wifi_dhcp_present") ||
-            s_server.hasArg("wifi_ip") ||
-            s_server.hasArg("wifi_mask") ||
-            s_server.hasArg("wifi_gateway") ||
-            s_server.hasArg("wifi_dns")) {
-            Serial.printf("[CFG] WiFi network saved via web: dhcp=%s ip=%s mask=%s gateway=%s dns=%s\n",
-                          after->wifi_dhcp_enabled ? "on" : "off",
-                          ipToString(after->wifi_ip).c_str(),
-                          ipToString(after->wifi_netmask).c_str(),
-                          ipToString(after->wifi_gateway).c_str(),
-                          ipToString(after->wifi_dns).c_str());
-        }
-        const bool restart_wifi = strcmp(old_wifi_ssid, after->wifi_ssid) != 0 ||
-                                  strcmp(old_wifi_password, after->wifi_password) != 0 ||
-                                  old_wifi_dhcp_enabled != after->wifi_dhcp_enabled ||
-                                  old_wifi_ip != after->wifi_ip ||
-                                  old_wifi_netmask != after->wifi_netmask ||
-                                  old_wifi_gateway != after->wifi_gateway ||
-                                  old_wifi_dns != after->wifi_dns;
+    if (ok && after != nullptr && have_snapshot) {
+        logChangedFields(&before_snapshot, after);
+        const bool restart_wifi = strcmp(before_snapshot.wifi_ssid, after->wifi_ssid) != 0 ||
+                                  strcmp(before_snapshot.wifi_password, after->wifi_password) != 0 ||
+                                  before_snapshot.wifi_dhcp_enabled != after->wifi_dhcp_enabled ||
+                                  before_snapshot.wifi_ip != after->wifi_ip ||
+                                  before_snapshot.wifi_netmask != after->wifi_netmask ||
+                                  before_snapshot.wifi_gateway != after->wifi_gateway ||
+                                  before_snapshot.wifi_dns != after->wifi_dns;
         if (restart_wifi) {
             Serial.printf("[CFG] WiFi credentials changed, reconnecting to \"%s\"\n", after->wifi_ssid);
             NRLAudioBridge_ApplyConfig(true, true);
-        } else {
-            Serial.println("[CFG] WiFi config unchanged, keeping current connection");
         }
     } else if (!ok) {
         Serial.println("[CFG] WiFi config save via web failed (invalid params or EEPROM write error)");
     }
 
-    if (ok) {
-        const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
-        sendConfigPage("Applied",
-                       "WiFi Saved",
-                       "wifiAppliedHeadline",
-                       "WiFi settings were saved.",
-                       "wifiAppliedIntro",
-                       "/save_wifi",
-                       buildNetworkSection(config),
-                       true,
-                       false,
-                       false,
-                       "");
-    } else {
-        const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
-        sendConfigPage("Error",
-                       "WiFi Save Failed",
-                       "wifiErrorHeadline",
-                       "Check the WiFi name and password.",
-                       "wifiErrorIntro",
-                       "/save_wifi",
-                       buildNetworkSection(config),
-                       true,
-                       false,
-                       false,
-                       "");
-    }
+    sendSavedFieldsJson(ok);
 }
 
 static void handleSaveNrl()
 {
     bool ok = true;
 
-    const ExternalRadioConfig *before = EXTERNAL_RADIO_GetConfig();
-    char old_server_host[65] = {};
-    uint16_t old_server_port = 0u;
-    if (before != nullptr) {
-        strncpy(old_server_host, before->server_host, sizeof(old_server_host) - 1u);
-        old_server_port = before->server_port;
+    ExternalRadioConfig before_snapshot = {};
+    bool have_snapshot = false;
+    if (const ExternalRadioConfig *p = EXTERNAL_RADIO_GetConfig()) {
+        before_snapshot = *p;
+        have_snapshot = true;
     }
 
     if (ok && s_server.hasArg("server_host")) {
@@ -627,6 +1013,12 @@ static void handleSaveNrl()
         ok = parseUIntArg(s_server.arg("callsign_ssid"), &value) &&
              value <= 255UL &&
              EXTERNAL_RADIO_SetCallsignSsid(static_cast<uint8_t>(value), false);
+    }
+    if (ok && s_server.hasArg("ptt_timeout")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("ptt_timeout"), &value) &&
+             value >= 5UL && value <= 3600UL &&
+             EXTERNAL_RADIO_SetPttTimeout(static_cast<uint16_t>(value), false);
     }
     if (ok && s_server.hasArg("mic_volume")) {
         unsigned long value = 0UL;
@@ -905,90 +1297,8 @@ static void handleSaveNrl()
     }
 
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
-    if (ok && config != nullptr) {
-        if (s_server.hasArg("server_host") || s_server.hasArg("server_port")) {
-            Serial.printf("[CFG] NRL server saved via web: server=%s:%u\n",
-                          config->server_host,
-                          static_cast<unsigned>(config->server_port));
-        }
-        if (s_server.hasArg("channel") || s_server.hasArg("callsign") || s_server.hasArg("callsign_ssid")) {
-            Serial.printf("[CFG] Radio identity saved via web: channel=%u callsign=%s-%u\n",
-                          static_cast<unsigned>(config->channel),
-                          config->callsign,
-                          static_cast<unsigned>(config->callsign_ssid));
-        }
-        if (s_server.hasArg("mic_volume") || s_server.hasArg("line_out_volume")) {
-            Serial.printf("[CFG] Audio volume saved via web: mic_volume=%u line_out_volume=%u\n",
-                          static_cast<unsigned>(config->mic_volume),
-                          static_cast<unsigned>(config->line_out_volume));
-        }
-        if (s_server.hasArg("hp_drive_present")) {
-            Serial.printf("[CFG] ES8311 HP drive saved via web: hp_drive=%s\n",
-                          config->hp_drive_enabled ? "on" : "off");
-        }
-        if (s_server.hasArg("drc_present") ||
-            s_server.hasArg("drc_winsize") ||
-            s_server.hasArg("drc_maxlevel") ||
-            s_server.hasArg("drc_minlevel") ||
-            s_server.hasArg("dac_ramprate")) {
-            Serial.printf("[CFG] ES8311 DRC saved via web: enabled=%u winsize=%u maxlevel=%u minlevel=%u ramp=%u\n",
-                          config->drc_enabled ? 1u : 0u,
-                          static_cast<unsigned>(config->drc_winsize),
-                          static_cast<unsigned>(config->drc_maxlevel),
-                          static_cast<unsigned>(config->drc_minlevel),
-                          static_cast<unsigned>(config->dac_ramprate));
-        }
-        if (s_server.hasArg("dac_eq_bypass_present") ||
-            s_server.hasArg("daceq_b0") ||
-            s_server.hasArg("daceq_b1") ||
-            s_server.hasArg("daceq_a1")) {
-            Serial.printf("[CFG] ES8311 EQ saved via web: bypass=%u b0=%lu b1=%lu a1=%lu\n",
-                          config->dac_eq_bypass ? 1u : 0u,
-                          static_cast<unsigned long>(config->daceq_b0),
-                          static_cast<unsigned long>(config->daceq_b1),
-                          static_cast<unsigned long>(config->daceq_a1));
-        }
-        if (s_server.hasArg("adc_system_present") ||
-            s_server.hasArg("adc_pga_gain") ||
-            s_server.hasArg("adc_ramp_present") ||
-            s_server.hasArg("adc_ramprate") ||
-            s_server.hasArg("adc_scale_present") ||
-            s_server.hasArg("adc_scale") ||
-            s_server.hasArg("alc_present") ||
-            s_server.hasArg("alc_winsize") ||
-            s_server.hasArg("alc_maxlevel") ||
-            s_server.hasArg("alc_minlevel") ||
-            s_server.hasArg("adc_automute_winsize") ||
-            s_server.hasArg("adc_automute_noise_gate") ||
-            s_server.hasArg("adc_automute_volume") ||
-            s_server.hasArg("adc_hpf_present") ||
-            s_server.hasArg("adc_hpfs1") ||
-            s_server.hasArg("adc_hpfs2") ||
-            s_server.hasArg("adceq_b0") ||
-            s_server.hasArg("adceq_a1") ||
-            s_server.hasArg("adceq_a2") ||
-            s_server.hasArg("adceq_b1") ||
-            s_server.hasArg("adceq_b2")) {
-            Serial.printf("[CFG] ES8311 ADC saved via web: reg14=0x%02X reg15=0x%02X reg16=0x%02X alc=%u automute=%u hpf=%u/%u adceq=%lu,%lu,%lu,%lu,%lu\n",
-                          static_cast<unsigned>((config->adc_dmic_enabled ? 0x40u : 0x00u) |
-                                                (config->adc_linsel ? 0x10u : 0x00u) |
-                                                (config->adc_pga_gain & 0x0fu)),
-                          static_cast<unsigned>(((config->adc_ramprate & 0x0fu) << 4) |
-                                                (config->adc_dmic_sense ? 0x01u : 0x00u)),
-                          static_cast<unsigned>((config->adc_sync ? 0x20u : 0x00u) |
-                                                (config->adc_inv ? 0x10u : 0x00u) |
-                                                (config->adc_ramclr ? 0x08u : 0x00u) |
-                                                (config->adc_scale & 0x07u)),
-                          config->alc_enabled ? 1u : 0u,
-                          config->adc_automute_enabled ? 1u : 0u,
-                          static_cast<unsigned>(config->adc_hpfs1),
-                          static_cast<unsigned>(config->adc_hpfs2),
-                          static_cast<unsigned long>(config->adceq_b0),
-                          static_cast<unsigned long>(config->adceq_a1),
-                          static_cast<unsigned long>(config->adceq_a2),
-                          static_cast<unsigned long>(config->adceq_b1),
-                          static_cast<unsigned long>(config->adceq_b2));
-        }
+    if (ok && config != nullptr && have_snapshot) {
+        logChangedFields(&before_snapshot, config);
         ES8311_ApplyAudioConfig(config->mic_volume,
                                 config->line_out_volume,
                                 config->hp_drive_enabled,
@@ -1027,8 +1337,8 @@ static void handleSaveNrl()
                                 config->adceq_a2,
                                 config->adceq_b1,
                                 config->adceq_b2);
-        const bool restart_udp = strcmp(old_server_host, config->server_host) != 0 ||
-                                 old_server_port != config->server_port;
+        const bool restart_udp = strcmp(before_snapshot.server_host, config->server_host) != 0 ||
+                                 before_snapshot.server_port != config->server_port;
         if (restart_udp) {
             Serial.printf("[CFG] server address changed, rebuilding UDP connection to %s:%u\n",
                           config->server_host, static_cast<unsigned>(config->server_port));
@@ -1038,76 +1348,16 @@ static void handleSaveNrl()
         Serial.println("[CFG] NRL config save via web failed (invalid params or EEPROM write error)");
     }
 
-    const bool audio_request = s_server.hasArg("mic_volume") ||
-                               s_server.hasArg("line_out_volume") ||
-                               s_server.hasArg("hp_drive_present") ||
-                               s_server.hasArg("aec_present") ||
-                               s_server.hasArg("drc_present") ||
-                               s_server.hasArg("drc_winsize") ||
-                               s_server.hasArg("drc_maxlevel") ||
-                               s_server.hasArg("drc_minlevel") ||
-                               s_server.hasArg("dac_ramprate") ||
-                               s_server.hasArg("dac_eq_bypass_present") ||
-                               s_server.hasArg("daceq_b0") ||
-                               s_server.hasArg("daceq_b1") ||
-                               s_server.hasArg("daceq_a1") ||
-                               s_server.hasArg("adc_system_present") ||
-                               s_server.hasArg("adc_pga_gain") ||
-                               s_server.hasArg("adc_ramp_present") ||
-                               s_server.hasArg("adc_ramprate") ||
-                               s_server.hasArg("adc_scale_present") ||
-                               s_server.hasArg("adc_scale") ||
-                               s_server.hasArg("alc_present") ||
-                               s_server.hasArg("alc_winsize") ||
-                               s_server.hasArg("alc_maxlevel") ||
-                               s_server.hasArg("alc_minlevel") ||
-                               s_server.hasArg("adc_automute_winsize") ||
-                               s_server.hasArg("adc_automute_noise_gate") ||
-                               s_server.hasArg("adc_automute_volume") ||
-                               s_server.hasArg("adc_hpf_present") ||
-                               s_server.hasArg("adc_hpfs1") ||
-                               s_server.hasArg("adc_hpfs2") ||
-                               s_server.hasArg("adceq_b0") ||
-                               s_server.hasArg("adceq_a1") ||
-                               s_server.hasArg("adceq_a2") ||
-                               s_server.hasArg("adceq_b1") ||
-                               s_server.hasArg("adceq_b2");
-
-    if (ok) {
-        sendConfigPage("Applied",
-                       audio_request ? "Audio Settings Saved" : "NRL Saved",
-                       audio_request ? "audioHeadline" : "nrlAppliedHeadline",
-                       audio_request ? "Audio settings were saved." : "NRL settings were saved.",
-                       audio_request ? "audioIntro" : "nrlAppliedIntro",
-                       "/save_nrl",
-                       audio_request ? buildAudioSections(config) : buildDeviceSections(config),
-                       false,
-                       !audio_request,
-                       audio_request,
-                       "");
-    } else {
-        sendConfigPage("Error",
-                       audio_request ? "Audio Save Failed" : "NRL Save Failed",
-                       "nrlErrorHeadline",
-                       "Check server address, port, channel, callsign, SSID, and audio values.",
-                       "nrlErrorIntro",
-                       "/save_nrl",
-                       audio_request ? buildAudioSections(config) : buildDeviceSections(config),
-                       false,
-                       !audio_request,
-                       audio_request,
-                       "");
-    }
+    sendSavedFieldsJson(ok);
 }
 
 static void handleUpdatePage()
 {
-    s_server.send(200,
-                  "text/html; charset=utf-8",
-                  buildUpdatePageI18n("Firmware Update",
-                                      "updateHeadline",
-                                      "Upload a firmware file over this WiFi connection.",
-                                      "updateIntro"));
+    sendChunkedHtml(200,
+                    buildUpdatePageI18n("Firmware Update",
+                                        "updateHeadline",
+                                        "Upload a firmware file over this WiFi connection.",
+                                        "updateIntro"));
 }
 
 static void handleUpdateFinished()
@@ -1118,47 +1368,132 @@ static void handleUpdateFinished()
         s_update_reboot_at_ms = millis() + 1000UL;
     }
 
-    s_server.send(ok ? 200 : 500,
-                  "text/html; charset=utf-8",
-                  buildUpdatePageI18n(ok ? "Update Complete" : "Update Failed",
-                                      ok ? "updateDoneHeadline" : "updateFailHeadline",
-                                      ok ? "Firmware was written successfully. Rebooting shortly."
-                                         : "Firmware upload failed. Check that the file is a valid firmware.bin.",
-                                      ok ? "updateDoneIntro" : "updateFailIntro"));
+    sendChunkedHtml(ok ? 200 : 500,
+                    buildUpdatePageI18n(ok ? "Update Complete" : "Update Failed",
+                                        ok ? "updateDoneHeadline" : "updateFailHeadline",
+                                        ok ? "Firmware was written successfully. Rebooting shortly."
+                                           : "Firmware upload failed. Check that the file is a valid firmware.bin.",
+                                        ok ? "updateDoneIntro" : "updateFailIntro"));
 }
 
-static void handleUpdateUpload()
+// Begin a fresh OTA flash. Shared by the raw and multipart paths.
+static void otaBegin(const size_t expected_size)
 {
-    HTTPUpload &upload = s_server.upload();
+    Serial.printf("[OTA] upload start (content-length=%u)\n",
+                  static_cast<unsigned>(s_server.clientContentLength()));
+    // The accept code sets the client read timeout to HTTP_MAX_SEND_WAIT
+    // (5 s); a flash erase+write stall can exceed that. Bump it so a slow
+    // flash block doesn't abort mid-stream.
+    s_server.client().setTimeout(60000);
+    if (!Update.begin(expected_size > 0 ? expected_size : UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+        Update.printError(Serial);
+    }
+}
 
-    if (upload.status == UPLOAD_FILE_START) {
-        Serial.printf("[OTA] upload start: %s\n", upload.filename.c_str());
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
-            Update.printError(Serial);
+static void otaWriteChunk(uint8_t *buf, const size_t len)
+{
+    if (Update.write(buf, len) != len) {
+        Update.printError(Serial);
+    }
+}
+
+static void otaEnd(const size_t total)
+{
+    if (Update.end(true)) {
+        Serial.printf("[OTA] update complete: %u bytes\n", static_cast<unsigned>(total));
+    } else {
+        Update.printError(Serial);
+    }
+}
+
+static void otaAbort(const size_t total)
+{
+    Update.abort();
+    Serial.printf("[OTA] upload aborted after %u bytes\n", static_cast<unsigned>(total));
+}
+
+static void handleUpdateRaw()
+{
+    // The Arduino WebServer's FunctionRequestHandler dispatches the same
+    // user function for BOTH the multipart upload path (HTTPUpload) and the
+    // raw POST path (HTTPRaw). Only one of `_currentUpload` / `_currentRaw`
+    // is allocated per request -- dereferencing the other one crashes with
+    // LoadProhibited at 0x0. Look at the Content-Type header to pick the
+    // right interface. (We rely on s_server collecting "Content-Type" --
+    // see ensureServerRunning() for the collectHeaders() call.)
+    //
+    // Prefer the raw path: a 2 MB upload over multipart goes byte-by-byte
+    // through _uploadReadByte() and takes minutes; the raw path reads in
+    // 1436-byte chunks via client.readBytes() and finishes in ~30 s. The
+    // matching client code in wifi_update_portal.js sends the firmware as
+    // application/octet-stream, but we still need to handle multipart
+    // gracefully in case an older cached JS is being served.
+    const String content_type = s_server.header("Content-Type");
+    const bool is_multipart = content_type.indexOf("multipart/") >= 0;
+
+    if (is_multipart) {
+        HTTPUpload &upload = s_server.upload();
+        if (upload.status == UPLOAD_FILE_START) {
+            otaBegin(s_server.clientContentLength());
+        } else if (upload.status == UPLOAD_FILE_WRITE) {
+            otaWriteChunk(upload.buf, upload.currentSize);
+        } else if (upload.status == UPLOAD_FILE_END) {
+            otaEnd(upload.totalSize);
+        } else if (upload.status == UPLOAD_FILE_ABORTED) {
+            otaAbort(upload.totalSize);
         }
         return;
     }
 
-    if (upload.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-            Update.printError(Serial);
-        }
-        return;
+    HTTPRaw &raw = s_server.raw();
+    if (raw.status == RAW_START) {
+        otaBegin(s_server.clientContentLength());
+    } else if (raw.status == RAW_WRITE) {
+        otaWriteChunk(raw.buf, raw.currentSize);
+    } else if (raw.status == RAW_END) {
+        otaEnd(raw.totalSize);
+    } else if (raw.status == RAW_ABORTED) {
+        otaAbort(raw.totalSize);
     }
+}
 
-    if (upload.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) {
-            Serial.printf("[OTA] update complete: %u bytes\n", static_cast<unsigned>(upload.totalSize));
-        } else {
-            Update.printError(Serial);
-        }
-        return;
+static void sendChunkedAsset(const char *content_type, const char *body, const size_t length)
+{
+    // Long cache lifetime is safe because every reference is versioned via the
+    // ?v={{VERSION}} query string in the HTML template.
+    s_server.sendHeader("Cache-Control", "public, max-age=2592000, immutable");
+    s_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    s_server.send(200, content_type, "");
+    constexpr size_t kChunkSize = 1024;
+    size_t remaining = length;
+    const char *cursor = body;
+    while (remaining > 0) {
+        const size_t n = (remaining < kChunkSize) ? remaining : kChunkSize;
+        s_server.sendContent(cursor, n);
+        cursor += n;
+        remaining -= n;
     }
+    s_server.sendContent("");
+}
 
-    if (upload.status == UPLOAD_FILE_ABORTED) {
-        Update.abort();
-        Serial.println("[OTA] upload aborted");
-    }
+static void handlePortalCss()
+{
+    sendChunkedAsset("text/css; charset=utf-8", kWifiConfigPortalCss, sizeof(kWifiConfigPortalCss) - 1);
+}
+
+static void handlePortalJs()
+{
+    sendChunkedAsset("application/javascript; charset=utf-8", kWifiConfigPortalJs, sizeof(kWifiConfigPortalJs) - 1);
+}
+
+static void handleUpdateCss()
+{
+    sendChunkedAsset("text/css; charset=utf-8", kWifiUpdatePortalCss, sizeof(kWifiUpdatePortalCss) - 1);
+}
+
+static void handleUpdateJs()
+{
+    sendChunkedAsset("application/javascript; charset=utf-8", kWifiUpdatePortalJs, sizeof(kWifiUpdatePortalJs) - 1);
 }
 
 static void handlePing()
@@ -1205,7 +1540,11 @@ static void ensureServerRunning()
     s_server.on("/save_wifi", HTTP_POST, handleSaveWifi);
     s_server.on("/save_nrl", HTTP_POST, handleSaveNrl);
     s_server.on("/update", HTTP_GET, handleUpdatePage);
-    s_server.on("/update", HTTP_POST, handleUpdateFinished, handleUpdateUpload);
+    s_server.on("/update", HTTP_POST, handleUpdateFinished, handleUpdateRaw);
+    s_server.on("/portal.css", HTTP_GET, handlePortalCss);
+    s_server.on("/portal.js", HTTP_GET, handlePortalJs);
+    s_server.on("/update.css", HTTP_GET, handleUpdateCss);
+    s_server.on("/update.js", HTTP_GET, handleUpdateJs);
     s_server.on("/ping", HTTP_GET, handlePing);
     s_server.on("/favicon.ico", HTTP_GET, handleFavicon);
     s_server.on("/generate_204", HTTP_GET, handleGenerate204);
@@ -1213,6 +1552,13 @@ static void ensureServerRunning()
     s_server.on("/connecttest.txt", HTTP_GET, handleConnectTest);
     s_server.on("/ncsi.txt", HTTP_GET, handleNcsi);
     s_server.onNotFound(handleNotFound);
+
+    // The OTA handler needs to read Content-Type to tell multipart uploads
+    // from raw octet-stream POSTs (see handleUpdateRaw). WebServer doesn't
+    // store arbitrary request headers by default.
+    static const char *kCollectedHeaders[] = { "Content-Type" };
+    s_server.collectHeaders(kCollectedHeaders, 1);
+
     s_server.begin();
     s_server_started = true;
     Serial.println("[CFG] HTTP config server started on port 80");

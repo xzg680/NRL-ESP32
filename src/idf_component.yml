@@ -1,4 +1,7 @@
 dependencies:
   espressif/esp-sr: "^1.4.2"
+  # LVGL (格子派 ST7789 LCD UI) is vendored as a plain local component at
+  # components/lvgl, so it is deliberately NOT listed here: the IDF component
+  # manager must never try to fetch it from the registry.
   idf:
     version: ">=5.4.0"

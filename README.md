@@ -32,10 +32,23 @@
   - 三位频道选择输出，支持 `0..7` 共 8 个频道。
   - 状态灯显示网络心跳、SQL 状态和 PTT 状态。
 
+- PTT 按键发射控制（格子派）
+  - 短按 PTT 键开启发射，再短按一次关闭发射（锁定式）。
+  - 长按 PTT 键为即时发射（按住发射），松开按键立即停止发送。
+  - 发射超时：发射持续超过设定时间后自动强制关闭（短按锁定和长按均受此限制）。
+  - 超时时间默认 5 分钟，范围 `5..3600` 秒，可通过 `AT+PTT_TIMEOUT` 或 Web 配置页调节。
+
 - ES8311 音频编解码
   - I2S 主模式驱动 ES8311。
   - 支持麦克风输入增益、线路输出音量、HP Drive 输出模式配置。
   - 支持接收模式下的下行音频播放队列。
+
+- 屏幕显示（仅格子派）
+  - 板载 ST7789 240x240 SPI 彩屏，使用 LVGL 渲染，简洁现代科技风格深色界面。
+  - 中间主区域显示呼号（接收语音时为呼叫方，待机/发送时为本机配置的呼号），呼号下方是较小的 SSID，再下面一行是当前时间。
+  - 顶部状态栏左侧显示 WiFi 信号强度（dB 值），右侧显示电池电压。
+  - 底部显示设备获取到的局域网 IP 地址；WiFi 连接失败进入配网状态时，改为显示配置热点的 IP 地址。
+  - 时间通过 NTP 同步（CST-8 时区），未联网时显示 `--:--:--`。
 
 - SCI 串口透明传输
   - 支持通过 NRL 数据包转发 SCI 串口数据。
@@ -45,7 +58,7 @@
 - 远程 AT 命令配置
   - 支持查询和设置频道、服务器、呼号、SSID、音量、SCI 参数等。
   - 支持远程重启命令。
-  - 常用命令包括 `AT+CH`、`AT+D_IP`、`AT+D_PORT`、`AT+CALL`、`AT+SSID`、`AT+MIC_GAIN`、`AT+VOLUME`、`AT+HP_DRIVE`、`AT+SCI`、`AT+REBOOT`。
+  - 常用命令包括 `AT+CH`、`AT+D_IP`、`AT+D_PORT`、`AT+CALL`、`AT+SSID`、`AT+PTT_TIMEOUT`、`AT+MIC_GAIN`、`AT+VOLUME`、`AT+HP_DRIVE`、`AT+SCI`、`AT+REBOOT`。
 
 - 参数持久化
   - 电台配置保存到共享 Flash/EEPROM 区域。
@@ -126,6 +139,31 @@ REBOOT
 
 频道输出为三位二进制编码，例如频道 `0` 输出 `000`，频道 `7` 输出 `111`。
 
+## 屏幕显示（格子派）
+
+格子派板载一块 ST7789 240x240 SPI 彩屏，管脚与小智（xiaozhi）格子派板一致。屏幕驱动位于 `src/app/driver/display.cpp`，面板用 IDF 内置的 `esp_lcd` ST7789 驱动，界面用 LVGL 渲染。
+
+| 功能 | GPIO |
+| --- | --- |
+| LCD SCLK | `7` |
+| LCD MOSI | `6` |
+| LCD DC | `16` |
+| LCD CS | `15` |
+| LCD RST | `5` |
+| LCD 背光 | `4` |
+| 电池电压 ADC | `3`（ADC1 通道 2，1:2 分压） |
+
+由于 LCD 占用 GPIO 4-7/15/16，格子派的 SCI 串口已从默认的 GPIO 4/5 移到 GPIO 9（RX）/ 8（TX），以避让 LCD 背光（4）与复位（5）。BH4TDV 板没有屏幕，SCI 仍为 GPIO 4/5。
+
+界面布局：
+
+- 顶部状态栏：左侧 WiFi 信号强度（dB），中间输出音量（百分比），右侧电池电压。
+- 中间主区域：呼号上方的英文状态标题、呼号（大号字体）、SSID（小号）、当前时间。接收语音时显示呼叫方的呼号/SSID，待机或发送时显示本机配置的呼号/SSID（仅语音包参与判断，心跳包不影响）。
+- 状态标题随收发实时变化：`STANDBY`（待机）、`RECEIVING`（接收中）、`TRANSMITTING`（发送中）、`FULL DUPLEX`（同时收发）。
+- 底部：局域网 IP；进入配网（AP）状态时显示配置热点 IP（琥珀色）；**发送或接收语音时改为显示 NRL 服务器 host —— 发送为红色、接收为青色，显示配置的 host 字符串而非解析后的 IP**。
+
+LVGL（9.3.0）以**本地组件**形式内置在 `components/lvgl`，不经 ESP-IDF 组件管理器联网下载，因此本机和 CI 离线即可编译。LVGL 与 esp_lcd 的对接（缓冲区、刷新、tick）直接写在 `display.cpp` 里，未使用 `esp_lvgl_port`。LVGL 字体、颜色深度等通过 Kconfig 配置在 `sdkconfig.defaults`。
+
 ## 启动流程
 
 固件入口在 `src/app/main.cpp`：
@@ -134,9 +172,10 @@ REBOOT
 2. 初始化外部电台配置和频道选择 IO。
 3. 应用已保存的音频配置。
 4. 初始化 PTT、SQL 和状态灯 IO。
-5. 启动 WiFi 配置门户。
-6. 初始化 ES8311 音频编解码器并进入接收模式。
-7. 启动 NRL 音频桥接任务。
+5. 初始化屏幕（仅格子派：ST7789 LCD + LVGL 界面）。
+6. 启动 WiFi 配置门户。
+7. 初始化 ES8311 音频编解码器并进入接收模式。
+8. 启动 NRL 音频桥接任务。
 
 收到网络下行语音时，固件会拉高 PTT 并开始向电台输出音频；语音包超时后释放 PTT。
 
@@ -194,6 +233,7 @@ src/app/driver/board_pins.h       板级管脚定义
 src/app/driver/external_radio.*   电台配置、频道和持久化
 src/app/driver/status_io.*        PTT、SQL、状态灯
 src/app/driver/es8311.*           ES8311/I2S 音频驱动
+src/app/driver/display.*          ST7789 LCD + LVGL 界面（仅格子派）
 src/app/driver/sci_serial.*       SCI 串口
 src/lib/nrl_audio_bridge.*        NRL UDP 音频桥接
 src/lib/nrl_at_commands.*         远程 AT 命令

@@ -6,6 +6,7 @@
 #include "../lib/nrl_version.h"
 #include "../lib/wifi_config_portal.h"
 #include "driver/board_pins.h"
+#include "driver/display.h"
 #include "driver/es7210.h"
 #include "driver/es8311.h"
 #include "driver/external_radio.h"
@@ -75,6 +76,12 @@ void setup()
     }
 
     STATUS_IO_Init();
+
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+    // Bring the LCD up early so it shows a status frame while WiFi/BLE start.
+    Display_Init();
+#endif
+
     WifiConfigPortal_Init();
     BLEConfig_Init();
 
@@ -116,6 +123,9 @@ void loop()
         WifiConfigPortal_Poll();
         BLEConfig_Poll();
         NRLAudioBridge_PollSerialConsole();
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+        Display_Poll();
+#endif
     }
 
     delay(1);

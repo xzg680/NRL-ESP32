@@ -4,9 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Firmware Update</title>
-  <style>
-<!-- @include wifi_portal_parts/wifi_update_portal.css -->
-</style>
+  <link rel="stylesheet" href="/update.css?v={{VERSION}}">
 </head>
 <body>
   <main class="shell">
@@ -50,8 +48,6 @@
       </form>
     </section>
   </main>
-  <script>
-<!-- @include wifi_portal_parts/wifi_update_portal.js -->
-</script>
+  <script src="/update.js?v={{VERSION}}"></script>
 </body>
 </html>

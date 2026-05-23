@@ -189,6 +189,7 @@ String WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *confi
     replaceToken(html, "{{CHANNEL}}", String(config->channel));
     replaceToken(html, "{{CALLSIGN}}", htmlEscape(config->callsign));
     replaceToken(html, "{{CALLSIGN_SSID}}", String(config->callsign_ssid));
+    replaceToken(html, "{{PTT_TIMEOUT}}", String(config->ptt_timeout_s));
     return html;
 }
 

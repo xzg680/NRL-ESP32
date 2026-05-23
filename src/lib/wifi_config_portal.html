@@ -4,9 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{TITLE}}</title>
-  <style>
-<!-- @include wifi_portal_parts/wifi_config_portal.css -->
-</style>
+  <link rel="stylesheet" href="/portal.css?v={{VERSION}}">
 </head>
 <body>
   <main class="shell">
@@ -44,8 +42,6 @@
     {{FORM_SECTIONS}}
     <div class="footer-links">{{FOOTER}}</div>
   </main>
-  <script>
-<!-- @include wifi_portal_parts/wifi_config_portal.js -->
-</script>
+  <script src="/portal.js?v={{VERSION}}"></script>
 </body>
 </html>

@@ -112,7 +112,9 @@ const translations = {
         foundSuffix: ' WiFi networks',
         noneFound: 'No WiFi networks found',
         scanFailed: 'Scan failed',
-        saveItem: 'Save'
+        saveItem: 'Save',
+        saved: 'Saved',
+        saveFailed: 'Save failed'
       },
       zh: {
         language: '语言',
@@ -227,7 +229,9 @@ const translations = {
         foundSuffix: ' 个 WiFi 网络',
         noneFound: '没有找到 WiFi 网络',
         scanFailed: '扫描失败',
-        saveItem: '保存'
+        saveItem: '保存',
+        saved: '已保存',
+        saveFailed: '保存失败'
       }
     };
 
@@ -293,13 +297,76 @@ const translations = {
       if (slider) slider.value = value;
     }
 
+    // POST a form as multipart/form-data and return the parsed JSON reply:
+    //   { ok: bool, fields: { name: stored_value, ... } }
+    // The server echoes back the just-saved value of every submitted field so
+    // the caller can refresh inputs with on-device truth without a page reload.
+    function postForm(form) {
+      if (!form) return Promise.resolve({ ok: false });
+      const body = new FormData(form);
+      return fetch(form.action || window.location.href, {
+        method: form.method ? form.method.toUpperCase() : 'POST',
+        body,
+        cache: 'no-store',
+        credentials: 'same-origin',
+      }).then((r) => r.json().then((data) => Object.assign({ ok: r.ok }, data)))
+        .catch(() => ({ ok: false }));
+    }
+
+    function applyEchoFields(fields) {
+      if (!fields) return;
+      Object.keys(fields).forEach((name) => {
+        const value = fields[name];
+        const selector = 'input[name="' + name + '"], select[name="' + name + '"]';
+        document.querySelectorAll(selector).forEach((input) => {
+          if (input.type === 'checkbox') {
+            input.checked = (value === '1' || value === 'true' || value === 'on');
+          } else if (input !== document.activeElement) {
+            // Don't fight the user mid-edit. Active field keeps their text;
+            // they'll see the canonical value on next interaction.
+            input.value = value;
+          }
+          if (input.classList.contains('auto-slider')) {
+            const box = input.parentElement.querySelector('.eq-value');
+            if (box) box.value = input.value;
+          } else if (input.classList.contains('eq-slider')) {
+            syncEqValue(input);
+          }
+        });
+      });
+      syncDhcpFields();
+    }
+
+    function postAndApply(form) {
+      return postForm(form).then((reply) => {
+        if (reply && reply.fields) applyEchoFields(reply.fields);
+        return reply;
+      });
+    }
+
+    function flashButtonFeedback(button, ok) {
+      if (!button) return;
+      const orig = button.textContent;
+      const origI18n = button.getAttribute('data-i18n');
+      button.removeAttribute('data-i18n');
+      button.textContent = ok ? t('saved') : t('saveFailed');
+      button.disabled = true;
+      setTimeout(() => {
+        button.textContent = orig;
+        if (origI18n) button.setAttribute('data-i18n', origI18n);
+        button.disabled = false;
+      }, 1200);
+    }
+
+    function submitFormFromButton(form) {
+      const button = form.querySelector('button[type="submit"]');
+      if (button) button.disabled = true;
+      postAndApply(form).then((reply) => flashButtonFeedback(button, reply && reply.ok));
+    }
+
     function submitEqSlider(slider) {
       syncEqValue(slider);
-      const form = slider.form;
-      if (!form || form.dataset.submitting === '1') return;
-      form.dataset.submitting = '1';
-      if (form.requestSubmit) form.requestSubmit();
-      else form.submit();
+      postAndApply(slider.form);
     }
 
     function syncAutoSliderValue(slider) {
@@ -309,33 +376,11 @@ const translations = {
 
     function submitAutoSlider(slider) {
       syncAutoSliderValue(slider);
-      const form = slider.form;
-      if (!form || form.dataset.submitting === '1') return;
-      form.dataset.submitting = '1';
-      if (form.requestSubmit) form.requestSubmit();
-      else form.submit();
+      postAndApply(slider.form);
     }
 
     function submitSwitch(input) {
-      const form = input.form;
-      if (!form || form.dataset.submitting === '1') return;
-      form.dataset.submitting = '1';
-      if (form.requestSubmit) form.requestSubmit();
-      else form.submit();
-    }
-
-    function saveScrollPosition() {
-      sessionStorage.setItem('nrl_config_scroll_y', String(window.scrollY || 0));
-    }
-
-    function restoreScrollPosition() {
-      const saved = sessionStorage.getItem('nrl_config_scroll_y');
-      if (saved === null) return;
-      sessionStorage.removeItem('nrl_config_scroll_y');
-      const y = Number(saved);
-      if (Number.isFinite(y)) {
-        requestAnimationFrame(() => window.scrollTo(0, y));
-      }
+      postAndApply(input.form);
     }
 
     async function scanWifi() {
@@ -391,9 +436,14 @@ const translations = {
     function initPortal() {
       applyLanguage(currentLang());
       syncDhcpFields();
-      restoreScrollPosition();
       document.querySelectorAll('form').forEach((form) => {
-        form.addEventListener('submit', saveScrollPosition);
+        // Intercept explicit Save-button submits: send via AJAX so the page
+        // never reloads, then reflect the server's echoed values back into the
+        // inputs and flash the button.
+        form.addEventListener('submit', (e) => {
+          e.preventDefault();
+          submitFormFromButton(form);
+        });
       });
       document.querySelectorAll('input[name="lang"]').forEach((r) => {
         r.addEventListener('change', function () {

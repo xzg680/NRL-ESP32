@@ -42,6 +42,9 @@ constexpr uint32_t kDefaultSciBaud = 9600U;
 constexpr uint8_t kDefaultSciDataBits = 8U;
 constexpr char kDefaultSciParity = 'N';
 constexpr uint8_t kDefaultSciStopBits = 1U;
+constexpr uint16_t kDefaultPttTimeoutS = 300U;  // 5 minutes
+constexpr uint16_t kMinPttTimeoutS = 5U;
+constexpr uint16_t kMaxPttTimeoutS = 3600U;
 
 struct PersistedExternalRadioConfig {
     uint32_t magic;
@@ -428,6 +431,7 @@ static void applyDefaults(void)
     s_config.wifi_dns = 0U;
     s_config.wifi_dhcp_enabled = true;
     s_config.aec_enabled = true;
+    s_config.ptt_timeout_s = kDefaultPttTimeoutS;
     copyBounded(s_config.server_host, sizeof(s_config.server_host), NRL_AUDIO_SERVER_HOST);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), NRL_AUDIO_CALLSIGN);
     sanitizeCallsign(s_config.callsign);
@@ -494,6 +498,9 @@ static void normalizeConfig(void)
     s_config.adceq_a2 &= kAdcEqCoefficientMask;
     s_config.adceq_b1 &= kAdcEqCoefficientMask;
     s_config.adceq_b2 &= kAdcEqCoefficientMask;
+    if (s_config.ptt_timeout_s < kMinPttTimeoutS || s_config.ptt_timeout_s > kMaxPttTimeoutS) {
+        s_config.ptt_timeout_s = kDefaultPttTimeoutS;
+    }
 }
 
 static bool loadPersistedConfig(void)
@@ -582,6 +589,15 @@ static bool loadPersistedConfig(void)
     } else {
         applyDefaultAdcConfig();
     }
+    // PTT timeout lives in reserved4 (added without a config version bump);
+    // configs written before this feature have it as 0, which normalizeConfig()
+    // maps back to the default.
+    if (persisted.version == kConfigVersion) {
+        s_config.ptt_timeout_s = static_cast<uint16_t>(persisted.reserved4[0]) |
+                                 (static_cast<uint16_t>(persisted.reserved4[1]) << 8);
+    } else {
+        s_config.ptt_timeout_s = 0U;
+    }
     normalizeConfig();
     return true;
 }
@@ -634,6 +650,8 @@ static bool savePersistedConfig(void)
     persisted.adceq_a2 = s_config.adceq_a2 & kAdcEqCoefficientMask;
     persisted.adceq_b1 = s_config.adceq_b1 & kAdcEqCoefficientMask;
     persisted.adceq_b2 = s_config.adceq_b2 & kAdcEqCoefficientMask;
+    persisted.reserved4[0] = static_cast<uint8_t>(s_config.ptt_timeout_s & 0xFFU);
+    persisted.reserved4[1] = static_cast<uint8_t>((s_config.ptt_timeout_s >> 8) & 0xFFU);
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
@@ -1159,6 +1177,19 @@ bool EXTERNAL_RADIO_SetAecEnabled(const bool enabled, const bool persist)
 {
     EXTERNAL_RADIO_Init();
     s_config.aec_enabled = enabled;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetPttTimeout(const uint16_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (value < kMinPttTimeoutS || value > kMaxPttTimeoutS) {
+        return false;
+    }
+    s_config.ptt_timeout_s = value;
     if (persist) {
         return savePersistedConfig();
     }

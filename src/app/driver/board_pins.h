@@ -21,15 +21,19 @@
 
 // ---- Common pins (same on both boards) ----
 
-// SCI radio-control serial
-#define NRL_PIN_SCI_RX          4    // Temporary SCI RX;
-#define NRL_PIN_SCI_TX          5    // Temporary SCI TX;
-
 // Bootloader UI
 #define NRL_PIN_BOOT_BUTTON     0
 
+// SCI radio-control serial pins are board-specific: see each [NRL_BOARD] block.
+// 格子派 routes its LCD over GPIO 4-7/15/16, so SCI cannot stay on GPIO 4/5
+// there.
+
 // ---- Board-specific pins (selected by NRL_BOARD) ----
 #if NRL_BOARD == NRL_BOARD_BH4TDV
+
+// SCI radio-control serial
+#define NRL_PIN_SCI_RX          4
+#define NRL_PIN_SCI_TX          5
 
 // Radio control / status
 #define NRL_PIN_PTT_OUT         8
@@ -53,6 +57,9 @@
 // ADC, so it has no separate ES7210.
 #define NRL_HAS_ES7210          0
 
+// BH4TDV has no on-board LCD.
+#define NRL_HAS_DISPLAY         0
+
 // I2C bus -- BH4TDV 3188 NRL
 #define NRL_PIN_I2C_SCL         14
 #define NRL_PIN_I2C_SDA         21
@@ -65,6 +72,12 @@
 #define NRL_PIN_I2S_DIN         11
 
 #elif NRL_BOARD == NRL_BOARD_GEZIPAI
+
+// SCI radio-control serial -- the on-board ST7789 LCD uses GPIO 4-7/15/16, so
+// SCI is moved off the default GPIO 4/5 to free the LCD backlight (4) and
+// reset (5). GPIO 8/9 are otherwise unused on the 格子派 board.
+#define NRL_PIN_SCI_RX          9
+#define NRL_PIN_SCI_TX          8
 
 // User controls -- 3 push buttons (press-to-GND, read with INPUT_PULLUP)
 #define NRL_PIN_BTN_VOL_UP      1    // IO1  -- volume up
@@ -94,6 +107,21 @@
 #define NRL_PIN_I2S_DOUT        48
 #define NRL_PIN_I2S_LRCLK       45
 #define NRL_PIN_I2S_DIN         21
+
+// ST7789 240x240 SPI LCD -- same panel/wiring as the 小智 (xiaozhi) 格子派
+// board. Driven by src/app/driver/display.cpp.
+#define NRL_PIN_DISPLAY_SCLK    7
+#define NRL_PIN_DISPLAY_MOSI    6
+#define NRL_PIN_DISPLAY_DC      16
+#define NRL_PIN_DISPLAY_CS      15
+#define NRL_PIN_DISPLAY_RST     5
+#define NRL_PIN_DISPLAY_BL      4    // backlight (active-high)
+#define NRL_DISPLAY_WIDTH       240
+#define NRL_DISPLAY_HEIGHT      240
+
+// Battery voltage sense -- ADC1 channel 2 (GPIO3), behind a 1:2 divider.
+#define NRL_PIN_BATTERY_ADC     3
+#define NRL_HAS_DISPLAY         1
 
 #else
 #error "Unknown NRL_BOARD: set it to NRL_BOARD_GEZIPAI or NRL_BOARD_BH4TDV"

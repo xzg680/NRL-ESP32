@@ -5,6 +5,8 @@
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
 #include "external_radio.h"
 #include "es8311.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #endif
 
 #ifndef ENABLE_OPENCV
@@ -36,8 +38,10 @@ static bool blinkPhase(const unsigned long now_ms, const unsigned long period_ms
 
 // ============================================================
 // 格子派: 3 push buttons (volume +/-, physical PTT) + 3 LEDs.
-//   - Physical PTT gates microphone capture/streaming (replaces radio SQL).
-//   - Yellow LED (NRL_PIN_LED_PTT)  : lit while PTT is held / mic is captured.
+//   - PTT button: a short press toggles transmit on/off; a long press is
+//     momentary (transmit only while held). Transmit is force-stopped once it
+//     has been on for the configurable PTT timeout (AT+PTT_TIMEOUT / web).
+//   - Yellow LED (NRL_PIN_LED_PTT)  : lit while transmitting (mic uplink).
 //   - Green  LED (NRL_PIN_LED_AUDIO): lit while inbound network audio plays.
 //   - White  LED (NRL_PIN_LED_NET)  : network/server link status -- solid when
 //                                     the server heartbeat is alive, slow
@@ -49,8 +53,11 @@ namespace {
 
 constexpr unsigned long kButtonDebounceMs = 30UL;
 constexpr unsigned long kVolumeSaveDelayMs = 2000UL;
-constexpr int kVolumeStep = 16;
-constexpr int kVolumeMax = 255;
+// A press shorter than this toggles the transmit latch; a longer press is a
+// momentary (push-to-talk) hold that ends the moment the button is released.
+constexpr unsigned long kPttLongPressMs = 500UL;
+// Fallback transmit timeout, used only if the stored config cannot be read.
+constexpr unsigned long kDefaultPttTimeoutMs = 300000UL;
 
 struct DebouncedButton {
     int pin;
@@ -67,6 +74,16 @@ bool s_net_audio_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
 bool s_volume_dirty = false;
 unsigned long s_volume_change_ms = 0UL;
+
+// PTT transmit state machine.
+bool s_tx_active = false;            // effective transmit gate (IsSqlActive)
+bool s_tx_latched = false;           // latched on by a short press
+bool s_tx_suppressed = false;        // timeout fired during the current hold
+unsigned long s_ptt_press_ms = 0UL;  // press-down time of the current press
+unsigned long s_tx_since_ms = 0UL;   // when transmit last switched on
+// STATUS_IO_Poll() runs from both the main loop and the bridge task; this
+// mutex keeps the two from racing inside the button / PTT state machine.
+SemaphoreHandle_t s_poll_mutex = nullptr;
 
 // Updates one debounced button; returns true once on each release->press edge.
 static bool pollButtonPressEdge(DebouncedButton &btn, const unsigned long now)
@@ -133,18 +150,23 @@ static void reapplyEs8311Volume()
                             cfg->adceq_b2);
 }
 
-static void adjustLineOutVolume(const int delta)
+// Adjust the ES8311 speaker volume by `pct_delta` percentage points. The
+// volume is stored as 0..255, but the user (and the LCD readout) think in
+// 0..100 %, so each key press moves it exactly one percent.
+static void adjustLineOutVolume(const int pct_delta)
 {
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
     if (cfg == nullptr) {
         return;
     }
-    int volume = static_cast<int>(cfg->line_out_volume) + delta;
-    if (volume < 0) {
-        volume = 0;
-    } else if (volume > kVolumeMax) {
-        volume = kVolumeMax;
+    int pct = (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255;
+    pct += pct_delta;
+    if (pct < 0) {
+        pct = 0;
+    } else if (pct > 100) {
+        pct = 100;
     }
+    const int volume = (pct * 255 + 50) / 100;
     if (static_cast<uint8_t>(volume) == cfg->line_out_volume) {
         return; // already at the limit
     }
@@ -152,16 +174,73 @@ static void adjustLineOutVolume(const int delta)
     reapplyEs8311Volume();
     s_volume_dirty = true;
     s_volume_change_ms = millis();
-    Serial.printf("[IO] line_out_volume=%d\n", volume);
+    Serial.printf("[IO] line_out_volume=%d (%d%%)\n", volume, pct);
+}
+
+// Effective PTT auto-off timeout in milliseconds, from the persisted config.
+static unsigned long pttTimeoutMs(void)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg != nullptr && cfg->ptt_timeout_s > 0u) {
+        return static_cast<unsigned long>(cfg->ptt_timeout_s) * 1000UL;
+    }
+    return kDefaultPttTimeoutMs;
+}
+
+// Runs the PTT button state machine and updates s_tx_active. A short press
+// toggles the transmit latch; a long press is momentary transmit while held;
+// either way transmit is forced off once it has been on for the PTT timeout.
+static void updatePtt(const unsigned long now)
+{
+    const bool was_pressed = s_btn_ptt.pressed;
+    pollButtonPressEdge(s_btn_ptt, now);  // refreshes s_btn_ptt.pressed
+    const bool is_pressed = s_btn_ptt.pressed;
+
+    if (is_pressed && !was_pressed) {
+        // press down
+        s_ptt_press_ms = now;
+        s_tx_suppressed = false;
+    } else if (!is_pressed && was_pressed) {
+        // release
+        const unsigned long held = now - s_ptt_press_ms;
+        if (!s_tx_suppressed && held < kPttLongPressMs) {
+            s_tx_latched = !s_tx_latched;  // short press toggles the latch
+        } else {
+            s_tx_latched = false;  // a long press always ends transmit
+        }
+        s_tx_suppressed = false;
+    }
+
+    // Effective transmit: the held button (unless the timeout suppressed it)
+    // or the latch left on by a short press.
+    bool tx = (is_pressed && !s_tx_suppressed) || s_tx_latched;
+
+    if (tx && !s_tx_active) {
+        s_tx_since_ms = now;  // transmit just switched on -> start the timer
+    }
+    if (tx && (now - s_tx_since_ms) >= pttTimeoutMs()) {
+        // Timeout: force transmit off. s_tx_suppressed keeps a still-held
+        // button from immediately re-keying until it is released.
+        s_tx_latched = false;
+        s_tx_suppressed = true;
+        tx = false;
+        Serial.println("[IO] PTT timeout, transmit forced off");
+    }
+
+    if (tx != s_tx_active) {
+        Serial.printf("[IO] transmit %s\n", tx ? "ON" : "OFF");
+    }
+    s_tx_active = tx;
 }
 
 } // namespace
 
 extern "C" bool STATUS_IO_IsSqlActive(void)
 {
-    // 格子派 has no radio squelch: the physical PTT button decides when the
-    // microphone is captured and streamed, mirroring the SQL-active gate.
-    return s_btn_ptt.pressed;
+    // 格子派 has no radio squelch: the PTT button state machine (short-press
+    // latch / long-press momentary / timeout) decides when the microphone is
+    // captured and streamed, mirroring the SQL-active gate.
+    return s_tx_active;
 }
 
 extern "C" bool STATUS_IO_IsPttActive(void)
@@ -171,6 +250,10 @@ extern "C" bool STATUS_IO_IsPttActive(void)
 
 extern "C" void STATUS_IO_Init(void)
 {
+    if (s_poll_mutex == nullptr) {
+        s_poll_mutex = xSemaphoreCreateMutex();
+    }
+
     pinMode(NRL_PIN_BTN_VOL_UP,   INPUT_PULLUP);
     pinMode(NRL_PIN_BTN_VOL_DOWN, INPUT_PULLUP);
     pinMode(NRL_PIN_BTN_PTT,      INPUT_PULLUP);
@@ -197,18 +280,25 @@ extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)
 
 extern "C" void STATUS_IO_Poll(void)
 {
+    // STATUS_IO_Poll() is called from both the main loop and the bridge task;
+    // run the body single-threaded so the button / PTT state machine, and the
+    // debounced inputs it reads, cannot be processed concurrently.
+    if (s_poll_mutex != nullptr && xSemaphoreTake(s_poll_mutex, 0) != pdTRUE) {
+        return;
+    }
+
     const unsigned long now = millis();
 
     if (pollButtonPressEdge(s_btn_vol_up, now)) {
-        adjustLineOutVolume(+kVolumeStep);
+        adjustLineOutVolume(+1);
     }
     if (pollButtonPressEdge(s_btn_vol_down, now)) {
-        adjustLineOutVolume(-kVolumeStep);
+        adjustLineOutVolume(-1);
     }
-    pollButtonPressEdge(s_btn_ptt, now);
+    updatePtt(now);
 
-    // Yellow LED follows the physical PTT button (mic capture in progress).
-    writeLed(NRL_PIN_LED_PTT, s_btn_ptt.pressed);
+    // Yellow LED follows the transmit state (mic uplink in progress).
+    writeLed(NRL_PIN_LED_PTT, s_tx_active);
     // Green LED is refreshed from the latched network-audio state.
     writeLed(NRL_PIN_LED_AUDIO, s_net_audio_active);
     // White LED: solid while the server heartbeat is alive, slow blink while
@@ -223,6 +313,10 @@ extern "C" void STATUS_IO_Poll(void)
         s_volume_dirty = false;
         EXTERNAL_RADIO_SaveConfig();
         Serial.println("[IO] line_out_volume saved");
+    }
+
+    if (s_poll_mutex != nullptr) {
+        xSemaphoreGive(s_poll_mutex);
     }
 }
 

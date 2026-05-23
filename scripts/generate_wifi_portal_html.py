@@ -32,6 +32,33 @@ TEMPLATE_FILES = [
     ),
 ]
 
+# Raw asset files served as standalone HTTP responses (text/css, text/javascript).
+# Keeping them out of the HTML template keeps each page response small enough to
+# go through the WebServer in a single chunked send without truncation, and lets
+# the browser cache them across page navigations.
+ASSET_FILES = [
+    (
+        "wifi_portal_parts/wifi_config_portal.css",
+        "kWifiConfigPortalCss",
+    ),
+    (
+        "wifi_portal_parts/wifi_config_portal.js",
+        "kWifiConfigPortalJs",
+    ),
+    (
+        "wifi_portal_parts/wifi_update_portal.css",
+        "kWifiUpdatePortalCss",
+    ),
+    (
+        "wifi_portal_parts/wifi_update_portal.js",
+        "kWifiUpdatePortalJs",
+    ),
+]
+ASSET_OUTPUT = (
+    "wifi_portal_assets.generated.h",
+    "SRC_LIB_WIFI_PORTAL_ASSETS_GENERATED_H",
+)
+
 
 def resolve_project_dir():
     # Under PlatformIO the build env exposes $PROJECT_DIR; when run standalone
@@ -94,6 +121,17 @@ def generate_headers(*args, **kwargs):
         lines.append("")
         (lib_dir / dst_name).write_text("\n".join(lines), encoding="utf-8")
         print(f"[wifi_portal] generated {dst_name} from {src_name} templates")
+
+    asset_dst, asset_guard = ASSET_OUTPUT
+    asset_lines = [f"#ifndef {asset_guard}", f"#define {asset_guard}", ""]
+    for src_rel, var_name in ASSET_FILES:
+        body = (lib_dir / src_rel).read_text(encoding="utf-8")
+        asset_lines.append(f"static const char {var_name}[] = " + json.dumps(body) + ";")
+    asset_lines.append("")
+    asset_lines.append("#endif")
+    asset_lines.append("")
+    (lib_dir / asset_dst).write_text("\n".join(asset_lines), encoding="utf-8")
+    print(f"[wifi_portal] generated {asset_dst} from asset parts")
 
 
 generate_headers()

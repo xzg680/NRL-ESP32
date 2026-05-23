@@ -4,6 +4,7 @@
 .vscode/launch.json
 .vscode/ipch
 managed_components
+components/lvgl
 __pycache__/
 *.map
 web-flasher/firmware/*.bin

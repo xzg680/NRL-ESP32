@@ -75,6 +75,7 @@ struct ExternalRadioConfig {
     uint32_t wifi_dns;
     bool wifi_dhcp_enabled;
     bool aec_enabled;
+    uint16_t ptt_timeout_s;
     SciSerialConfig sci;
     char wifi_ssid[33];
     char wifi_password[65];
@@ -116,6 +117,9 @@ bool EXTERNAL_RADIO_SetSciConfig(uint32_t baud, uint8_t data_bits, char parity, 
 // Acoustic echo cancellation (Gezipai/esp-sr AEC). Persisted only; the ES8311
 // driver reads it at boot, so a toggle takes effect after the next restart.
 bool EXTERNAL_RADIO_SetAecEnabled(bool enabled, bool persist);
+// PTT button auto-off / maximum continuous transmit time, in seconds. A short
+// press latches transmit on; it is forced off again after this many seconds.
+bool EXTERNAL_RADIO_SetPttTimeout(uint16_t value, bool persist);
 #endif
 
 #endif // DRIVER_EXTERNAL_RADIO_H

@@ -33,7 +33,6 @@ constexpr uint8_t kNrlTypeAtCommand = 11u;
 constexpr uint8_t kNrlTypeSciTransparent = 12u;
 constexpr size_t kAudioCodecFrameSamples = 80u;
 constexpr size_t kG711PayloadBytes = 160u;
-constexpr size_t kG711RxPayloadMinBytes = 160u;
 constexpr size_t kG711RxPayloadMaxBytes = 500u;
 constexpr size_t kSciPayloadMaxBytes = 256u;
 constexpr size_t kNrlMaxPayloadSize = 1024u;
@@ -68,6 +67,11 @@ int16_t s_alaw_decode_table[256];
 uint8_t s_alaw_encode_mag_table[4096];
 char s_remote_callsign[7] = {};
 uint8_t s_remote_ssid = 0u;
+// Identity of the last *voice* caller specifically. s_remote_callsign above
+// tracks every packet (heartbeat, AT, SCI...), so it must not be used to
+// decide "who is talking" or "is a voice stream active".
+char s_voice_callsign[7] = {};
+uint8_t s_voice_ssid = 0u;
 size_t s_last_voice_payload_size = 0u;
 uint32_t s_next_wifi_retry_ms = 0u;
 uint8_t s_wifi_connect_failures = 0u;
@@ -598,9 +602,18 @@ static void stopDownlinkPlayback(void)
 
 static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payload_size)
 {
-    if (payload == nullptr || payload_size < kG711RxPayloadMinBytes || payload_size > kG711RxPayloadMaxBytes) {
+    // The NRL packet type alone identifies a voice packet; the G.711 payload
+    // length is variable, so it must not be range-checked here. The decode
+    // loop below chunks whatever length arrived.
+    if (payload == nullptr) {
         return;
     }
+
+    // A real voice packet: latch its sender as the current voice caller.
+    // updateRemoteIdentity() already parsed this packet's header into
+    // s_remote_callsign / s_remote_ssid just before this call.
+    memcpy(s_voice_callsign, s_remote_callsign, sizeof(s_voice_callsign));
+    s_voice_ssid = s_remote_ssid;
 
     startDownlinkPlayback();
     if (!s_downlink_playback_active) {
@@ -912,6 +925,22 @@ bool NRLAudioBridge_GetRemoteIdentity(char *buffer, size_t buffer_size)
 
     snprintf(buffer, buffer_size, "%s-%u", s_remote_callsign, static_cast<unsigned>(s_remote_ssid));
     return true;
+}
+
+bool NRLAudioBridge_GetRemoteCaller(char *callsign, size_t callsign_size, unsigned *ssid)
+{
+    if (callsign != nullptr && callsign_size > 0u) {
+        strncpy(callsign, s_voice_callsign, callsign_size - 1u);
+        callsign[callsign_size - 1u] = '\0';
+    }
+    if (ssid != nullptr) {
+        *ssid = static_cast<unsigned>(s_voice_ssid);
+    }
+
+    // "Receiving" means a voice stream is actually playing right now -- not
+    // merely that some packet arrived recently. Heartbeat / AT / SCI packets
+    // never start downlink playback, so they no longer count as reception.
+    return s_downlink_playback_active;
 }
 
 void NRLAudioBridge_ApplyConfig(bool restart_wifi, bool restart_udp)

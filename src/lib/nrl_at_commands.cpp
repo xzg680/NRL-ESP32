@@ -195,6 +195,7 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendUnsignedLine(payload, capacity, used, "L_PORT", (config != nullptr) ? config->local_port : 0u) &&
            appendKeyValueLine(payload, capacity, used, "CALL", (config != nullptr) ? config->callsign : "") &&
            appendUnsignedLine(payload, capacity, used, "SSID", (config != nullptr) ? config->callsign_ssid : 0u) &&
+           appendUnsignedLine(payload, capacity, used, "PTT_TIMEOUT", (config != nullptr) ? config->ptt_timeout_s : 0u) &&
            appendUnsignedLine(payload, capacity, used, "MIC_GAIN", (config != nullptr) ? config->mic_volume : 0u) &&
            appendUnsignedLine(payload, capacity, used, "VOLUME", (config != nullptr) ? config->line_out_volume : 0u) &&
            appendKeyValueLine(payload, capacity, used, "HP_DRIVE", hp_drive) &&
@@ -394,6 +395,7 @@ static bool appendAllConfigLines(NrlAtCommandResult *result)
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "L_PORT", config->local_port) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "CALL", config->callsign) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "SSID", config->callsign_ssid) &&
+           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "PTT_TIMEOUT", config->ptt_timeout_s) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", config->mic_volume) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOLUME", config->line_out_volume) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", config->hp_drive_enabled ? "ON" : "OFF")
@@ -688,6 +690,23 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "SSID", EXTERNAL_RADIO_GetConfig()->callsign_ssid);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "PTT_TIMEOUT")) {
+        if (is_query) {
+            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "PTT_TIMEOUT", config->ptt_timeout_s);
+            return;
+        }
+        unsigned long value = 0u;
+        // 5..3600 s; the explicit bound also stops a >65535 value from
+        // wrapping when narrowed to uint16_t inside the setter.
+        if (!parseUnsignedValue(command.value, &value) || value < 5u || value > 3600u ||
+            !EXTERNAL_RADIO_SetPttTimeout(static_cast<uint16_t>(value), true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "PTT_TIMEOUT");
+            return;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "PTT_TIMEOUT", EXTERNAL_RADIO_GetConfig()->ptt_timeout_s);
         return;
     }
 
