@@ -35,7 +35,8 @@ jobs:
             ~/.cache/pip
             ~/.platformio/.cache
             ~/.platformio/packages
-          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini', 'part.csv', 'part-gezipai.csv') }}
+            components/lvgl
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini', 'part.csv', 'part-gezipai.csv', 'scripts/fetch_lvgl.py') }}
           restore-keys: |
             ${{ runner.os }}-pio-
 

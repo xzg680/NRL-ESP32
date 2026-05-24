@@ -17,9 +17,19 @@ set(app_sources
     lib/wifi_config_portal_view.cpp
 )
 
+# LVGL is vendored under components/lvgl/ only for the gezipai board (the
+# fetch_lvgl.py extra_script runs only in [env:gezipai]). On bh4tdv, the
+# directory is absent and display.cpp's `#include <lvgl.h>` is itself gated
+# behind `#if NRL_HAS_DISPLAY`, so we must not declare the dependency.
+set(app_priv_requires "")
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../components/lvgl/lvgl.h")
+    list(APPEND app_priv_requires lvgl)
+endif()
+
 idf_component_register(
     SRCS ${app_sources}
     INCLUDE_DIRS
         app
         app/driver
+    PRIV_REQUIRES ${app_priv_requires}
 )
