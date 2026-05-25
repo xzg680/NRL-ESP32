@@ -3,9 +3,13 @@
 #include "driver/board_pins.h"
 #include "driver/i2c1.h"
 
-#include <Arduino.h>
+#include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #if defined(NRL_HAS_ES7210) && NRL_HAS_ES7210
+
+static const char *TAG = "ES7210";
 
 namespace {
 
@@ -90,12 +94,12 @@ static bool es7210_write_reg(uint8_t reg, uint8_t value) {
         if (ok) {
             return true;
         }
-        Serial.printf("[ES7210] I2C write failed: addr=0x%02X reg=0x%02X value=0x%02X attempt=%d\n",
-                      static_cast<unsigned>(s_es7210_addr),
-                      static_cast<unsigned>(reg),
-                      static_cast<unsigned>(value),
-                      attempt + 1);
-        delay(1);
+        ESP_LOGE(TAG, "I2C write failed: addr=0x%02X reg=0x%02X value=0x%02X attempt=%d",
+                 static_cast<unsigned>(s_es7210_addr),
+                 static_cast<unsigned>(reg),
+                 static_cast<unsigned>(value),
+                 attempt + 1);
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     return false;
 }
@@ -126,7 +130,7 @@ static bool es7210_read_reg(uint8_t reg, uint8_t *value) {
         if (ok) {
             return true;
         }
-        delay(1);
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     return false;
 }
@@ -136,10 +140,10 @@ static bool es7210_apply_mic_gain(void) {
     const uint8_t reg = es7210_gain_reg_from_volume(s_mic_volume_cfg);
     const bool ok = es7210_write_reg(ES7210_MIC1_GAIN_REG43, reg) &&
                     es7210_write_reg(ES7210_MIC2_GAIN_REG44, reg);
-    Serial.printf("[ES7210] mic gain: volume=%u -> REG43/44=0x%02X%s\n",
-                  static_cast<unsigned>(s_mic_volume_cfg),
-                  static_cast<unsigned>(reg),
-                  ok ? "" : " (WRITE FAILED)");
+    ESP_LOGI(TAG, "mic gain: volume=%u -> REG43/44=0x%02X%s",
+             static_cast<unsigned>(s_mic_volume_cfg),
+             static_cast<unsigned>(reg),
+             ok ? "" : " (WRITE FAILED)");
     return ok;
 }
 
@@ -152,12 +156,12 @@ static bool es7210_detect_address(void) {
         I2C_Stop();
         if (ack) {
             s_es7210_addr = addr;
-            Serial.printf("[ES7210] found device at I2C addr 0x%02X\n",
-                          static_cast<unsigned>(addr));
+            ESP_LOGI(TAG, "found device at I2C addr 0x%02X",
+                     static_cast<unsigned>(addr));
             return true;
         }
     }
-    Serial.println("[ES7210] no device acknowledged on I2C addresses 0x40-0x43");
+    ESP_LOGE(TAG, "no device acknowledged on I2C addresses 0x40-0x43");
     return false;
 }
 
@@ -236,23 +240,23 @@ bool ES7210_Init(void) {
         es7210_read_reg(ES7210_CHIP_ID1_REGFD, &id1);
         es7210_read_reg(ES7210_CHIP_ID0_REGFE, &id0);
         if (id1 == 0x72 && id0 == 0x10) {
-            Serial.println("[ES7210] chip id ok (ES7210)");
+            ESP_LOGI(TAG, "chip id ok (ES7210)");
         } else {
-            Serial.printf("[ES7210] chip id regs fd=0x%02X fe=0x%02X (no id at 0xFD/0xFE; "
-                          "check the register dump below instead)\n",
-                          static_cast<unsigned>(id1), static_cast<unsigned>(id0));
+            ESP_LOGW(TAG, "chip id regs fd=0x%02X fe=0x%02X (no id at 0xFD/0xFE; "
+                     "check the register dump below instead)",
+                     static_cast<unsigned>(id1), static_cast<unsigned>(id0));
         }
     }
 
     for (const Es7210RegInit &step : kEs7210InitSeq) {
         if (!es7210_write_reg(step.reg, step.value)) {
-            Serial.printf("[ES7210] init aborted at reg=0x%02X\n",
-                          static_cast<unsigned>(step.reg));
+            ESP_LOGE(TAG, "init aborted at reg=0x%02X",
+                     static_cast<unsigned>(step.reg));
             return false;
         }
         // The reset/release writes need a short settle before the next step.
         if (step.reg == ES7210_RESET_REG00) {
-            delay(1);
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
 
@@ -261,9 +265,9 @@ bool ES7210_Init(void) {
     // Apply the mic gain from the shared web/AT mic-volume setting.
     es7210_apply_mic_gain();
 
-    Serial.printf("[ES7210] ready: i2c=0x%02X mode=I2S-16bit-2ch "
-                  "(MIC1->left MIC2->right)\n",
-                  static_cast<unsigned>(s_es7210_addr));
+    ESP_LOGI(TAG, "ready: i2c=0x%02X mode=I2S-16bit-2ch "
+             "(MIC1->left MIC2->right)",
+             static_cast<unsigned>(s_es7210_addr));
     ES7210_DumpRegisters();
     return true;
 }
@@ -273,8 +277,8 @@ void ES7210_SetMicVolume(uint8_t volume) {
     if (s_es7210_ready) {
         es7210_apply_mic_gain();
     } else {
-        Serial.printf("[ES7210] mic volume pending: volume=%u\n",
-                      static_cast<unsigned>(volume));
+        ESP_LOGI(TAG, "mic volume pending: volume=%u",
+                 static_cast<unsigned>(volume));
     }
 }
 
@@ -307,10 +311,10 @@ void ES7210_DumpRegisters(void) {
     for (const RegName &r : kDumpRegs) {
         uint8_t v = 0;
         const bool ok = es7210_read_reg(r.reg, &v);
-        Serial.printf("[ES7210] REG%-16s = %s0x%02X\n",
-                      r.name,
-                      ok ? "" : "READ-ERR ",
-                      static_cast<unsigned>(v));
+        ESP_LOGI(TAG, "REG%-16s = %s0x%02X",
+                 r.name,
+                 ok ? "" : "READ-ERR ",
+                 static_cast<unsigned>(v));
     }
 }
 

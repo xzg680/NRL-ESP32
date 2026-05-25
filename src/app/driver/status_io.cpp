@@ -5,26 +5,35 @@
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
 #include "external_radio.h"
 #include "es8311.h"
+#endif
+
+#ifdef ENABLE_OPENCV
+#include "../opencv/Arduino.hpp"
+#endif
+
+#include <driver/gpio.h>
+#include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#if NRL_BOARD == NRL_BOARD_GEZIPAI
 #include <freertos/semphr.h>
 #endif
 
-#ifndef ENABLE_OPENCV
-#include <Arduino.h>
-#else
-#include "../opencv/Arduino.hpp"
-#endif
+static const char *TAG = "IO";
 
 namespace {
 
 constexpr unsigned long kSlowBlinkMs = 500UL;
 constexpr unsigned long kHeartbeatMissedBlinkMs = 6500UL;
 
+inline unsigned long nrl_millis_now() { return (unsigned long)(esp_timer_get_time() / 1000ULL); }
+
 // Indicator LEDs are wired active-low (GPIO sinks current): driving the pin
 // LOW lights the LED, HIGH turns it off.
 static void writeLed(const int pin, const bool on)
 {
-    digitalWrite(pin, on ? LOW : HIGH);
+    gpio_set_level((gpio_num_t)pin, on ? 0 : 1);
 }
 
 static bool blinkPhase(const unsigned long now_ms, const unsigned long period_ms)
@@ -66,9 +75,9 @@ struct DebouncedButton {
     unsigned long changed_ms;
 };
 
-DebouncedButton s_btn_vol_up   = {NRL_PIN_BTN_VOL_UP,   HIGH, false, 0UL};
-DebouncedButton s_btn_vol_down = {NRL_PIN_BTN_VOL_DOWN, HIGH, false, 0UL};
-DebouncedButton s_btn_ptt      = {NRL_PIN_BTN_PTT,      HIGH, false, 0UL};
+DebouncedButton s_btn_vol_up   = {NRL_PIN_BTN_VOL_UP,   1, false, 0UL};
+DebouncedButton s_btn_vol_down = {NRL_PIN_BTN_VOL_DOWN, 1, false, 0UL};
+DebouncedButton s_btn_ptt      = {NRL_PIN_BTN_PTT,      1, false, 0UL};
 
 bool s_net_audio_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
@@ -88,13 +97,13 @@ SemaphoreHandle_t s_poll_mutex = nullptr;
 // Updates one debounced button; returns true once on each release->press edge.
 static bool pollButtonPressEdge(DebouncedButton &btn, const unsigned long now)
 {
-    const int level = digitalRead(btn.pin);
+    const int level = gpio_get_level((gpio_num_t)btn.pin);
     if (level != btn.raw_level) {
         btn.raw_level = level;
         btn.changed_ms = now;
         return false;
     }
-    const bool stable_pressed = (level == LOW); // active-low, INPUT_PULLUP
+    const bool stable_pressed = (level == 0); // active-low, INPUT_PULLUP
     if (stable_pressed != btn.pressed && (now - btn.changed_ms) >= kButtonDebounceMs) {
         btn.pressed = stable_pressed;
         return stable_pressed;
@@ -173,8 +182,8 @@ static void adjustLineOutVolume(const int pct_delta)
     EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(volume), false);
     reapplyEs8311Volume();
     s_volume_dirty = true;
-    s_volume_change_ms = millis();
-    Serial.printf("[IO] line_out_volume=%d (%d%%)\n", volume, pct);
+    s_volume_change_ms = nrl_millis_now();
+    ESP_LOGI(TAG, "line_out_volume=%d (%d%%)", volume, pct);
 }
 
 // Effective PTT auto-off timeout in milliseconds, from the persisted config.
@@ -224,11 +233,11 @@ static void updatePtt(const unsigned long now)
         s_tx_latched = false;
         s_tx_suppressed = true;
         tx = false;
-        Serial.println("[IO] PTT timeout, transmit forced off");
+        ESP_LOGI(TAG, "PTT timeout, transmit forced off");
     }
 
     if (tx != s_tx_active) {
-        Serial.printf("[IO] transmit %s\n", tx ? "ON" : "OFF");
+        ESP_LOGI(TAG, "transmit %s", tx ? "ON" : "OFF");
     }
     s_tx_active = tx;
 }
@@ -254,13 +263,22 @@ extern "C" void STATUS_IO_Init(void)
         s_poll_mutex = xSemaphoreCreateMutex();
     }
 
-    pinMode(NRL_PIN_BTN_VOL_UP,   INPUT_PULLUP);
-    pinMode(NRL_PIN_BTN_VOL_DOWN, INPUT_PULLUP);
-    pinMode(NRL_PIN_BTN_PTT,      INPUT_PULLUP);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_BTN_VOL_UP);
+    gpio_set_direction((gpio_num_t)NRL_PIN_BTN_VOL_UP, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)NRL_PIN_BTN_VOL_UP, GPIO_PULLUP_ONLY);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_BTN_VOL_DOWN);
+    gpio_set_direction((gpio_num_t)NRL_PIN_BTN_VOL_DOWN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)NRL_PIN_BTN_VOL_DOWN, GPIO_PULLUP_ONLY);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_BTN_PTT);
+    gpio_set_direction((gpio_num_t)NRL_PIN_BTN_PTT, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)NRL_PIN_BTN_PTT, GPIO_PULLUP_ONLY);
 
-    pinMode(NRL_PIN_LED_PTT,   OUTPUT);
-    pinMode(NRL_PIN_LED_AUDIO, OUTPUT);
-    pinMode(NRL_PIN_LED_NET,   OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_LED_PTT);
+    gpio_set_direction((gpio_num_t)NRL_PIN_LED_PTT, GPIO_MODE_OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_LED_AUDIO);
+    gpio_set_direction((gpio_num_t)NRL_PIN_LED_AUDIO, GPIO_MODE_OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_LED_NET);
+    gpio_set_direction((gpio_num_t)NRL_PIN_LED_NET, GPIO_MODE_OUTPUT);
     writeLed(NRL_PIN_LED_PTT,   false);
     writeLed(NRL_PIN_LED_AUDIO, false);
     writeLed(NRL_PIN_LED_NET,   false);
@@ -275,7 +293,7 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
 
 extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)
 {
-    s_last_heartbeat_rx_ms = millis();
+    s_last_heartbeat_rx_ms = nrl_millis_now();
 }
 
 extern "C" void STATUS_IO_Poll(void)
@@ -287,7 +305,7 @@ extern "C" void STATUS_IO_Poll(void)
         return;
     }
 
-    const unsigned long now = millis();
+    const unsigned long now = nrl_millis_now();
 
     if (pollButtonPressEdge(s_btn_vol_up, now)) {
         adjustLineOutVolume(+1);
@@ -312,7 +330,7 @@ extern "C" void STATUS_IO_Poll(void)
     if (s_volume_dirty && (now - s_volume_change_ms) >= kVolumeSaveDelayMs) {
         s_volume_dirty = false;
         EXTERNAL_RADIO_SaveConfig();
-        Serial.println("[IO] line_out_volume saved");
+        ESP_LOGI(TAG, "line_out_volume saved");
     }
 
     if (s_poll_mutex != nullptr) {
@@ -335,12 +353,12 @@ int s_last_sql2_level = -1;
 
 static bool sql1Active()
 {
-    return digitalRead(NRL_PIN_SQL1) == HIGH;
+    return gpio_get_level((gpio_num_t)NRL_PIN_SQL1) == 1;
 }
 
 static bool sql2Active()
 {
-    return digitalRead(NRL_PIN_SQL2) == LOW;
+    return gpio_get_level((gpio_num_t)NRL_PIN_SQL2) == 0;
 }
 
 } // namespace
@@ -357,15 +375,23 @@ extern "C" bool STATUS_IO_IsPttActive(void)
 
 extern "C" void STATUS_IO_Init(void)
 {
-    pinMode(NRL_PIN_PTT_OUT, OUTPUT);
-    pinMode(NRL_PIN_STATUS_PTT_LED, OUTPUT);
-    pinMode(NRL_PIN_STATUS_IO1, OUTPUT);
-    pinMode(NRL_PIN_STATUS_IO2, OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_PTT_OUT);
+    gpio_set_direction((gpio_num_t)NRL_PIN_PTT_OUT, GPIO_MODE_OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_STATUS_PTT_LED);
+    gpio_set_direction((gpio_num_t)NRL_PIN_STATUS_PTT_LED, GPIO_MODE_OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_STATUS_IO1);
+    gpio_set_direction((gpio_num_t)NRL_PIN_STATUS_IO1, GPIO_MODE_OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_STATUS_IO2);
+    gpio_set_direction((gpio_num_t)NRL_PIN_STATUS_IO2, GPIO_MODE_OUTPUT);
 
-    pinMode(NRL_PIN_SQL1, INPUT_PULLDOWN);
-    pinMode(NRL_PIN_SQL2, INPUT_PULLUP);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_SQL1);
+    gpio_set_direction((gpio_num_t)NRL_PIN_SQL1, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)NRL_PIN_SQL1, GPIO_PULLDOWN_ONLY);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_SQL2);
+    gpio_set_direction((gpio_num_t)NRL_PIN_SQL2, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)NRL_PIN_SQL2, GPIO_PULLUP_ONLY);
 
-    digitalWrite(NRL_PIN_PTT_OUT, LOW);
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, 0);
     writeLed(NRL_PIN_STATUS_PTT_LED, false);
     writeLed(NRL_PIN_STATUS_IO1, false);
     writeLed(NRL_PIN_STATUS_IO2, false);
@@ -374,33 +400,33 @@ extern "C" void STATUS_IO_Init(void)
 extern "C" void STATUS_IO_SetPttActive(const bool active)
 {
     if (s_ptt_active != active) {
-        Serial.printf("[IO] ptt_out=%u\n", active ? 1u : 0u);
+        ESP_LOGI(TAG, "ptt_out=%u", active ? 1u : 0u);
     }
     s_ptt_active = active;
-    digitalWrite(NRL_PIN_PTT_OUT, active ? HIGH : LOW);
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, active ? 1 : 0);
     writeLed(NRL_PIN_STATUS_PTT_LED, active);
 }
 
 extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)
 {
-    s_last_heartbeat_rx_ms = millis();
+    s_last_heartbeat_rx_ms = nrl_millis_now();
 }
 
 extern "C" void STATUS_IO_Poll(void)
 {
-    const unsigned long now = millis();
-    const int sql1_level = digitalRead(NRL_PIN_SQL1);
-    const int sql2_level = digitalRead(NRL_PIN_SQL2);
+    const unsigned long now = nrl_millis_now();
+    const int sql1_level = gpio_get_level((gpio_num_t)NRL_PIN_SQL1);
+    const int sql2_level = gpio_get_level((gpio_num_t)NRL_PIN_SQL2);
     if (sql1_level != s_last_sql1_level || sql2_level != s_last_sql2_level) {
-        Serial.printf("[IO] sql1=%u sql2=%u active=%u\n",
-                      static_cast<unsigned>(sql1_level == HIGH ? 1u : 0u),
-                      static_cast<unsigned>(sql2_level == HIGH ? 1u : 0u),
-                      static_cast<unsigned>((sql1_level == HIGH || sql2_level == LOW) ? 1u : 0u));
+        ESP_LOGI(TAG, "sql1=%u sql2=%u active=%u",
+                 static_cast<unsigned>(sql1_level == 1 ? 1u : 0u),
+                 static_cast<unsigned>(sql2_level == 1 ? 1u : 0u),
+                 static_cast<unsigned>((sql1_level == 1 || sql2_level == 0) ? 1u : 0u));
         s_last_sql1_level = sql1_level;
         s_last_sql2_level = sql2_level;
     }
 
-    const bool sql_active = (sql1_level == HIGH) || (sql2_level == LOW);
+    const bool sql_active = (sql1_level == 1) || (sql2_level == 0);
     const bool heartbeat_ok =
         s_last_heartbeat_rx_ms != 0UL && (now - s_last_heartbeat_rx_ms) <= kHeartbeatMissedBlinkMs;
 
@@ -410,7 +436,7 @@ extern "C" void STATUS_IO_Poll(void)
     writeLed(NRL_PIN_STATUS_IO2, sql_active);
 
     // Keep these two outputs refreshed even if callers only update the latch state.
-    digitalWrite(NRL_PIN_PTT_OUT, s_ptt_active ? HIGH : LOW);
+    gpio_set_level((gpio_num_t)NRL_PIN_PTT_OUT, s_ptt_active ? 1 : 0);
     writeLed(NRL_PIN_STATUS_PTT_LED, s_ptt_active);
 }
 

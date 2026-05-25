@@ -307,18 +307,27 @@ const translations = {
       if (slider) slider.value = value;
     }
 
-    // POST a form as multipart/form-data and return the parsed JSON reply:
-    //   { ok: bool, fields: { name: stored_value, ... } }
-    // The server echoes back the just-saved value of every submitted field so
-    // the caller can refresh inputs with on-device truth without a page reload.
+    // POST a form as application/x-www-form-urlencoded and return the parsed
+    // JSON reply: { ok: bool, fields: { name: stored_value, ... } }
+    // Server-side parseFormBody in wifi_config_portal.cpp only handles
+    // urlencoded; using FormData would send multipart/form-data and every
+    // field would be silently ignored. The server echoes back the just-saved
+    // value of every submitted field so the caller can refresh inputs with
+    // on-device truth without a page reload.
     function postForm(form) {
       if (!form) return Promise.resolve({ ok: false });
-      const body = new FormData(form);
+      const body = new URLSearchParams();
+      // FormData walks the form's successful controls (skips unchecked
+      // checkboxes, etc.) -- exactly the set we want urlencoded.
+      for (const [k, v] of new FormData(form)) {
+        body.append(k, v);
+      }
       return fetch(form.action || window.location.href, {
         method: form.method ? form.method.toUpperCase() : 'POST',
         body,
         cache: 'no-store',
         credentials: 'same-origin',
+        referrerPolicy: 'no-referrer',
       }).then((r) => r.json().then((data) => Object.assign({ ok: r.ok }, data)))
         .catch(() => ({ ok: false }));
     }

@@ -1,8 +1,16 @@
-#include <Arduino.h>
+#include <esp_event.h>
+#include <esp_flash.h>
 #include <esp_log.h>
+#include <esp_netif.h>
+#include <esp_psram.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <nvs_flash.h>
 
 #include "../lib/ble_config.h"
 #include "../lib/nrl_audio_bridge.h"
+#include "../lib/nrl_usb_console.h"
 #include "../lib/nrl_version.h"
 #include "../lib/wifi_config_portal.h"
 #include "driver/board_pins.h"
@@ -15,24 +23,45 @@
 namespace {
 
 constexpr unsigned long kPollIntervalMs = 20UL;
-unsigned long s_last_poll_ms = 0UL;
+const char *TAG = "APP";
 
-} // namespace
-
-void setup()
+static void initSystem()
 {
-    Serial.begin(115200);
-    delay(200);
     // The IDF gpio driver logs every gpio_config() at INFO level; the
     // bit-bang I2C reconfigures SDA/SCL constantly and floods the console.
-    // Silence the gpio tag (harmless on the pure-Arduino build too).
     esp_log_level_set("gpio", ESP_LOG_WARN);
-    Serial.println(NRL_FIRMWARE_BANNER " startup");
-    Serial.printf("[BOOT] flash=%u bytes psram=%u bytes (psram %s)\n",
-                  static_cast<unsigned>(ESP.getFlashChipSize()),
-                  static_cast<unsigned>(ESP.getPsramSize()),
-                  ESP.getPsramSize() > 0 ? "OK" : "absent");
+    // esp-sr's AFE prints "Ringbuffer of AFE is empty, Please use feed() to
+    // write data" at WARN whenever its fetch outruns feed. The design here
+    // only feeds the AEC reference channel while network voice is actually
+    // playing (gezipai + bh4tdv both); during idle/RX-only the WARN spams
+    // every ~200 ms. Suppress it; real errors still surface at ESP_LOG_ERROR.
+    esp_log_level_set("AFE", ESP_LOG_ERROR);
 
+    // One-time stack init that Arduino used to do before setup(). Idempotent;
+    // nrl_wifi.cpp's nrlWifiInit() re-runs these but they short-circuit on
+    // INVALID_STATE. Doing them here keeps boot ordering deterministic.
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+    esp_netif_init();
+    esp_event_loop_create_default();
+
+    NRL_USB_Console_Init();
+
+    ESP_LOGI(TAG, "%s startup", NRL_FIRMWARE_BANNER);
+    uint32_t flash_size = 0;
+    (void)esp_flash_get_size(nullptr, &flash_size);
+    const size_t psram_size = esp_psram_get_size();
+    ESP_LOGI(TAG, "[BOOT] flash=%u bytes psram=%u bytes (psram %s)",
+             static_cast<unsigned>(flash_size),
+             static_cast<unsigned>(psram_size),
+             psram_size > 0 ? "OK" : "absent");
+}
+
+static void initApp()
+{
     EXTERNAL_RADIO_Init();
     if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
         ES8311_ApplyAudioConfig(config->mic_volume,
@@ -86,14 +115,26 @@ void setup()
     WifiConfigPortal_Init();
     BLEConfig_Init();
 
+    // Bring the audio bridge up BEFORE ES8311_Init. ES8311_Init internally
+    // calls AEC_Init which mallocs ~50 KB (WebRtcNs + AFE state) from the
+    // internal SRAM heap; if the bridge task's 8 KB stack hasn't been
+    // allocated by then there's no contiguous block left and xTaskCreate
+    // fails -- which silently kills STA reconnect (the bridge owns the
+    // WiFi state machine). NRLAudioBridge_Init only registers a frame hook
+    // via ES8311_SetFrameHook(); the hook is invoked later once ES8311
+    // starts its passthrough task, so the ordering swap is safe.
+    if (!NRLAudioBridge_Init()) {
+        ESP_LOGE(TAG, "NRL audio bridge init failed.");
+    }
+
     if (ES8311_Init()) {
-        Serial.println("ES8311 ready.");
+        ESP_LOGI(TAG, "ES8311 ready.");
     } else {
-        Serial.println("ES8311 initialization failed.");
+        ESP_LOGE(TAG, "ES8311 initialization failed.");
     }
 
     if (!ES8311_SetReceiveMode()) {
-        Serial.println("ES8311 set receive mode failed.");
+        ESP_LOGE(TAG, "ES8311 set receive mode failed.");
     }
 
 #if NRL_HAS_ES7210
@@ -101,25 +142,19 @@ void setup()
     // above has already started I2S, so MCLK/BCLK/LRCK are running and the
     // ES7210 can lock its clock. Configure it now so I2S DIN carries audio.
     if (ES7210_Init()) {
-        Serial.println("ES7210 mic ADC ready.");
+        ESP_LOGI(TAG, "ES7210 mic ADC ready.");
     } else {
-        Serial.println("ES7210 mic ADC initialization failed.");
+        ESP_LOGE(TAG, "ES7210 mic ADC initialization failed.");
     }
 #endif
 
-    if (!NRLAudioBridge_Init()) {
-        Serial.println("NRL audio bridge init failed.");
-    }
-
-    Serial.println("[AT] serial console ready. Type \"AT\" for the command list, "
-                    "e.g. AT+WIFI_SSID=MyNet then AT+WIFI_PASS=secret");
+    ESP_LOGI(TAG, "[AT] serial console ready. Type \"AT\" for the command list, "
+                  "e.g. AT+WIFI_SSID=MyNet then AT+WIFI_PASS=secret");
 }
 
-void loop()
+static void mainLoopTask(void *)
 {
-    const unsigned long now = millis();
-    if ((now - s_last_poll_ms) >= kPollIntervalMs) {
-        s_last_poll_ms = now;
+    while (true) {
         STATUS_IO_Poll();
         WifiConfigPortal_Poll();
         BLEConfig_Poll();
@@ -127,7 +162,18 @@ void loop()
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
         Display_Poll();
 #endif
+        vTaskDelay(pdMS_TO_TICKS(kPollIntervalMs));
     }
+}
 
-    delay(1);
+} // namespace
+
+extern "C" void app_main(void)
+{
+    initSystem();
+    initApp();
+    // Detach the polling loop from the boot task so we can let app_main return
+    // (IDF style). 6 KB stack is enough for the poll fan-out; bump if a
+    // sub-system asks for more local stack down the line.
+    xTaskCreatePinnedToCore(mainLoopTask, "nrl_main_loop", 6144, nullptr, 5, nullptr, 1);
 }

@@ -19,9 +19,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#ifndef ENABLE_OPENCV
-#include <Arduino.h>
-#else
+#ifdef ENABLE_OPENCV
 #include "opencv/Arduino.hpp"
 #endif
 #include "driver/board_pins.h"

@@ -3,12 +3,12 @@
 
 #include "../app/driver/external_radio.h"
 
-#include <Arduino.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string>
 
 struct WifiConfigPortalScanEntry {
-    String ssid;
+    std::string ssid;
     int32_t rssi;
 };
 
@@ -22,20 +22,20 @@ struct WifiConfigPortalPageState {
     bool network_active;
     bool device_active;
     bool audio_active;
-    String footer;
+    std::string footer;
 };
 
-String WifiConfigPortalView_BuildNetworkSection(const ExternalRadioConfig *config,
-                                                const WifiConfigPortalScanEntry *scan_entries,
-                                                size_t scan_count);
-String WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *config);
-String WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config);
-String WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
-                                            const WifiConfigPortalPageState &state,
-                                            const String &form_sections);
-String WifiConfigPortalView_BuildUpdatePage(const char *headline,
-                                            const char *headline_key,
-                                            const char *intro,
-                                            const char *intro_key);
+std::string WifiConfigPortalView_BuildNetworkSection(const ExternalRadioConfig *config,
+                                                     const WifiConfigPortalScanEntry *scan_entries,
+                                                     size_t scan_count);
+std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *config);
+std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config);
+std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
+                                                 const WifiConfigPortalPageState &state,
+                                                 const std::string &form_sections);
+std::string WifiConfigPortalView_BuildUpdatePage(const char *headline,
+                                                 const char *headline_key,
+                                                 const char *intro,
+                                                 const char *intro_key);
 
 #endif

@@ -1,7 +1,8 @@
 // shared_flash.h
 #pragma once
 #ifndef ENABLE_OPENCV
-#include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "esp_partition.h"
 #include "esp_ota_ops.h"
 
@@ -89,7 +90,7 @@ inline bool shared_write(size_t offset, const void* data, size_t len) {
 
     written += span;
     // 让出一下 CPU，避免长时间阻塞
-    delay(0);
+    taskYIELD();
   }
 
   free(sector_buf);

@@ -1,19 +1,22 @@
 #include "nrl_at_commands.h"
 
+#include "nrl_net_compat.h"
 #include "nrl_version.h"
 
 #include "driver/es8311.h"
 #include "driver/external_radio.h"
 #include "driver/sci_serial.h"
 
-#include <Arduino.h>
-#include <WiFi.h>
+#include <esp_log.h>
+#include <lwip/sockets.h>
 
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static const char *TAG = "NRL";
 
 namespace {
 
@@ -115,17 +118,16 @@ static const char *ipText(const uint32_t value, char *buffer, const size_t buffe
     if (buffer == nullptr || buffer_size == 0u) {
         return "";
     }
-    IPAddress ip(value);
-    snprintf(buffer, buffer_size, "%s", ip.toString().c_str());
+    nrlIpToString(value, buffer, buffer_size);
     return buffer;
 }
 
 static uint32_t currentWifiIpValue(const uint32_t configured_value,
-                                   const IPAddress &dhcp_value,
+                                   const uint32_t dhcp_value,
                                    const bool use_dhcp_value)
 {
     if (use_dhcp_value) {
-        return static_cast<uint32_t>(dhcp_value);
+        return dhcp_value;
     }
     return configured_value;
 }
@@ -175,11 +177,11 @@ static bool appendSupportedAtList(uint8_t *payload,
         formatSciConfig(config->sci, sci_config, sizeof(sci_config));
         formatMaskedSecret(config->wifi_password, wifi_pass, sizeof(wifi_pass));
         snprintf(hp_drive, sizeof(hp_drive), "%s", config->hp_drive_enabled ? "ON" : "OFF");
-        const bool show_dhcp_values = config->wifi_dhcp_enabled && WiFi.status() == WL_CONNECTED;
-        ipText(currentWifiIpValue(config->wifi_ip, WiFi.localIP(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
-        ipText(currentWifiIpValue(config->wifi_netmask, WiFi.subnetMask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
-        ipText(currentWifiIpValue(config->wifi_gateway, WiFi.gatewayIP(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
-        ipText(currentWifiIpValue(config->wifi_dns, WiFi.dnsIP(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
+        const bool show_dhcp_values = config->wifi_dhcp_enabled && nrlWifiStaConnected();
+        ipText(currentWifiIpValue(config->wifi_ip, nrlWifiStaIp(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
+        ipText(currentWifiIpValue(config->wifi_netmask, nrlWifiStaNetmask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
+        ipText(currentWifiIpValue(config->wifi_gateway, nrlWifiStaGateway(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
+        ipText(currentWifiIpValue(config->wifi_dns, nrlWifiStaDns(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
     }
     return appendKeyValueLine(payload, capacity, used, "WIFI_SSID", (config != nullptr) ? config->wifi_ssid : "") &&
            appendKeyValueLine(payload, capacity, used, "WIFI_PASS", wifi_pass) &&
@@ -282,11 +284,11 @@ static bool parseIpValue(const char *text, uint32_t *out_value)
     if (text == nullptr || out_value == nullptr) {
         return false;
     }
-    IPAddress ip;
-    if (!ip.fromString(text)) {
+    struct in_addr addr = {};
+    if (inet_aton(text, &addr) == 0) {
         return false;
     }
-    *out_value = static_cast<uint32_t>(ip);
+    *out_value = addr.s_addr;
     return true;
 }
 
@@ -376,11 +378,11 @@ static bool appendAllConfigLines(NrlAtCommandResult *result)
     char wifi_mask[16];
     char wifi_gw[16];
     char wifi_dns[16];
-    const bool show_dhcp_values = config->wifi_dhcp_enabled && WiFi.status() == WL_CONNECTED;
-    ipText(currentWifiIpValue(config->wifi_ip, WiFi.localIP(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
-    ipText(currentWifiIpValue(config->wifi_netmask, WiFi.subnetMask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
-    ipText(currentWifiIpValue(config->wifi_gateway, WiFi.gatewayIP(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
-    ipText(currentWifiIpValue(config->wifi_dns, WiFi.dnsIP(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
+    const bool show_dhcp_values = config->wifi_dhcp_enabled && nrlWifiStaConnected();
+    ipText(currentWifiIpValue(config->wifi_ip, nrlWifiStaIp(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
+    ipText(currentWifiIpValue(config->wifi_netmask, nrlWifiStaNetmask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
+    ipText(currentWifiIpValue(config->wifi_gateway, nrlWifiStaGateway(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
+    ipText(currentWifiIpValue(config->wifi_dns, nrlWifiStaDns(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
     return appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_SSID", config->wifi_ssid) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_PASS", wifi_pass) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_DHCP", config->wifi_dhcp_enabled ? 1u : 0u) &&
@@ -538,23 +540,23 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         stringEqualsIgnoreCase(command.command, "WIFI_DNS")) {
         char current[16];
         uint32_t configured = config->wifi_ip;
-        IPAddress dhcp = WiFi.localIP();
+        uint32_t dhcp = nrlWifiStaIp();
         const char *key = "WIFI_IP";
         if (stringEqualsIgnoreCase(command.command, "WIFI_MASK")) {
             configured = config->wifi_netmask;
-            dhcp = WiFi.subnetMask();
+            dhcp = nrlWifiStaNetmask();
             key = "WIFI_MASK";
         } else if (stringEqualsIgnoreCase(command.command, "WIFI_GW")) {
             configured = config->wifi_gateway;
-            dhcp = WiFi.gatewayIP();
+            dhcp = nrlWifiStaGateway();
             key = "WIFI_GW";
         } else if (stringEqualsIgnoreCase(command.command, "WIFI_DNS")) {
             configured = config->wifi_dns;
-            dhcp = WiFi.dnsIP();
+            dhcp = nrlWifiStaDns();
             key = "WIFI_DNS";
         }
         if (is_query) {
-            const bool show_dhcp_value = config->wifi_dhcp_enabled && WiFi.status() == WL_CONNECTED;
+            const bool show_dhcp_value = config->wifi_dhcp_enabled && nrlWifiStaConnected();
             appendKeyValueLine(result->payload,
                                sizeof(result->payload),
                                &result->payload_size,
@@ -812,9 +814,9 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
-    Serial.printf("[NRL] unknown AT command: %s=%s, returning command list\n",
-                  command.command,
-                  command.value);
+    ESP_LOGI(TAG, "unknown AT command: %s=%s, returning command list",
+             command.command,
+             command.value);
     if (!appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "UNKNOWN") ||
         !appendSupportedAtList(result->payload, sizeof(result->payload), &result->payload_size)) {
         result->should_reply = false;

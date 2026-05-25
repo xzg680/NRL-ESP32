@@ -8,15 +8,18 @@
 #include "aec/aec_processor.h"
 #endif
 
-#ifndef ENABLE_OPENCV
-#include <Arduino.h>
-#else
+#ifdef ENABLE_OPENCV
 #include "../opencv/Arduino.hpp"
 #endif
+
+#include <driver/gpio.h>
+#include <esp_log.h>
 
 #include <ctype.h>
 #include <stdint.h>
 #include <string.h>
+
+static const char *TAG = "IO";
 
 namespace {
 
@@ -421,16 +424,16 @@ static void applyChannelOutputs(void)
 {
 #if NRL_BOARD == NRL_BOARD_BH4TDV
     const uint8_t encoded = clampChannel(s_config.channel);
-    digitalWrite(NRL_PIN_CHANNEL_BIT0, (encoded & 0x01U) ? HIGH : LOW);
-    digitalWrite(NRL_PIN_CHANNEL_BIT1, (encoded & 0x02U) ? HIGH : LOW);
-    digitalWrite(NRL_PIN_CHANNEL_BIT2, (encoded & 0x04U) ? HIGH : LOW);
+    gpio_set_level((gpio_num_t)NRL_PIN_CHANNEL_BIT0, (encoded & 0x01U) ? 1 : 0);
+    gpio_set_level((gpio_num_t)NRL_PIN_CHANNEL_BIT1, (encoded & 0x02U) ? 1 : 0);
+    gpio_set_level((gpio_num_t)NRL_PIN_CHANNEL_BIT2, (encoded & 0x04U) ? 1 : 0);
 
     if (encoded != s_last_channel_encoded) {
-        Serial.printf("[IO] channel=%u bits ch0=%u ch1=%u ch2=%u\n",
-                      static_cast<unsigned>(s_config.channel),
-                      static_cast<unsigned>((encoded & 0x01U) ? 1u : 0u),
-                      static_cast<unsigned>((encoded & 0x02U) ? 1u : 0u),
-                      static_cast<unsigned>((encoded & 0x04U) ? 1u : 0u));
+        ESP_LOGI(TAG, "channel=%u bits ch0=%u ch1=%u ch2=%u",
+                 static_cast<unsigned>(s_config.channel),
+                 static_cast<unsigned>((encoded & 0x01U) ? 1u : 0u),
+                 static_cast<unsigned>((encoded & 0x02U) ? 1u : 0u),
+                 static_cast<unsigned>((encoded & 0x04U) ? 1u : 0u));
         s_last_channel_encoded = encoded;
     }
 #endif
@@ -739,6 +742,12 @@ static bool savePersistedConfig(void)
     copyBounded(persisted.callsign, sizeof(persisted.callsign), s_config.callsign);
 
     EEPROM_WriteBufferLarge(kConfigAddress, &persisted, sizeof(persisted));
+    PersistedExternalRadioConfig verify = {};
+    EEPROM_ReadBufferLarge(kConfigAddress, &verify, sizeof(verify));
+    if (memcmp(&verify, &persisted, sizeof(persisted)) != 0) {
+        ESP_LOGE(TAG, "config EEPROM verify failed");
+        return false;
+    }
     return true;
 }
 
@@ -765,9 +774,12 @@ extern "C" void EXTERNAL_RADIO_Init(void)
     }
 
 #if NRL_BOARD == NRL_BOARD_BH4TDV
-    pinMode(NRL_PIN_CHANNEL_BIT0, OUTPUT);
-    pinMode(NRL_PIN_CHANNEL_BIT1, OUTPUT);
-    pinMode(NRL_PIN_CHANNEL_BIT2, OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_CHANNEL_BIT0);
+    gpio_set_direction((gpio_num_t)NRL_PIN_CHANNEL_BIT0, GPIO_MODE_OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_CHANNEL_BIT1);
+    gpio_set_direction((gpio_num_t)NRL_PIN_CHANNEL_BIT1, GPIO_MODE_OUTPUT);
+    gpio_reset_pin((gpio_num_t)NRL_PIN_CHANNEL_BIT2);
+    gpio_set_direction((gpio_num_t)NRL_PIN_CHANNEL_BIT2, GPIO_MODE_OUTPUT);
 #endif
 
     applyDefaults();
@@ -958,6 +970,7 @@ bool EXTERNAL_RADIO_SetMicVolume(const uint8_t value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
     s_config.mic_volume = value;
+    applyAudioConfigToCodec();
     if (persist) {
         return savePersistedConfig();
     }

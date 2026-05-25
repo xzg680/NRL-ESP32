@@ -1,7 +1,12 @@
 dependencies:
   espressif/esp-sr:
     version: ">=2.0.0"
-  # LVGL (格子派 ST7789 LCD UI) is vendored at components/lvgl/ by
+  # esp-nimble-cpp: pure-IDF C++ wrapper around the NimBLE host stack used by
+  # src/lib/ble_config.cpp. Requires CONFIG_BT_NIMBLE_ENABLED=y (set in
+  # sdkconfig.defaults); Bluedroid must be off (mutually exclusive stacks).
+  h2zero/esp-nimble-cpp:
+    version: ">=2.2.0"
+  # LVGL (gezipai ST7789 LCD UI) is vendored at components/lvgl/ by
   # scripts/fetch_lvgl.py at build time. It is deliberately NOT listed here
   # because the IDF component manager would (a) overwrite it from the
   # registry and (b) prune the directory on reconfigure if its lock file

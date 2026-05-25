@@ -13,6 +13,10 @@ set(app_sources
     lib/ble_config.cpp
     lib/nrl_at_commands.cpp
     lib/nrl_audio_bridge.cpp
+    lib/nrl_captive_dns.cpp
+    lib/nrl_g711.cpp
+    lib/nrl_usb_console.cpp
+    lib/nrl_wifi.cpp
     lib/wifi_config_portal.cpp
     lib/wifi_config_portal_view.cpp
 )
@@ -21,7 +25,23 @@ set(app_sources
 # fetch_lvgl.py extra_script runs only in [env:gezipai]). On bh4tdv, the
 # directory is absent and display.cpp's `#include <lvgl.h>` is itself gated
 # behind `#if NRL_HAS_DISPLAY`, so we must not declare the dependency.
-set(app_priv_requires "")
+set(app_priv_requires
+    app_update
+    bt
+    driver
+    esp_driver_usb_serial_jtag
+    esp_event
+    esp_http_server
+    esp_netif
+    esp_partition
+    esp_psram
+    esp_timer
+    esp_wifi
+    espressif__esp-sr
+    h2zero__esp-nimble-cpp
+    lwip
+    nvs_flash
+)
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../components/lvgl/lvgl.h")
     list(APPEND app_priv_requires lvgl)
 endif()

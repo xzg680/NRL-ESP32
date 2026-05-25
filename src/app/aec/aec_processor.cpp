@@ -4,7 +4,6 @@
 
 #if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
 
-#include <Arduino.h>
 #include <esp_afe_config.h>
 #include <esp_afe_sr_models.h>
 #include <esp_err.h>
@@ -16,6 +15,8 @@
 #include <model_path.h>
 #include <stdlib.h>
 #include <string.h>
+
+static const char *TAG = "AEC";
 
 namespace {
 
@@ -135,7 +136,7 @@ void aec_fetch_task(void *) {
             }
             off += block;
         }
-        vTaskDelay(1);
+        taskYIELD();
     }
     s_fetch_task = nullptr;
     vTaskDelete(nullptr);
@@ -156,7 +157,7 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     const bool use_ref_channel = enable_aec;
     s_models = esp_srmodel_init("model");
     if (s_models == nullptr) {
-        Serial.println("[AEC] esp_srmodel_init('model') failed -- NSNET2 model partition missing?");
+        ESP_LOGE(TAG, "esp_srmodel_init('model') failed -- NSNET2 model partition missing?");
         return false;
     }
 
@@ -165,7 +166,7 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
                                         AFE_TYPE_VC,
                                         AFE_MODE_LOW_COST);
     if (cfg == nullptr) {
-        Serial.println("[AEC] afe_config_init failed");
+        ESP_LOGE(TAG, "afe_config_init failed");
         esp_srmodel_deinit(s_models);
         s_models = nullptr;
         return false;
@@ -180,7 +181,7 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
 
     s_iface = esp_afe_handle_from_config(cfg);
     if (s_iface == nullptr) {
-        Serial.println("[AEC] esp_afe_handle_from_config failed");
+        ESP_LOGE(TAG, "esp_afe_handle_from_config failed");
         afe_config_free(cfg);
         esp_srmodel_deinit(s_models);
         s_models = nullptr;
@@ -190,7 +191,7 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     s_afe = s_iface->create_from_config(cfg);
     afe_config_free(cfg);
     if (s_afe == nullptr) {
-        Serial.println("[AEC] AFE create_from_config failed");
+        ESP_LOGE(TAG, "AFE create_from_config failed");
         esp_srmodel_deinit(s_models);
         s_models = nullptr;
         return false;
@@ -203,7 +204,7 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
         s_feed_channels = use_ref_channel ? 2u : 1u;
     }
     if (s_feed_chunk <= 0) {
-        Serial.println("[AEC] invalid feed chunk size");
+        ESP_LOGE(TAG, "invalid feed chunk size");
         s_iface->destroy(s_afe);
         s_afe = nullptr;
         esp_srmodel_deinit(s_models);
@@ -216,7 +217,7 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     s_feed_buf = static_cast<int16_t *>(
         malloc(s_feed_cap * s_feed_channels * sizeof(int16_t)));
     if (s_feed_buf == nullptr) {
-        Serial.println("[AEC] feed buffer alloc failed");
+        ESP_LOGE(TAG, "feed buffer alloc failed");
         s_iface->destroy(s_afe);
         s_afe = nullptr;
         esp_srmodel_deinit(s_models);
@@ -232,7 +233,7 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     // 8 KB: aec_fetch_task calls into esp-sr fetch().
     if (xTaskCreatePinnedToCore(aec_fetch_task, "aec_fetch", 8192, nullptr, 4,
                                 &s_fetch_task, 1) != pdPASS) {
-        Serial.println("[AEC] fetch task create failed");
+        ESP_LOGE(TAG, "fetch task create failed");
         s_running = false;
         free(s_feed_buf);
         s_feed_buf = nullptr;
@@ -247,13 +248,13 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     s_has_reference = enable_aec;
     s_has_ai_noise = enable_ai_noise;
     AEC_SetRuntimeEnabled(enable_aec, enable_ai_noise);
-    Serial.printf("[AEC] ready: feed_chunk=%d fetch_chunk=%d (16kHz), "
-                  "capture=16k output=8k, ch=%u aec=%u ai_noise=%u\n",
-                  s_feed_chunk,
-                  s_fetch_chunk,
-                  static_cast<unsigned>(s_feed_channels),
-                  s_has_reference ? 1u : 0u,
-                  s_has_ai_noise ? 1u : 0u);
+    ESP_LOGI(TAG, "ready: feed_chunk=%d fetch_chunk=%d (16kHz), "
+             "capture=16k output=8k, ch=%u aec=%u ai_noise=%u",
+             s_feed_chunk,
+             s_fetch_chunk,
+             static_cast<unsigned>(s_feed_channels),
+             s_has_reference ? 1u : 0u,
+             s_has_ai_noise ? 1u : 0u);
     return true;
 }
 
@@ -307,7 +308,6 @@ void AEC_SubmitCapture(const int16_t *mic_16k,
     // Feed full chunks to the AFE.
     while (s_feed_fill >= static_cast<size_t>(s_feed_chunk)) {
         s_iface->feed(s_afe, s_feed_buf);
-        vTaskDelay(1);
         const size_t remain = s_feed_fill - static_cast<size_t>(s_feed_chunk);
         if (remain > 0) {
             memmove(s_feed_buf,

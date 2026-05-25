@@ -3,54 +3,55 @@
 #include "board_pins.h"
 #include "external_radio.h"
 
-#include <Arduino.h>
+#include <driver/uart.h>
+#include <esp_log.h>
+
+#include <string.h>
+
+static const char *TAG = "SCI";
 
 namespace {
 
-HardwareSerial s_sci_serial(1);
+constexpr uart_port_t kSciPort = UART_NUM_1;
+constexpr size_t kSciRxBufBytes = 512u;
+
 bool s_sci_ready = false;
+bool s_sci_driver_installed = false;
 uint32_t s_sci_baud = 0u;
 uint8_t s_sci_data_bits = 0u;
 char s_sci_parity = '\0';
 uint8_t s_sci_stop_bits = 0u;
 
-static uint32_t serialConfig(const uint8_t data_bits, const char parity, const uint8_t stop_bits)
+static bool buildUartConfig(uint32_t baud, uint8_t data_bits, char parity,
+                            uint8_t stop_bits, uart_config_t &out)
 {
+    memset(&out, 0, sizeof(out));
+    out.baud_rate = static_cast<int>(baud);
+    out.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    out.source_clk = UART_SCLK_DEFAULT;
+
     switch (data_bits) {
-        case 5:
-            if (parity == 'E') {
-                return (stop_bits == 2u) ? SERIAL_5E2 : SERIAL_5E1;
-            }
-            if (parity == 'O') {
-                return (stop_bits == 2u) ? SERIAL_5O2 : SERIAL_5O1;
-            }
-            return (stop_bits == 2u) ? SERIAL_5N2 : SERIAL_5N1;
-        case 6:
-            if (parity == 'E') {
-                return (stop_bits == 2u) ? SERIAL_6E2 : SERIAL_6E1;
-            }
-            if (parity == 'O') {
-                return (stop_bits == 2u) ? SERIAL_6O2 : SERIAL_6O1;
-            }
-            return (stop_bits == 2u) ? SERIAL_6N2 : SERIAL_6N1;
-        case 7:
-            if (parity == 'E') {
-                return (stop_bits == 2u) ? SERIAL_7E2 : SERIAL_7E1;
-            }
-            if (parity == 'O') {
-                return (stop_bits == 2u) ? SERIAL_7O2 : SERIAL_7O1;
-            }
-            return (stop_bits == 2u) ? SERIAL_7N2 : SERIAL_7N1;
-        case 8:
-        default:
-            if (parity == 'E') {
-                return (stop_bits == 2u) ? SERIAL_8E2 : SERIAL_8E1;
-            }
-            if (parity == 'O') {
-                return (stop_bits == 2u) ? SERIAL_8O2 : SERIAL_8O1;
-            }
-            return (stop_bits == 2u) ? SERIAL_8N2 : SERIAL_8N1;
+        case 5: out.data_bits = UART_DATA_5_BITS; break;
+        case 6: out.data_bits = UART_DATA_6_BITS; break;
+        case 7: out.data_bits = UART_DATA_7_BITS; break;
+        case 8: out.data_bits = UART_DATA_8_BITS; break;
+        default: return false;
     }
+
+    switch (parity) {
+        case 'N': out.parity = UART_PARITY_DISABLE; break;
+        case 'E': out.parity = UART_PARITY_EVEN; break;
+        case 'O': out.parity = UART_PARITY_ODD; break;
+        default: return false;
+    }
+
+    switch (stop_bits) {
+        case 1: out.stop_bits = UART_STOP_BITS_1; break;
+        case 2: out.stop_bits = UART_STOP_BITS_2; break;
+        default: return false;
+    }
+
+    return true;
 }
 
 } // namespace
@@ -90,27 +91,52 @@ extern "C" bool SCI_SERIAL_ApplyConfig(const uint32_t baud,
         return true;
     }
 
-    if (s_sci_ready) {
-        s_sci_serial.flush();
-        s_sci_serial.end();
+    uart_config_t cfg{};
+    if (!buildUartConfig(baud, data_bits, parity, stop_bits, cfg)) {
+        return false;
+    }
+
+    if (s_sci_driver_installed) {
+        // Reinstalling lets us change parity/stop-bits/data-bits cleanly;
+        // uart_param_config alone is sufficient for baud-only changes but a
+        // full reinstall keeps the code path uniform.
+        uart_driver_delete(kSciPort);
+        s_sci_driver_installed = false;
         s_sci_ready = false;
     }
 
-    s_sci_serial.setRxBufferSize(512);
-    s_sci_serial.begin(baud, serialConfig(data_bits, parity, stop_bits), NRL_PIN_SCI_RX, NRL_PIN_SCI_TX);
-    s_sci_serial.setTimeout(0);
+    if (uart_driver_install(kSciPort, kSciRxBufBytes, /*tx_buf=*/0,
+                            /*queue_size=*/0, /*event_queue=*/nullptr,
+                            /*intr_alloc_flags=*/0) != ESP_OK) {
+        return false;
+    }
+    s_sci_driver_installed = true;
+
+    if (uart_param_config(kSciPort, &cfg) != ESP_OK) {
+        uart_driver_delete(kSciPort);
+        s_sci_driver_installed = false;
+        return false;
+    }
+
+    if (uart_set_pin(kSciPort, NRL_PIN_SCI_TX, NRL_PIN_SCI_RX,
+                     UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
+        uart_driver_delete(kSciPort);
+        s_sci_driver_installed = false;
+        return false;
+    }
+
     s_sci_baud = baud;
     s_sci_data_bits = data_bits;
     s_sci_parity = parity;
     s_sci_stop_bits = stop_bits;
     s_sci_ready = true;
-    Serial.printf("[SCI] ready: %lu,%u,%c,%u rx=%d tx=%d\n",
-                  static_cast<unsigned long>(baud),
-                  static_cast<unsigned>(data_bits),
-                  parity,
-                  static_cast<unsigned>(stop_bits),
-                  NRL_PIN_SCI_RX,
-                  NRL_PIN_SCI_TX);
+    ESP_LOGI(TAG, "ready: %lu,%u,%c,%u rx=%d tx=%d",
+             static_cast<unsigned long>(baud),
+             static_cast<unsigned>(data_bits),
+             parity,
+             static_cast<unsigned>(stop_bits),
+             NRL_PIN_SCI_RX,
+             NRL_PIN_SCI_TX);
     return true;
 }
 
@@ -119,7 +145,11 @@ extern "C" int SCI_SERIAL_Available(void)
     if (!SCI_SERIAL_Init()) {
         return 0;
     }
-    return s_sci_serial.available();
+    size_t buffered = 0;
+    if (uart_get_buffered_data_len(kSciPort, &buffered) != ESP_OK) {
+        return 0;
+    }
+    return static_cast<int>(buffered);
 }
 
 extern "C" size_t SCI_SERIAL_Read(uint8_t *buffer, const size_t buffer_size)
@@ -128,15 +158,10 @@ extern "C" size_t SCI_SERIAL_Read(uint8_t *buffer, const size_t buffer_size)
         return 0u;
     }
 
-    size_t read = 0u;
-    while (read < buffer_size && s_sci_serial.available() > 0) {
-        const int value = s_sci_serial.read();
-        if (value < 0) {
-            break;
-        }
-        buffer[read++] = static_cast<uint8_t>(value);
-    }
-    return read;
+    // Non-blocking read (timeout=0) matches the original Serial.setTimeout(0)
+    // behavior: return whatever is available right now.
+    const int got = uart_read_bytes(kSciPort, buffer, buffer_size, 0);
+    return (got > 0) ? static_cast<size_t>(got) : 0u;
 }
 
 extern "C" size_t SCI_SERIAL_Write(const uint8_t *data, const size_t data_size)
@@ -144,5 +169,6 @@ extern "C" size_t SCI_SERIAL_Write(const uint8_t *data, const size_t data_size)
     if (data == nullptr || data_size == 0u || !SCI_SERIAL_Init()) {
         return 0u;
     }
-    return s_sci_serial.write(data, data_size);
+    const int wrote = uart_write_bytes(kSciPort, reinterpret_cast<const char *>(data), data_size);
+    return (wrote > 0) ? static_cast<size_t>(wrote) : 0u;
 }

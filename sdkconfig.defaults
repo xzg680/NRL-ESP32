@@ -6,46 +6,34 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-gezipai.csv"
 CONFIG_PARTITION_TABLE_FILENAME="part-gezipai.csv"
-CONFIG_AUTOSTART_ARDUINO=y
-CONFIG_ARDUINO_SELECTIVE_COMPILATION=y
-CONFIG_ARDUINO_SELECTIVE_Network=y
-CONFIG_ARDUINO_SELECTIVE_WiFi=y
-CONFIG_ARDUINO_SELECTIVE_BLE=y
-CONFIG_ARDUINO_SELECTIVE_DNSServer=y
-CONFIG_ARDUINO_SELECTIVE_WebServer=y
-CONFIG_ARDUINO_SELECTIVE_Update=y
-CONFIG_ARDUINO_SELECTIVE_FS=y
-CONFIG_ARDUINO_SELECTIVE_AsyncUDP=y
-CONFIG_ARDUINO_SELECTIVE_HTTPClient=y
-CONFIG_ARDUINO_SELECTIVE_NetworkClientSecure=y
-# CONFIG_ARDUINO_SELECTIVE_ESP_SR is not set
-# CONFIG_ARDUINO_SELECTIVE_Zigbee is not set
-# CONFIG_ARDUINO_SELECTIVE_SD is not set
-# CONFIG_ARDUINO_SELECTIVE_SD_MMC is not set
-# CONFIG_ARDUINO_SELECTIVE_SPIFFS is not set
-# CONFIG_ARDUINO_SELECTIVE_FFat is not set
-# CONFIG_ARDUINO_SELECTIVE_LittleFS is not set
-# CONFIG_ARDUINO_SELECTIVE_Ethernet is not set
-# CONFIG_ARDUINO_SELECTIVE_PPP is not set
-# CONFIG_ARDUINO_SELECTIVE_ArduinoOTA is not set
-# CONFIG_ARDUINO_SELECTIVE_ESPmDNS is not set
-# CONFIG_ARDUINO_SELECTIVE_Matter is not set
-# CONFIG_ARDUINO_SELECTIVE_NetBIOS is not set
-# CONFIG_ARDUINO_SELECTIVE_WiFiProv is not set
-# CONFIG_ARDUINO_SELECTIVE_BluetoothSerial is not set
-# CONFIG_ARDUINO_SELECTIVE_SimpleBLE is not set
-# CONFIG_ARDUINO_SELECTIVE_RainMaker is not set
-# CONFIG_ARDUINO_SELECTIVE_OpenThread is not set
-# CONFIG_ARDUINO_SELECTIVE_Insights is not set
+# --- Console ---
+# Route stdio + ESP_LOG over the built-in USB-Serial-JTAG bridge so the host
+# PC keeps seeing a CDC serial port (matches the prior ARDUINO_USB_MODE=1
+# behaviour). src/lib/nrl_usb_console.cpp uses the same driver for AT-command
+# I/O.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# --- Main task stack ---
+# IDF's default main-task stack (3584 B) is too small for our boot path:
+# initApp() opens the WiFi/HTTPD/NimBLE/LVGL stacks back-to-back. Match
+# arduino-esp32's old CONFIG_ARDUINO_LOOP_STACK_SIZE=8192 and a bit more.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# --- Bluetooth (NimBLE host) ---
+# Phase 3 of the Arduino-to-pure-IDF migration: src/lib/ble_config.cpp uses
+# esp-nimble-cpp directly instead of arduino-esp32's Bluedroid-backed wrapper.
+# Bluedroid and NimBLE are mutually exclusive; NimBLE is ~50KB smaller for the
+# peripheral profile we need.
 CONFIG_BT_ENABLED=y
-CONFIG_BT_BLUEDROID_ENABLED=y
-# CONFIG_BT_NIMBLE_ENABLED is not set
 CONFIG_BT_CONTROLLER_ENABLED=y
-CONFIG_BLUEDROID_ENABLED=y
-CONFIG_GATTS_ENABLE=y
-CONFIG_GATTC_ENABLE=y
-CONFIG_BLE_SMP_ENABLE=y
-CONFIG_SMP_ENABLE=y
+# CONFIG_BT_BLUEDROID_ENABLED is not set
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+# CONFIG_BT_NIMBLE_ROLE_CENTRAL is not set
+# CONFIG_BT_NIMBLE_ROLE_OBSERVER is not set
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_PINNED_TO_CORE_0=y
 # CONFIG_BT_BLE_50_FEATURES_SUPPORTED is not set
 CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
 CONFIG_BT_BLE_42_ADV_EN=y
@@ -72,6 +60,13 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 # CONFIG_ESP32S3_DEFAULT_CPU_FREQ_160 is not set
 CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
 CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ=240
+
+# --- HTTP config portal ---
+# Browser POSTs often carry User-Agent/Sec-Fetch/etc. headers larger than the
+# IDF httpd defaults. Keep the portal tolerant of normal mobile/desktop
+# browsers while still bounding parser buffers.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+CONFIG_HTTPD_MAX_URI_LEN=1024
 
 # --- LVGL (格子派 ST7789 LCD UI; see src/app/driver/display.cpp) ---
 # LVGL is vendored at components/lvgl and driven straight from the Arduino

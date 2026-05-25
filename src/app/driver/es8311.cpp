@@ -4,10 +4,12 @@
 #include "driver/es7210.h"
 #include "driver/i2c1.h"
 
-#include <Arduino.h>
+#include <driver/gpio.h>
 #include <driver/i2s_common.h>
 #include <driver/i2s_std.h>
 #include <esp_err.h>
+#include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -21,6 +23,8 @@
 #include "aec/aec_processor.h"
 #include "driver/external_radio.h"
 #endif
+
+static const char *TAG = "ES8311";
 
 #ifndef ES8311_FORCE_DAC_SILENCE
 #define ES8311_FORCE_DAC_SILENCE 0
@@ -325,11 +329,11 @@ static bool es8311_write_reg(uint8_t reg, uint8_t value) {
         if (ok) {
             return true;
         }
-        Serial.printf("[ES8311] I2C write failed: reg=0x%02X value=0x%02X attempt=%d\n",
+        ESP_LOGI(TAG,"[ES8311] I2C write failed: reg=0x%02X value=0x%02X attempt=%d\n",
                       static_cast<unsigned>(reg),
                       static_cast<unsigned>(value),
                       attempt + 1);
-        delay(1);
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     return false;
 }
@@ -363,7 +367,7 @@ static bool es8311_read_reg(const uint8_t reg, uint8_t *value) {
         if (ok) {
             return true;
         }
-        delay(1);
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     return false;
@@ -614,80 +618,80 @@ static bool es8311_configure_codec(void) {
 
     if (es8311_read_reg(ES8311_REG0D_SYSTEM, &regv) && regv != 0xFA) {
         if (!es8311_write_reg(ES8311_REG0D_SYSTEM, 0xFA)) {
-            Serial.println("[ES8311] REG0D pre-power failed");
+            ESP_LOGI(TAG,"[ES8311] REG0D pre-power failed");
             return false;
         }
     }
 
     if (!es8311_write_reg(ES8311_REG44_GPIO, 0x08)) {
-        Serial.println("[ES8311] REG44 (1) failed");
+        ESP_LOGI(TAG,"[ES8311] REG44 (1) failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG44_GPIO, 0x08)) {
-        Serial.println("[ES8311] REG44 (2) failed");
+        ESP_LOGI(TAG,"[ES8311] REG44 (2) failed");
         return false;
     }
 
     if (!es8311_write_reg(ES8311_REG01_CLK_MANAGER, 0x30)) {
-        Serial.println("[ES8311] REG01 init failed");
+        ESP_LOGI(TAG,"[ES8311] REG01 init failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG02_CLK_MANAGER, 0x00)) {
-        Serial.println("[ES8311] REG02 init failed");
+        ESP_LOGI(TAG,"[ES8311] REG02 init failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG03_CLK_MANAGER, 0x10)) {
-        Serial.println("[ES8311] REG03 init failed");
+        ESP_LOGI(TAG,"[ES8311] REG03 init failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG16_ADC, es8311_adc_reg16())) {
-        Serial.println("[ES8311] REG16 init failed");
+        ESP_LOGI(TAG,"[ES8311] REG16 init failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG04_CLK_MANAGER, 0x10)) {
-        Serial.println("[ES8311] REG04 init failed");
+        ESP_LOGI(TAG,"[ES8311] REG04 init failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG05_CLK_MANAGER, 0x00)) {
-        Serial.println("[ES8311] REG05 init failed");
+        ESP_LOGI(TAG,"[ES8311] REG05 init failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG0B_SYSTEM, 0x00)) {
-        Serial.println("[ES8311] REG0B failed");
+        ESP_LOGI(TAG,"[ES8311] REG0B failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG0C_SYSTEM, 0x00)) {
-        Serial.println("[ES8311] REG0C failed");
+        ESP_LOGI(TAG,"[ES8311] REG0C failed");
         return false;
     }
     // Analog bias (Espressif known-good values)
     if (!es8311_write_reg(ES8311_REG10_SYSTEM, 0x1F)) {
-        Serial.println("[ES8311] REG10 bias config failed");
+        ESP_LOGI(TAG,"[ES8311] REG10 bias config failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG11_SYSTEM, 0x7F)) {
-        Serial.println("[ES8311] REG11 bias config failed");
+        ESP_LOGI(TAG,"[ES8311] REG11 bias config failed");
         return false;
     }
     // Let the bias generators settle before powering up the rest of the
     // analog block. Without this delay the ADC sees transient bias and
     // produces an audible "settling" hiss for the first second.
-    delay(40);
+    vTaskDelay(pdMS_TO_TICKS(40));
 
     if (!es8311_write_reg(ES8311_REG00_RESET, 0x80)) {
-        Serial.println("[ES8311] REG00 reset/slave failed");
+        ESP_LOGI(TAG,"[ES8311] REG00 reset/slave failed");
         return false;
     }
 
     if (!es8311_write_reg(ES8311_REG01_CLK_MANAGER, 0x3F)) {
-        Serial.println("[ES8311] REG01 use_mclk failed");
+        ESP_LOGI(TAG,"[ES8311] REG01 use_mclk failed");
         return false;
     }
 
     if (es8311_read_reg(ES8311_REG06_CLK_MANAGER, &regv)) {
         regv = static_cast<uint8_t>(regv & ~0x20u);
         if (!es8311_write_reg(ES8311_REG06_CLK_MANAGER, regv)) {
-            Serial.println("[ES8311] REG06 sclk polarity failed");
+            ESP_LOGI(TAG,"[ES8311] REG06 sclk polarity failed");
             return false;
         }
     }
@@ -706,25 +710,25 @@ static bool es8311_configure_codec(void) {
     };
 
     if (!es8311_config_clock(clock_cfg)) {
-        Serial.println("[ES8311] clock configuration failed");
+        ESP_LOGI(TAG,"[ES8311] clock configuration failed");
         return false;
     }
 
     if (!es8311_config_i2s_format(16)) {
-        Serial.println("[ES8311] I2S format configuration failed");
+        ESP_LOGI(TAG,"[ES8311] I2S format configuration failed");
         return false;
     }
 
     if (!es8311_write_reg(ES8311_REG13_SYSTEM, es8311_output_drive_reg())) {
-        Serial.println("[ES8311] REG13 failed");
+        ESP_LOGI(TAG,"[ES8311] REG13 failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG1B_ADC, es8311_adc_reg1b())) {
-        Serial.println("[ES8311] REG1B (ADC HPF) failed");
+        ESP_LOGI(TAG,"[ES8311] REG1B (ADC HPF) failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG1C_ADC, es8311_adc_reg1c())) {
-        Serial.println("[ES8311] REG1C (ADC EQ) failed");
+        ESP_LOGI(TAG,"[ES8311] REG1C (ADC EQ) failed");
         return false;
     }
     // REG44 ADCDAT_SEL (bits 6:4): 0 = "ADC + ADC" duplicates the mic on
@@ -736,16 +740,16 @@ static bool es8311_configure_codec(void) {
     // crosstalk. Keep bit3 (I2C_WL, "internal use") set, matching the
     // earlier 0x08 writes from the init sequence.
     if (!es8311_write_reg(ES8311_REG44_GPIO, 0x08)) {
-        Serial.println("[ES8311] REG44 final failed");
+        ESP_LOGI(TAG,"[ES8311] REG44 final failed");
         return false;
     }
 
     if (!es8311_write_reg(ES8311_REG00_RESET, 0x80)) {
-        Serial.println("[ES8311] REG00 start failed");
+        ESP_LOGI(TAG,"[ES8311] REG00 start failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG01_CLK_MANAGER, 0x3F)) {
-        Serial.println("[ES8311] REG01 start clock failed");
+        ESP_LOGI(TAG,"[ES8311] REG01 start clock failed");
         return false;
     }
 
@@ -753,61 +757,61 @@ static bool es8311_configure_codec(void) {
     uint8_t adc_iface = 0u;
     if (!es8311_read_reg(ES8311_REG09_SDPIN, &dac_iface) ||
         !es8311_read_reg(ES8311_REG0A_SDPOUT, &adc_iface)) {
-        Serial.println("[ES8311] interface readback failed");
+        ESP_LOGI(TAG,"[ES8311] interface readback failed");
         return false;
     }
     dac_iface = static_cast<uint8_t>(dac_iface & ~0x40u);
     adc_iface = static_cast<uint8_t>(adc_iface & ~0x40u);
     if (!es8311_write_reg(ES8311_REG09_SDPIN, dac_iface) ||
         !es8311_write_reg(ES8311_REG0A_SDPOUT, adc_iface)) {
-        Serial.println("[ES8311] interface enable failed");
+        ESP_LOGI(TAG,"[ES8311] interface enable failed");
         return false;
     }
 
     if (!es8311_write_reg(ES8311_REG17_ADC, s_mic_volume)) {
-        Serial.println("[ES8311] REG17 ADC volume failed");
+        ESP_LOGI(TAG,"[ES8311] REG17 ADC volume failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG0E_SYSTEM, kEs8311PowerUpPgaAdc)) {
-        Serial.println("[ES8311] REG0E power-up PGA/ADC failed");
+        ESP_LOGI(TAG,"[ES8311] REG0E power-up PGA/ADC failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG12_SYSTEM, kEs8311PowerUpDac)) {
-        Serial.println("[ES8311] REG12 enable DAC failed");
+        ESP_LOGI(TAG,"[ES8311] REG12 enable DAC failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG14_SYSTEM, es8311_adc_reg14())) {
-        Serial.println("[ES8311] REG14 analog mic PGA failed");
+        ESP_LOGI(TAG,"[ES8311] REG14 analog mic PGA failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG0D_SYSTEM, kEs8311PowerUpAnalog)) {
-        Serial.println("[ES8311] REG0D power-up analog failed");
+        ESP_LOGI(TAG,"[ES8311] REG0D power-up analog failed");
         return false;
     }
     // VMID needs ~tens of ms to charge up after enabling the analog block.
     // Apply ADC/DAC config after VMID is stable, otherwise the first frames
     // captured by the ADC carry a sliding DC bias that sounds like a
     // low-frequency "thump" plus elevated noise.
-    delay(40);
+    vTaskDelay(pdMS_TO_TICKS(40));
     if (!es8311_apply_adc_config()) {
-        Serial.println("[ES8311] REG15 ADC ramp rate failed");
+        ESP_LOGI(TAG,"[ES8311] REG15 ADC ramp rate failed");
         return false;
     }
     if (!es8311_apply_drc_config() || !es8311_apply_daceq_coefficients()) {
-        Serial.println("[ES8311] DAC DRC/EQ config failed");
+        ESP_LOGI(TAG,"[ES8311] DAC DRC/EQ config failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG45_GP, 0x00)) {
-        Serial.println("[ES8311] REG45 GP control failed");
+        ESP_LOGI(TAG,"[ES8311] REG45 GP control failed");
         return false;
     }
 
     if (!es8311_write_reg(ES8311_REG31_DAC, kEs8311DacUnmute)) {
-        Serial.println("[ES8311] REG31 unmute failed");
+        ESP_LOGI(TAG,"[ES8311] REG31 unmute failed");
         return false;
     }
     if (!es8311_write_reg(ES8311_REG32_DAC, s_line_out_volume)) {
-        Serial.println("[ES8311] REG32 DAC volume failed");
+        ESP_LOGI(TAG,"[ES8311] REG32 DAC volume failed");
         return false;
     }
 
@@ -830,7 +834,7 @@ static bool es8311_configure_codec(void) {
         for (const RegCheck &c : checks) {
             uint8_t v = 0;
             const bool ok = es8311_read_reg(c.reg, &v);
-            Serial.printf("[ES8311] REG%-22s = %s0x%02X (expect 0x%02X)%s\n",
+            ESP_LOGI(TAG,"[ES8311] REG%-22s = %s0x%02X (expect 0x%02X)%s\n",
                           c.name,
                           ok ? "" : "READ-ERR ",
                           static_cast<unsigned>(v),
@@ -881,13 +885,15 @@ static bool i2s_setup(void) {
     }
 
     i2s_chan_config_t channel_config = I2S_CHANNEL_DEFAULT_CONFIG(kI2sPort, I2S_ROLE_MASTER);
-    channel_config.dma_desc_num = 8;
+    // Keep only a few 10 ms DMA frames queued. Larger rings hide scheduling
+    // hiccups by building capture latency that can keep growing under load.
+    channel_config.dma_desc_num = 3;
     channel_config.dma_frame_num = kFrameSamples;
     channel_config.auto_clear_after_cb = true;
 
     esp_err_t err = i2s_new_channel(&channel_config, &s_i2s_tx, &s_i2s_rx);
     if (err != ESP_OK) {
-        Serial.printf("[ES8311] i2s_new_channel failed: err=%d\n", static_cast<int>(err));
+        ESP_LOGI(TAG,"[ES8311] i2s_new_channel failed: err=%d\n", static_cast<int>(err));
         i2s_teardown();
         return false;
     }
@@ -910,35 +916,35 @@ static bool i2s_setup(void) {
 
     err = i2s_channel_init_std_mode(s_i2s_tx, &std_config);
     if (err != ESP_OK) {
-        Serial.printf("[ES8311] i2s tx std init failed: err=%d\n", static_cast<int>(err));
+        ESP_LOGI(TAG,"[ES8311] i2s tx std init failed: err=%d\n", static_cast<int>(err));
         i2s_teardown();
         return false;
     }
 
     err = i2s_channel_init_std_mode(s_i2s_rx, &std_config);
     if (err != ESP_OK) {
-        Serial.printf("[ES8311] i2s rx std init failed: err=%d\n", static_cast<int>(err));
+        ESP_LOGI(TAG,"[ES8311] i2s rx std init failed: err=%d\n", static_cast<int>(err));
         i2s_teardown();
         return false;
     }
 
     err = i2s_channel_enable(s_i2s_tx);
     if (err != ESP_OK) {
-        Serial.printf("[ES8311] i2s tx enable failed: err=%d\n", static_cast<int>(err));
+        ESP_LOGI(TAG,"[ES8311] i2s tx enable failed: err=%d\n", static_cast<int>(err));
         i2s_teardown();
         return false;
     }
 
     err = i2s_channel_enable(s_i2s_rx);
     if (err != ESP_OK) {
-        Serial.printf("[ES8311] i2s rx enable failed: err=%d\n", static_cast<int>(err));
+        ESP_LOGI(TAG,"[ES8311] i2s rx enable failed: err=%d\n", static_cast<int>(err));
         i2s_teardown();
         return false;
     }
 
     s_i2s_ready = true;
     i2s_clear_dma();
-    Serial.printf("[ES8311] i2s std clocks: rate=%dHz bits=%d stereo mclk=%dHz\n",
+    ESP_LOGI(TAG,"[ES8311] i2s std clocks: rate=%dHz bits=%d stereo mclk=%dHz\n",
                   kSampleRate,
                   16,
                   kMclkRate);
@@ -979,7 +985,7 @@ static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
     // RIGHT has the energy instead, the slot mapping / I2S format is wrong.
     {
         static uint32_t last_dump_ms = 0;
-        const uint32_t now = millis();
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
         if ((now - last_dump_ms) >= 5000u) {
             last_dump_ms = now;
             int32_t left_peak = 0;
@@ -990,7 +996,7 @@ static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
                 if (l > left_peak) { left_peak = l; }
                 if (r > right_peak) { right_peak = r; }
             }
-            Serial.printf("[ES8311][MIC] raw I2S slots: LEFT peak=%ld RIGHT peak=%ld | "
+            ESP_LOGI(TAG,"[ES8311][MIC] raw I2S slots: LEFT peak=%ld RIGHT peak=%ld | "
                           "raw[0..7]=%d,%d %d,%d %d,%d %d,%d\n",
                           static_cast<long>(left_peak),
                           static_cast<long>(right_peak),
@@ -1193,7 +1199,7 @@ static void es8311_log_mic_frame_stats(const int16_t *frame) {
     static uint32_t window_samples = 0;
     static uint32_t window_nonzero = 0;
 
-    const uint32_t now = millis();
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (window_start_ms == 0) {
         window_start_ms = now;
         window_min = frame[0];
@@ -1217,7 +1223,7 @@ static void es8311_log_mic_frame_stats(const int16_t *frame) {
     if ((now - window_start_ms) >= 1000u && window_samples > 0) {
         const uint32_t rms = static_cast<uint32_t>(
             sqrt(static_cast<double>(window_sum_sq) / static_cast<double>(window_samples)));
-        Serial.printf("[ES8311][MIC] frames=%lu samples=%lu peak=%d rms=%lu "
+        ESP_LOGI(TAG,"[ES8311][MIC] frames=%lu samples=%lu peak=%d rms=%lu "
                       "min=%d max=%d nonzero=%lu/%lu%s\n",
                       static_cast<unsigned long>(frame_count),
                       static_cast<unsigned long>(window_samples),
@@ -1273,7 +1279,7 @@ static void es8311_passthrough_task(void *) {
         const bool processed_route = AEC_IsRuntimeActive();
         const bool needs_ref = afe_ready && AEC_UsesReference();
         if (!i2s_read_frame(frame, needs_ref ? ref_frame : nullptr)) {
-            Serial.println("[ES8311][MIC] i2s_read_frame failed");
+            ESP_LOGI(TAG,"[ES8311][MIC] i2s_read_frame failed");
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
@@ -1306,7 +1312,7 @@ static void es8311_passthrough_task(void *) {
         }
 #else
         if (!i2s_read_frame(frame)) {
-            Serial.println("[ES8311][MIC] i2s_read_frame failed");
+            ESP_LOGI(TAG,"[ES8311][MIC] i2s_read_frame failed");
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
@@ -1332,7 +1338,7 @@ static void es8311_passthrough_task(void *) {
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
-        vTaskDelay(1);
+        taskYIELD();
     }
 
     i2s_clear_dma();
@@ -1350,13 +1356,19 @@ static bool es8311_start_passthrough(void) {
     }
 
     s_passthrough_running = true;
-    if (xTaskCreate(es8311_passthrough_task,
-                    "es8311_passthrough",
-                    // 8 KB: the AEC build calls into esp-sr feed() from here.
-                    8192,
-                    nullptr,
-                    3,
-                    &s_passthrough_task) != pdPASS) {
+    // Stack lives in PSRAM (MALLOC_CAP_SPIRAM): 8 KB is too big to find as a
+    // contiguous block in internal SRAM once AEC_Init has done its ~50 KB of
+    // mallocs just above. The passthrough task only touches DMA buffers,
+    // I2S/I2C drivers, ES8311 register state, AEC feed/output queues, and the
+    // (already PSRAM-resident) G.711 encode LUT -- none of which require
+    // stack access while flash cache is disabled, so PSRAM stack is safe.
+    if (xTaskCreateWithCaps(es8311_passthrough_task,
+                            "es8311_passthrough",
+                            8192,
+                            nullptr,
+                            5,
+                            &s_passthrough_task,
+                            MALLOC_CAP_SPIRAM) != pdPASS) {
         s_passthrough_running = false;
         s_passthrough_task = nullptr;
         return false;
@@ -1391,9 +1403,10 @@ bool ES8311_Init(void) {
 
     // Enable power amplifier
     if (kPinPaEn >= 0) {
-        pinMode(kPinPaEn, OUTPUT);
-        digitalWrite(kPinPaEn, HIGH);
-        Serial.printf("[ES8311] PA enable pin %d set HIGH\n", kPinPaEn);
+        gpio_reset_pin((gpio_num_t)kPinPaEn);
+        gpio_set_direction((gpio_num_t)kPinPaEn, GPIO_MODE_OUTPUT);
+        gpio_set_level((gpio_num_t)kPinPaEn, 1);
+        ESP_LOGI(TAG,"[ES8311] PA enable pin %d set HIGH\n", kPinPaEn);
     }
 
     I2C_Init();
@@ -1403,13 +1416,13 @@ bool ES8311_Init(void) {
     // proper VMID and output common-mode voltage.
     if (!i2s_setup()) {
         s_es8311_ready = false;
-        Serial.println("[ES8311] initialization failed during I2S setup");
+        ESP_LOGI(TAG,"[ES8311] initialization failed during I2S setup");
         return false;
     }
 
     if (!es8311_configure_codec()) {
         s_es8311_ready = false;
-        Serial.println("[ES8311] initialization failed during codec configuration");
+        ESP_LOGI(TAG,"[ES8311] initialization failed during codec configuration");
         return false;
     }
 
@@ -1421,7 +1434,7 @@ bool ES8311_Init(void) {
         const bool ok_fd = es8311_read_reg(0xFDU, &reg_fd);
         const bool ok_fe = es8311_read_reg(0xFEU, &reg_fe);
         if (!ok_fd || !ok_fe || reg_fd != 0x83 || reg_fe != 0x11) {
-            Serial.printf("[ES8311] WARNING chip id mismatch: fd=%s0x%02X (expect 0x83) fe=%s0x%02X (expect 0x11)\n",
+            ESP_LOGI(TAG,"[ES8311] WARNING chip id mismatch: fd=%s0x%02X (expect 0x83) fe=%s0x%02X (expect 0x11)\n",
                           ok_fd ? "" : "ERR:", static_cast<unsigned>(reg_fd),
                           ok_fe ? "" : "ERR:", static_cast<unsigned>(reg_fe));
         }
@@ -1445,29 +1458,29 @@ bool ES8311_Init(void) {
     AEC_SetOutputCallback(es8311_aec_output, nullptr);
     if (AEC_Init(afe_has_aec, afe_has_ai_noise)) {
         AEC_SetRuntimeEnabled(runtime_aec, runtime_ai_noise);
-        Serial.printf("[ES8311] esp-sr resident: aec_cap=%u ai_cap=%u route_aec=%u route_ai=%u\n",
+        ESP_LOGI(TAG,"[ES8311] esp-sr resident: aec_cap=%u ai_cap=%u route_aec=%u route_ai=%u\n",
                       afe_has_aec ? 1u : 0u,
                       afe_has_ai_noise ? 1u : 0u,
                       runtime_aec ? 1u : 0u,
                       runtime_ai_noise ? 1u : 0u);
     } else {
-        Serial.println("[ES8311] esp-sr resident init failed -- mic uplink falls back to raw");
+        ESP_LOGI(TAG,"[ES8311] esp-sr resident init failed -- mic uplink falls back to raw");
     }
 #endif
 
     if (!es8311_start_passthrough()) {
         s_es8311_ready = false;
-        Serial.println("[ES8311] initialization failed starting passthrough task");
+        ESP_LOGI(TAG,"[ES8311] initialization failed starting passthrough task");
         return false;
     }
 
     s_es8311_ready = true;
 #if ES8311_FORCE_DAC_SILENCE
-    Serial.println("[ES8311] *** FORCE_DAC_SILENCE=1 (DAC always writes zeros) ***");
+    ESP_LOGI(TAG,"[ES8311] *** FORCE_DAC_SILENCE=1 (DAC always writes zeros) ***");
 #else
-    Serial.println("[ES8311] FORCE_DAC_SILENCE=0 (normal DAC writes)");
+    ESP_LOGI(TAG,"[ES8311] FORCE_DAC_SILENCE=0 (normal DAC writes)");
 #endif
-    Serial.printf("[ES8311] ready: i2c=0x%02X rate=%dHz bits=%d stereo_slots=2 mclk=%d bclk=%d esp_dout=%d lrclk=%d esp_din=%d\n",
+    ESP_LOGI(TAG,"[ES8311] ready: i2c=0x%02X rate=%dHz bits=%d stereo_slots=2 mclk=%d bclk=%d esp_dout=%d lrclk=%d esp_din=%d\n",
                   static_cast<unsigned>(kEs8311Addr),
                   kSampleRate,
                   16,
@@ -1492,7 +1505,7 @@ bool ES8311_SetAudioMode(const ES8311_AudioMode_t mode) {
                                        es8311_output_drive_reg(),
                                        kEs8311DacUnmute,
                                        s_line_out_volume)) {
-        Serial.println("[ES8311] failed to configure DAC output path");
+        ESP_LOGI(TAG,"[ES8311] failed to configure DAC output path");
         return false;
     }
 
@@ -1522,10 +1535,10 @@ size_t ES8311_QueueOutputSamples(const int16_t *samples, size_t sample_count) {
     }
 
     const size_t written = output_queue_push(samples, sample_count);
-    const uint32_t now = millis();
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (written != sample_count && (now - s_last_output_queue_log_ms) >= 1000u) {
         s_last_output_queue_log_ms = now;
-        Serial.printf("[ES8311] queue short write samples=%u written=%u\n",
+        ESP_LOGI(TAG,"[ES8311] queue short write samples=%u written=%u\n",
                       static_cast<unsigned>(sample_count),
                       static_cast<unsigned>(written));
     }
@@ -1620,7 +1633,7 @@ bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
     s_adceq_b2 = adceq_b2 & kAdcEqCoefficientMask;
 
     if (!s_es8311_ready) {
-        Serial.printf("[ES8311] audio config pending: mic=0x%02X line_out=0x%02X hp_drive=%u drc=%u,%u,%u,%u ramp=%u eq_bypass=%u eq=%lu,%lu,%lu\n",
+        ESP_LOGI(TAG,"[ES8311] audio config pending: mic=0x%02X line_out=0x%02X hp_drive=%u drc=%u,%u,%u,%u ramp=%u eq_bypass=%u eq=%lu,%lu,%lu\n",
                       static_cast<unsigned>(s_mic_volume),
                       static_cast<unsigned>(s_line_out_volume),
                       s_hp_drive_enabled ? 1u : 0u,
@@ -1646,7 +1659,7 @@ bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,
         es8311_apply_daceq_coefficients() &&
         es8311_apply_adc_config();
     if (!ok) {
-        Serial.printf("[ES8311] audio config apply failed: mic=0x%02X line_out=0x%02X hp_drive=%u drc=%u,%u,%u,%u ramp=%u eq_bypass=%u eq=%lu,%lu,%lu\n",
+        ESP_LOGI(TAG,"[ES8311] audio config apply failed: mic=0x%02X line_out=0x%02X hp_drive=%u drc=%u,%u,%u,%u ramp=%u eq_bypass=%u eq=%lu,%lu,%lu\n",
                       static_cast<unsigned>(s_mic_volume),
                       static_cast<unsigned>(s_line_out_volume),
                       s_hp_drive_enabled ? 1u : 0u,
@@ -1675,7 +1688,7 @@ void ES8311_SetMicHpfEnabled(const bool enabled) {
     if (s_mic_hpf_enabled != enabled) {
         s_mic_hpf_enabled = enabled;
         mic_hpf_reset();
-        Serial.printf("[ES8311] mic HPF %s (4th-order, fc~=200Hz @ fs=%dHz, s1=%.6f/%.6f/%.6f/%.6f/%.6f s2=%.6f/%.6f/%.6f/%.6f/%.6f)\n",
+        ESP_LOGI(TAG,"[ES8311] mic HPF %s (4th-order, fc~=200Hz @ fs=%dHz, s1=%.6f/%.6f/%.6f/%.6f/%.6f s2=%.6f/%.6f/%.6f/%.6f/%.6f)\n",
                       enabled ? "ENABLED" : "disabled",
                       kSampleRate,
                       static_cast<double>(kMicHpf1B0),

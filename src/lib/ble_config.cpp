@@ -5,10 +5,23 @@
 
 #include "../app/driver/external_radio.h"
 
-#include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
+#include <NimBLEDevice.h>
+
+#include <esp_log.h>
+#include <esp_system.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+#include <ctype.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <string>
+
+static const char *TAG = "BLECFG";
 
 namespace {
 
@@ -18,9 +31,9 @@ constexpr char kRxUuid[] = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kTxUuid[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr size_t kCommandBufferSize = 160;
 
-BLEServer *s_server = nullptr;
-BLECharacteristic *s_tx = nullptr;
-BLECharacteristic *s_rx = nullptr;
+NimBLEServer *s_server = nullptr;
+NimBLECharacteristic *s_tx = nullptr;
+NimBLECharacteristic *s_rx = nullptr;
 bool s_initialized = false;
 bool s_client_connected = false;
 bool s_advertising = false;
@@ -29,18 +42,23 @@ size_t s_command_size = 0;
 bool s_reboot_pending = false;
 uint32_t s_reboot_at_ms = 0;
 
+static inline uint32_t nowMsBle()
+{
+    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+}
+
 static void sendLine(const char *line)
 {
     if (line == nullptr) {
         return;
     }
 
-    Serial.printf("[BLECFG] %s\n", line);
+    ESP_LOGI(TAG, "%s", line);
     if (s_tx == nullptr || !s_client_connected) {
         return;
     }
 
-    s_tx->setValue(const_cast<uint8_t *>(reinterpret_cast<const uint8_t *>(line)), strlen(line));
+    s_tx->setValue(reinterpret_cast<const uint8_t *>(line), strlen(line));
     s_tx->notify();
 }
 
@@ -201,7 +219,7 @@ static void handleCommand(char *command)
         return;
     }
 
-    Serial.printf("[BLECFG] rx: %s\n", command);
+    ESP_LOGI(TAG, "rx: %s", command);
 
     if (strcasecmp(command, "HELP") == 0 || strcmp(command, "?") == 0) {
         sendHelp();
@@ -236,7 +254,7 @@ static void handleCommand(char *command)
 
     if (strcasecmp(command, "REBOOT") == 0) {
         s_reboot_pending = true;
-        s_reboot_at_ms = millis() + 500;
+        s_reboot_at_ms = nowMsBle() + 500u;
         sendLine("OK REBOOT");
         return;
     }
@@ -303,37 +321,33 @@ static void appendCommandData(const uint8_t *data, const size_t size)
     }
 }
 
-class ConfigServerCallbacks final : public BLEServerCallbacks {
-    void onConnect(BLEServer *) override
+class ConfigServerCallbacks final : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer * /*pServer*/, NimBLEConnInfo & /*connInfo*/) override
     {
         s_client_connected = true;
         s_advertising = false;
-        Serial.println("[BLECFG] client connected");
+        ESP_LOGI(TAG, "client connected");
         sendLine(NRL_FIRMWARE_BANNER " BLE config ready. Send HELP.");
     }
 
-    void onDisconnect(BLEServer *server) override
+    void onDisconnect(NimBLEServer * /*pServer*/, NimBLEConnInfo & /*connInfo*/, int reason) override
     {
         s_client_connected = false;
         s_advertising = false;
-        Serial.println("[BLECFG] client disconnected");
-        if (server != nullptr) {
-            server->getAdvertising()->start();
-            s_advertising = true;
-        }
+        ESP_LOGI(TAG, "client disconnected reason=%d", reason);
+        // NimBLE doesn't auto-restart advertising; kick it off explicitly via
+        // the BLEConfig_Poll() path (s_advertising = false triggers restart).
     }
 };
 
-class ConfigRxCallbacks final : public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic *characteristic) override
+class ConfigRxCallbacks final : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *characteristic, NimBLEConnInfo & /*connInfo*/) override
     {
         if (characteristic == nullptr) {
             return;
         }
-
-        // arduino-esp32 3.x: BLECharacteristic::getValue() returns Arduino String.
-        const String value = characteristic->getValue();
-        appendCommandData(reinterpret_cast<const uint8_t *>(value.c_str()), value.length());
+        const NimBLEAttValue value = characteristic->getValue();
+        appendCommandData(value.data(), value.size());
     }
 };
 
@@ -345,39 +359,44 @@ bool BLEConfig_Init(void)
         return true;
     }
 
-    BLEDevice::init(kBleDeviceName);
-    s_server = BLEDevice::createServer();
+    NimBLEDevice::init(kBleDeviceName);
+    // The shared BLE/WiFi radio cannot afford to lose modem-sleep cycles; keep
+    // the default TX power. Larger advertising payloads cap out around 31 B
+    // anyway for legacy 4.2 advertising.
+
+    s_server = NimBLEDevice::createServer();
     if (s_server == nullptr) {
-        Serial.println("[BLECFG] server create failed");
+        ESP_LOGE(TAG, "server create failed");
         return false;
     }
-
     s_server->setCallbacks(new ConfigServerCallbacks());
-    BLEService *service = s_server->createService(kServiceUuid);
+
+    NimBLEService *service = s_server->createService(kServiceUuid);
     if (service == nullptr) {
-        Serial.println("[BLECFG] service create failed");
+        ESP_LOGE(TAG, "service create failed");
         return false;
     }
 
-    s_tx = service->createCharacteristic(kTxUuid, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
-    s_rx = service->createCharacteristic(kRxUuid, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    s_tx = service->createCharacteristic(kTxUuid,
+                                         NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ);
+    s_rx = service->createCharacteristic(kRxUuid,
+                                         NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     if (s_tx == nullptr || s_rx == nullptr) {
-        Serial.println("[BLECFG] characteristic create failed");
+        ESP_LOGE(TAG, "characteristic create failed");
         return false;
     }
 
     s_rx->setCallbacks(new ConfigRxCallbacks());
     s_tx->setValue(NRL_FIRMWARE_BANNER " BLE config");
 
-    service->start();
-    BLEAdvertising *advertising = s_server->getAdvertising();
+    NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
     advertising->addServiceUUID(kServiceUuid);
-    advertising->setScanResponse(true);
+    advertising->enableScanResponse(true);
     advertising->start();
 
     s_initialized = true;
     s_advertising = true;
-    Serial.printf("[BLECFG] advertising as %s\n", kBleDeviceName);
+    ESP_LOGI(TAG, "advertising as %s", kBleDeviceName);
     return true;
 }
 
@@ -387,14 +406,14 @@ void BLEConfig_Poll(void)
         return;
     }
 
-    if (!s_client_connected && !s_advertising && s_server != nullptr) {
-        s_server->getAdvertising()->start();
+    if (!s_client_connected && !s_advertising) {
+        NimBLEDevice::startAdvertising();
         s_advertising = true;
     }
 
-    if (s_reboot_pending && static_cast<int32_t>(millis() - s_reboot_at_ms) >= 0) {
-        Serial.println("[BLECFG] reboot now");
-        Serial.flush();
-        ESP.restart();
+    if (s_reboot_pending && static_cast<int32_t>(nowMsBle() - s_reboot_at_ms) >= 0) {
+        ESP_LOGI(TAG, "reboot now");
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
     }
 }

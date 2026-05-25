@@ -2,7 +2,10 @@
 
 #include "nrl_at_commands.h"
 #include "nrl_audio_config.h"
-#include "wifi.h"
+#include "nrl_g711.h"
+#include "nrl_net_compat.h"
+#include "nrl_usb_console.h"
+#include "nrl_wifi.h"
 #include "wifi_config_portal.h"
 
 #include "driver/es8311.h"
@@ -10,17 +13,24 @@
 #include "driver/sci_serial.h"
 #include "driver/status_io.h"
 
-#include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
+#include <esp_log.h>
+#include <esp_system.h>
+#include <esp_timer.h>
+#include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <lwip/netdb.h>
+#include <lwip/sockets.h>
 
+#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+static const char *TAG = "NRL";
 
 namespace {
 
@@ -42,7 +52,7 @@ constexpr int kDownlinkPcmGain = 1;
 constexpr uint32_t kSciPollIntervalMs = 20u;
 constexpr uint32_t kSciFlushIntervalMs = 20u;
 
-WiFiUDP s_udp;
+int s_udp_fd = -1;
 SemaphoreHandle_t s_udp_mutex = nullptr;
 TaskHandle_t s_bridge_task = nullptr;
 bool s_bridge_initialized = false;
@@ -59,13 +69,10 @@ uint32_t s_last_rx_packet_ms = 0u;
 uint32_t s_last_heartbeat_ms = 0u;
 uint32_t s_last_remote_identity_ms = 0u;
 uint32_t s_reboot_at_ms = 0u;
-IPAddress s_server_ip;
-IPAddress s_last_peer_ip;
+uint32_t s_server_ip = 0u;
+uint32_t s_last_peer_ip = 0u;
 uint16_t s_last_peer_port = 0u;
 uint8_t s_cpu_id[4] = {};
-bool s_alaw_tables_ready = false;
-int16_t s_alaw_decode_table[256];
-uint8_t s_alaw_encode_mag_table[4096];
 char s_remote_callsign[7] = {};
 uint8_t s_remote_ssid = 0u;
 // Identity of the last *voice* caller specifically. s_remote_callsign above
@@ -133,99 +140,7 @@ static void updateRemoteIdentity(const uint8_t *packet, const size_t packet_size
         }
     }
     s_remote_ssid = packet[30];
-    s_last_remote_identity_ms = millis();
-}
-
-static uint8_t linearToALawSlow(const int16_t pcm)
-{
-    uint8_t sign = 0u;
-    int16_t ix = 0;
-
-    if (pcm < 0) {
-        sign = 0x80u;
-        ix = static_cast<int16_t>((~pcm) >> 4);
-    } else {
-        ix = static_cast<int16_t>(pcm >> 4);
-    }
-
-    if (ix > 15) {
-        uint8_t iexp = 1u;
-        while (ix > 31) {
-            ix = static_cast<int16_t>(ix >> 1);
-            ++iexp;
-        }
-        ix = static_cast<int16_t>(ix - 16);
-        ix = static_cast<int16_t>(ix + static_cast<int16_t>(iexp << 4));
-    }
-
-    if (sign == 0u) {
-        ix = static_cast<int16_t>(ix | 0x80);
-    }
-
-    return static_cast<uint8_t>(ix) ^ 0x55u;
-}
-
-static int16_t aLawToLinearSlow(const uint8_t alaw)
-{
-    const uint8_t code = static_cast<uint8_t>(alaw ^ 0x55u);
-    const int16_t iexp = static_cast<int16_t>((code & 0x70u) >> 4);
-    int16_t mant = static_cast<int16_t>(code & 0x0Fu);
-
-    if (iexp > 0) {
-        mant = static_cast<int16_t>(mant + 16);
-    }
-    mant = static_cast<int16_t>((mant << 4) + 0x08);
-
-    if (iexp > 1) {
-        mant = static_cast<int16_t>(mant << static_cast<uint8_t>(iexp - 1));
-    }
-
-    return ((code & 0x80u) != 0u) ? mant : static_cast<int16_t>(-mant);
-}
-
-static void initALawTables(void)
-{
-    if (s_alaw_tables_ready) {
-        return;
-    }
-
-    for (size_t i = 0; i < 256u; ++i) {
-        s_alaw_decode_table[i] = aLawToLinearSlow(static_cast<uint8_t>(i));
-    }
-
-    for (size_t i = 0; i < 4096u; ++i) {
-        s_alaw_encode_mag_table[i] = linearToALawSlow(static_cast<int16_t>(i));
-    }
-
-    s_alaw_tables_ready = true;
-}
-
-static uint8_t linearToALaw(const int16_t pcm)
-{
-    if (!s_alaw_tables_ready) {
-        initALawTables();
-    }
-
-    if (pcm >= 0) {
-        const uint16_t mag = (pcm > 0x0FFF) ? 0x0FFFu : static_cast<uint16_t>(pcm);
-        return s_alaw_encode_mag_table[mag];
-    }
-
-    int32_t mag32 = -(static_cast<int32_t>(pcm)) - 1;
-    if (mag32 < 0) {
-        mag32 = 0;
-    } else if (mag32 > 0x0FFF) {
-        mag32 = 0x0FFF;
-    }
-    return static_cast<uint8_t>(s_alaw_encode_mag_table[static_cast<uint16_t>(mag32)] ^ 0x80u);
-}
-
-static int16_t aLawToLinear(const uint8_t alaw)
-{
-    if (!s_alaw_tables_ready) {
-        initALawTables();
-    }
-    return s_alaw_decode_table[alaw];
+    s_last_remote_identity_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
 static int16_t applyPcmGain(const int16_t sample, const int gain)
@@ -315,10 +230,11 @@ static bool parseNrlPacket(const uint8_t *packet,
 
 static bool udpSendPacketTo(const uint8_t *packet,
                             const size_t packet_size,
-                            const IPAddress &dest_ip,
+                            const uint32_t dest_ip,
                             const uint16_t dest_port)
 {
-    if (packet == nullptr || packet_size == 0u || !s_udp_started || WiFi.status() != WL_CONNECTED || dest_port == 0u) {
+    if (packet == nullptr || packet_size == 0u || !s_udp_started || s_udp_fd < 0 ||
+        !nrlWifiStaConnected() || dest_port == 0u || dest_ip == 0u) {
         return false;
     }
 
@@ -329,9 +245,14 @@ static bool udpSendPacketTo(const uint8_t *packet,
         return false;
     }
 
-    const bool ok = s_udp.beginPacket(dest_ip, dest_port) == 1 &&
-                    s_udp.write(packet, packet_size) == packet_size &&
-                    s_udp.endPacket() == 1;
+    struct sockaddr_in dest = {};
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(dest_port);
+    dest.sin_addr.s_addr = dest_ip;
+    const ssize_t sent = sendto(s_udp_fd, packet, packet_size, 0,
+                                reinterpret_cast<struct sockaddr *>(&dest),
+                                sizeof(dest));
+    const bool ok = (sent == static_cast<ssize_t>(packet_size));
     xSemaphoreGive(s_udp_mutex);
     return ok;
 }
@@ -361,10 +282,10 @@ static void flushSciPayload(void)
     }
 
     const bool sent = udpSendPacket(s_sci_tx_packet, packet_size);
-    const uint32_t now = millis();
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (!sent && (now - s_last_sci_log_ms) >= 1000u) {
         s_last_sci_log_ms = now;
-        Serial.printf("[SCI] uplink send failed bytes=%u\n",
+        ESP_LOGI(TAG,"[SCI] uplink send failed bytes=%u\n",
                       static_cast<unsigned>(payload_count));
     }
 }
@@ -372,7 +293,7 @@ static void flushSciPayload(void)
 static void pollSciUplink(void)
 {
     int available = SCI_SERIAL_Available();
-    const uint32_t now = millis();
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     while (available > 0) {
         const size_t space = sizeof(s_sci_payload_buffer) - s_sci_payload_count;
         if (space == 0u) {
@@ -405,10 +326,10 @@ static void handleIncomingSciPayload(const uint8_t *payload, const size_t payloa
     }
 
     const size_t written = SCI_SERIAL_Write(payload, payload_size);
-    const uint32_t now = millis();
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (written != payload_size && (now - s_last_sci_log_ms) >= 1000u) {
         s_last_sci_log_ms = now;
-        Serial.printf("[SCI] downlink short write bytes=%u written=%u\n",
+        ESP_LOGI(TAG,"[SCI] downlink short write bytes=%u written=%u\n",
                       static_cast<unsigned>(payload_size),
                       static_cast<unsigned>(written));
     }
@@ -429,7 +350,7 @@ static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
     const size_t used_samples = (sample_count < kAudioCodecFrameSamples) ? sample_count : kAudioCodecFrameSamples;
     for (size_t i = 0; i < used_samples; ++i) {
         if (alaw_accumulator_count < kG711PayloadBytes) {
-            alaw_accumulator[alaw_accumulator_count++] = linearToALaw(pcm8k[i]);
+            alaw_accumulator[alaw_accumulator_count++] = NRL_G711_EncodeALaw(pcm8k[i]);
         }
 
         if (alaw_accumulator_count == kG711PayloadBytes) {
@@ -484,7 +405,7 @@ static void es8311FrameHook(const int16_t *samples,
 
 static bool ensureWifiAndUdp(void)
 {
-    const uint32_t now = millis();
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (s_next_wifi_retry_ms != 0u &&
         static_cast<int32_t>(now - s_next_wifi_retry_ms) < 0) {
         return false;
@@ -497,20 +418,20 @@ static bool ensureWifiAndUdp(void)
     const uint16_t server_port = (config != nullptr) ? config->server_port : static_cast<uint16_t>(NRL_AUDIO_SERVER_PORT);
     const uint16_t local_port = (config != nullptr) ? config->local_port : server_port;
 
-    if (WiFi.status() != WL_CONNECTED) {
+    if (!nrlWifiStaConnected()) {
         const WifiConnResult result = wifiEnsureConnected(wifi_ssid, wifi_password, 15000u);
         if (result != WIFI_CONN_OK && result != WIFI_ALREADY_ON_SSID) {
             if (s_wifi_connect_failures < 0xFFu) {
                 ++s_wifi_connect_failures;
             }
-            s_next_wifi_retry_ms = millis() + kWifiRetryBackoffMs;
+            s_next_wifi_retry_ms = (uint32_t)(esp_timer_get_time() / 1000ULL) + kWifiRetryBackoffMs;
             if (s_wifi_connect_failures >= kWifiFallbackFailureThreshold) {
                 WifiConfigPortal_EnterFallbackMode();
-                Serial.printf("[NRL] wifi connect failed %u times, enter config AP and retry after %lu ms\n",
+                ESP_LOGI(TAG,"[NRL] wifi connect failed %u times, enter config AP and retry after %lu ms\n",
                               static_cast<unsigned>(s_wifi_connect_failures),
                               static_cast<unsigned long>(kWifiRetryBackoffMs));
             } else {
-                Serial.printf("[NRL] wifi connect failed (%u/%u), retry after %lu ms\n",
+                ESP_LOGI(TAG,"[NRL] wifi connect failed (%u/%u), retry after %lu ms\n",
                               static_cast<unsigned>(s_wifi_connect_failures),
                               static_cast<unsigned>(kWifiFallbackFailureThreshold),
                               static_cast<unsigned long>(kWifiRetryBackoffMs));
@@ -522,22 +443,60 @@ static bool ensureWifiAndUdp(void)
     }
 
     if (!s_udp_started) {
-        if (!s_server_ip.fromString(server_host)) {
-            if (!WiFi.hostByName(server_host, s_server_ip)) {
-                Serial.printf("[NRL] resolve host failed: %s\n", server_host);
+        struct in_addr literal = {};
+        if (inet_aton(server_host, &literal) != 0) {
+            s_server_ip = literal.s_addr;
+        } else {
+            struct addrinfo hints = {};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_DGRAM;
+            struct addrinfo *res = nullptr;
+            if (getaddrinfo(server_host, nullptr, &hints, &res) != 0 || res == nullptr) {
+                ESP_LOGE(TAG, "resolve host failed: %s", server_host);
+                if (res != nullptr) {
+                    freeaddrinfo(res);
+                }
                 return false;
             }
+            const struct sockaddr_in *sa = reinterpret_cast<const struct sockaddr_in *>(res->ai_addr);
+            s_server_ip = sa->sin_addr.s_addr;
+            freeaddrinfo(res);
         }
-        s_udp_started = s_udp.begin(local_port) == 1;
-        if (!s_udp_started) {
-            Serial.println("[NRL] udp begin failed");
+
+        if (s_udp_fd >= 0) {
+            close(s_udp_fd);
+            s_udp_fd = -1;
+        }
+        s_udp_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s_udp_fd < 0) {
+            ESP_LOGE(TAG, "udp socket() failed");
             return false;
         }
-        Serial.printf("[NRL] udp local=%u remote=%s(%s):%u\n",
-                      static_cast<unsigned>(local_port),
-                      server_host,
-                      s_server_ip.toString().c_str(),
-                      static_cast<unsigned>(server_port));
+        struct sockaddr_in local = {};
+        local.sin_family = AF_INET;
+        local.sin_port = htons(local_port);
+        local.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (bind(s_udp_fd, reinterpret_cast<struct sockaddr *>(&local), sizeof(local)) < 0) {
+            ESP_LOGE(TAG, "udp bind(%u) failed", static_cast<unsigned>(local_port));
+            close(s_udp_fd);
+            s_udp_fd = -1;
+            return false;
+        }
+        const int flags = fcntl(s_udp_fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(s_udp_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            ESP_LOGE(TAG, "udp set O_NONBLOCK failed");
+            close(s_udp_fd);
+            s_udp_fd = -1;
+            return false;
+        }
+        s_udp_started = true;
+        char ip_buf[16] = {};
+        nrlIpToString(s_server_ip, ip_buf, sizeof(ip_buf));
+        ESP_LOGI(TAG, "udp local=%u remote=%s(%s):%u",
+                 static_cast<unsigned>(local_port),
+                 server_host,
+                 ip_buf,
+                 static_cast<unsigned>(server_port));
     }
 
     return true;
@@ -553,7 +512,7 @@ static void startDownlinkPlayback(void)
     STATUS_IO_SetPttActive(true);
 
     if (!ES8311_SetReceiveMode()) {
-        Serial.println("[NRL] failed to keep ES8311 in receive/speaker mode");
+        ESP_LOGI(TAG,"[NRL] failed to keep ES8311 in receive/speaker mode");
         STATUS_IO_SetPttActive(false);
         return;
     }
@@ -567,7 +526,7 @@ static void logIncomingVoicePacket(const size_t payload_size)
         s_voice_stream_logged = true;
         s_last_voice_payload_size = payload_size;
         const char *callsign = (s_remote_callsign[0] != '\0') ? s_remote_callsign : "UNKNOWN";
-        Serial.printf("[NRL] voice start: from=%s-%u\n",
+        ESP_LOGI(TAG,"[NRL] voice start: from=%s-%u\n",
                       callsign,
                       static_cast<unsigned>(s_remote_ssid));
         return;
@@ -581,7 +540,7 @@ static void logIncomingVoicePacket(const size_t payload_size)
 static void logReceivedPacket(const uint8_t packet_type,
                               const size_t payload_size,
                               const size_t packet_size,
-                              const IPAddress &peer_ip,
+                              const uint32_t peer_ip,
                               const uint16_t peer_port)
 {
     if (packet_type == kNrlTypeHeartbeat ||
@@ -593,14 +552,16 @@ static void logReceivedPacket(const uint8_t packet_type,
     }
 
     const char *callsign = (s_remote_callsign[0] != '\0') ? s_remote_callsign : "UNKNOWN";
-    Serial.printf("[NRL] rx packet: from=%s-%u ip=%s:%u type=%u packet=%u payload=%u\n",
-                  callsign,
-                  static_cast<unsigned>(s_remote_ssid),
-                  peer_ip.toString().c_str(),
-                  static_cast<unsigned>(peer_port),
-                  static_cast<unsigned>(packet_type),
-                  static_cast<unsigned>(packet_size),
-                  static_cast<unsigned>(payload_size));
+    char ip_buf[16] = {};
+    nrlIpToString(peer_ip, ip_buf, sizeof(ip_buf));
+    ESP_LOGI(TAG, "rx packet: from=%s-%u ip=%s:%u type=%u packet=%u payload=%u",
+             callsign,
+             static_cast<unsigned>(s_remote_ssid),
+             ip_buf,
+             static_cast<unsigned>(peer_port),
+             static_cast<unsigned>(packet_type),
+             static_cast<unsigned>(packet_size),
+             static_cast<unsigned>(payload_size));
 }
 
 static void stopDownlinkPlayback(void)
@@ -612,7 +573,7 @@ static void stopDownlinkPlayback(void)
     ES8311_ClearOutputQueue();
 
     if (!ES8311_SetReceiveMode()) {
-        Serial.println("[NRL] failed to keep ES8311 in receive/speaker mode");
+        ESP_LOGI(TAG,"[NRL] failed to keep ES8311 in receive/speaker mode");
     }
 
     s_downlink_playback_active = false;
@@ -645,7 +606,7 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
         return;
     }
 
-    s_last_rx_packet_ms = millis();
+    s_last_rx_packet_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     logIncomingVoicePacket(payload_size);
 
     size_t offset = 0u;
@@ -655,7 +616,7 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
                                  : kG711RxPayloadMaxBytes;
         int16_t peak = 0;
         for (size_t i = 0; i < chunk; ++i) {
-            s_downlink_pcm_buffer[i] = applyPcmGain(aLawToLinear(payload[offset + i]), kDownlinkPcmGain);
+            s_downlink_pcm_buffer[i] = applyPcmGain(NRL_G711_DecodeALaw(payload[offset + i]), kDownlinkPcmGain);
             int16_t value = s_downlink_pcm_buffer[i];
             if (value < 0) {
                 value = static_cast<int16_t>(-value);
@@ -691,20 +652,30 @@ static void sendHeartbeat(void)
 static void restartTransport(const bool restart_wifi, const bool restart_udp)
 {
     if (restart_udp) {
-        s_udp.stop();
+        if (s_udp_fd >= 0) {
+            close(s_udp_fd);
+            s_udp_fd = -1;
+        }
         s_udp_started = false;
-        s_server_ip = IPAddress();
+        s_server_ip = 0u;
     }
     if (restart_wifi) {
-        WiFi.disconnect();
+        esp_wifi_disconnect();
+        // Clear the retry backoff and failure counter so the bridge task
+        // tries the new credentials on its next loop iteration instead of
+        // waiting out the 30s backoff from the previous bad SSID. Without
+        // this, submitting a new SSID via the config portal silently waits
+        // up to 30s before the device leaves AP fallback for STA.
+        s_next_wifi_retry_ms = 0u;
+        s_wifi_connect_failures = 0u;
     }
 }
 
 static void scheduleReboot(void)
 {
     s_reboot_pending = true;
-    s_reboot_at_ms = millis() + 1000u;
-    Serial.println("[NRL] reboot scheduled by AT command");
+    s_reboot_at_ms = (uint32_t)(esp_timer_get_time() / 1000ULL) + 1000u;
+    ESP_LOGI(TAG,"[NRL] reboot scheduled by AT command");
 }
 
 //=============== Serial AT command console (USB debug serial) ================
@@ -729,7 +700,7 @@ static void processSerialAtLine(char *line)
         return;
     }
 
-    Serial.printf("[AT] serial command: %s\n", line);
+    ESP_LOGI(TAG,"[AT] serial command: %s\n", line);
 
     // Wrap the text line into the binary payload the AT handler expects:
     // byte 0 is the 0x01 request marker, followed by the "AT+KEY=VALUE" text.
@@ -744,11 +715,11 @@ static void processSerialAtLine(char *line)
 
     if (at_result.should_reply && at_result.payload_size > 1u) {
         // Skip the 0x02 reply marker; the remainder is CRLF-delimited text.
-        Serial.write(at_result.payload + 1u, at_result.payload_size - 1u);
+        NRL_USB_Console_Write(at_result.payload + 1u, at_result.payload_size - 1u);
     }
 
     if (at_result.restart_wifi || at_result.restart_udp) {
-        Serial.printf("[AT] applying config via serial: restart_wifi=%d restart_udp=%d\n",
+        ESP_LOGI(TAG,"[AT] applying config via serial: restart_wifi=%d restart_udp=%d\n",
                       at_result.restart_wifi ? 1 : 0,
                       at_result.restart_udp ? 1 : 0);
         restartTransport(at_result.restart_wifi, at_result.restart_udp);
@@ -760,25 +731,29 @@ static void processSerialAtLine(char *line)
 
 static void pollSerialAtConsole(void)
 {
-    while (Serial.available() > 0) {
-        const int ch = Serial.read();
-        if (ch < 0) {
+    uint8_t buf[32];
+    while (true) {
+        const size_t got = NRL_USB_Console_Read(buf, sizeof(buf));
+        if (got == 0u) {
             break;
         }
-        if (ch == '\n' || ch == '\r') {
-            if (s_serial_at_len > 0u) {
-                s_serial_at_line[s_serial_at_len] = '\0';
-                processSerialAtLine(s_serial_at_line);
-                s_serial_at_len = 0u;
+        for (size_t i = 0; i < got; ++i) {
+            const char ch = static_cast<char>(buf[i]);
+            if (ch == '\n' || ch == '\r') {
+                if (s_serial_at_len > 0u) {
+                    s_serial_at_line[s_serial_at_len] = '\0';
+                    processSerialAtLine(s_serial_at_line);
+                    s_serial_at_len = 0u;
+                }
+                continue;
             }
-            continue;
+            if (s_serial_at_len + 1u >= sizeof(s_serial_at_line)) {
+                s_serial_at_len = 0u;
+                ESP_LOGW(TAG, "AT serial command too long, discarded");
+                continue;
+            }
+            s_serial_at_line[s_serial_at_len++] = ch;
         }
-        if (s_serial_at_len + 1u >= sizeof(s_serial_at_line)) {
-            s_serial_at_len = 0u;
-            Serial.println("[AT] serial command too long, discarded");
-            continue;
-        }
-        s_serial_at_line[s_serial_at_len++] = static_cast<char>(ch);
     }
 }
 
@@ -792,16 +767,21 @@ static void bridgeTask(void *)
 
         bool have_packet = false;
         int bytes_read = 0;
-        if (s_udp_mutex != nullptr && xSemaphoreTake(s_udp_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            const int packet_size = s_udp.parsePacket();
-            if (packet_size > 0) {
-                s_last_peer_ip = s_udp.remoteIP();
-                s_last_peer_port = s_udp.remotePort();
-                const int clamped = (packet_size < static_cast<int>(sizeof(s_rx_packet_buffer)))
-                                        ? packet_size
-                                        : static_cast<int>(sizeof(s_rx_packet_buffer));
-                bytes_read = s_udp.read(s_rx_packet_buffer, clamped);
-                have_packet = bytes_read > 0;
+        if (s_udp_fd >= 0 && s_udp_mutex != nullptr &&
+            xSemaphoreTake(s_udp_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+            struct sockaddr_in from = {};
+            socklen_t fromlen = sizeof(from);
+            const ssize_t got = recvfrom(s_udp_fd,
+                                         s_rx_packet_buffer,
+                                         sizeof(s_rx_packet_buffer),
+                                         MSG_DONTWAIT,
+                                         reinterpret_cast<struct sockaddr *>(&from),
+                                         &fromlen);
+            if (got > 0) {
+                s_last_peer_ip = from.sin_addr.s_addr;
+                s_last_peer_port = ntohs(from.sin_port);
+                bytes_read = static_cast<int>(got);
+                have_packet = true;
             }
             xSemaphoreGive(s_udp_mutex);
         }
@@ -829,7 +809,7 @@ static void bridgeTask(void *)
                 } else if (packet_type == kNrlTypeAtCommand) {
                     char at_log_text[kAtLogTextMax] = {};
                     formatAtLogText(payload, payload_size, at_log_text, sizeof(at_log_text));
-                    Serial.printf("[NRL] at packet: from=%s-%u payload=%u data=%s\n",
+                    ESP_LOGI(TAG,"[NRL] at packet: from=%s-%u payload=%u data=%s\n",
                                   (s_remote_callsign[0] != '\0') ? s_remote_callsign : "UNKNOWN",
                                   static_cast<unsigned>(s_remote_ssid),
                                   static_cast<unsigned>(payload_size),
@@ -848,9 +828,11 @@ static void bridgeTask(void *)
                                                               s_last_peer_ip,
                                                               s_last_peer_port);
                             if (!sent) {
-                                Serial.printf("[NRL] at reply send failed to %s:%u\n",
-                                              s_last_peer_ip.toString().c_str(),
-                                              static_cast<unsigned>(s_last_peer_port));
+                                char ip_buf[16] = {};
+                                nrlIpToString(s_last_peer_ip, ip_buf, sizeof(ip_buf));
+                                ESP_LOGE(TAG, "at reply send failed to %s:%u",
+                                         ip_buf,
+                                         static_cast<unsigned>(s_last_peer_port));
                             }
                         }
                     }
@@ -862,21 +844,23 @@ static void bridgeTask(void *)
                     }
                 }
             } else {
-                Serial.printf("[NRL] rx parse failed: ip=%s:%u bytes=%u hdr=%02X %02X %02X %02X len=%02X%02X type=%02X\n",
-                              s_last_peer_ip.toString().c_str(),
-                              static_cast<unsigned>(s_last_peer_port),
-                              static_cast<unsigned>(bytes_read),
-                              static_cast<unsigned>(s_rx_packet_buffer[0]),
-                              static_cast<unsigned>(s_rx_packet_buffer[1]),
-                              static_cast<unsigned>(s_rx_packet_buffer[2]),
-                              static_cast<unsigned>(s_rx_packet_buffer[3]),
-                              static_cast<unsigned>(s_rx_packet_buffer[4]),
-                              static_cast<unsigned>(s_rx_packet_buffer[5]),
-                              static_cast<unsigned>((bytes_read > 20) ? s_rx_packet_buffer[20] : 0u));
+                char ip_buf[16] = {};
+                nrlIpToString(s_last_peer_ip, ip_buf, sizeof(ip_buf));
+                ESP_LOGW(TAG, "rx parse failed: ip=%s:%u bytes=%u hdr=%02X %02X %02X %02X len=%02X%02X type=%02X",
+                         ip_buf,
+                         static_cast<unsigned>(s_last_peer_port),
+                         static_cast<unsigned>(bytes_read),
+                         static_cast<unsigned>(s_rx_packet_buffer[0]),
+                         static_cast<unsigned>(s_rx_packet_buffer[1]),
+                         static_cast<unsigned>(s_rx_packet_buffer[2]),
+                         static_cast<unsigned>(s_rx_packet_buffer[3]),
+                         static_cast<unsigned>(s_rx_packet_buffer[4]),
+                         static_cast<unsigned>(s_rx_packet_buffer[5]),
+                         static_cast<unsigned>((bytes_read > 20) ? s_rx_packet_buffer[20] : 0u));
             }
         }
 
-        const uint32_t now = millis();
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
         if (s_downlink_playback_active &&
             (now - s_last_rx_packet_ms) > static_cast<uint32_t>(NRL_AUDIO_RX_PACKET_TIMEOUT_MS)) {
             stopDownlinkPlayback();
@@ -890,9 +874,9 @@ static void bridgeTask(void *)
             pollSciUplink();
         }
         if (s_reboot_pending && static_cast<int32_t>(now - s_reboot_at_ms) >= 0) {
-            Serial.println("[NRL] reboot now");
-            Serial.flush();
-            ESP.restart();
+            ESP_LOGI(TAG, "reboot now");
+            NRL_USB_Console_Flush();
+            esp_restart();
         }
 
         STATUS_IO_Poll();
@@ -912,12 +896,12 @@ bool NRLAudioBridge_Init(void)
     EXTERNAL_RADIO_Init();
     SCI_SERIAL_Init();
     initCpuId();
-    initALawTables();
+    NRL_G711_Init();
 
     if (s_udp_mutex == nullptr) {
         s_udp_mutex = xSemaphoreCreateMutex();
         if (s_udp_mutex == nullptr) {
-            Serial.println("[NRL] failed to create udp mutex");
+            ESP_LOGI(TAG,"[NRL] failed to create udp mutex");
             return false;
         }
     }
@@ -925,12 +909,12 @@ bool NRLAudioBridge_Init(void)
     ES8311_SetFrameHook(es8311FrameHook, nullptr);
 
     if (xTaskCreate(bridgeTask, "nrl_audio_bridge", 8192, nullptr, 2, &s_bridge_task) != pdPASS) {
-        Serial.println("[NRL] failed to create bridge task");
+        ESP_LOGI(TAG,"[NRL] failed to create bridge task");
         return false;
     }
 
     s_bridge_initialized = true;
-    Serial.println("[NRL] bridge task started");
+    ESP_LOGI(TAG,"[NRL] bridge task started");
     return true;
 }
 
@@ -940,7 +924,7 @@ bool NRLAudioBridge_GetRemoteIdentity(char *buffer, size_t buffer_size)
         return false;
     }
 
-    const uint32_t now = millis();
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (s_last_remote_identity_ms == 0u ||
         (now - s_last_remote_identity_ms) > static_cast<uint32_t>(NRL_AUDIO_RX_PACKET_TIMEOUT_MS + 2000u) ||
         s_remote_callsign[0] == '\0') {

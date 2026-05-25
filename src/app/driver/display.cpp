@@ -38,18 +38,24 @@
 #include "external_radio.h"
 #include "status_io.h"
 
-#include <Arduino.h>
-#include <WiFi.h>
+#include "../../lib/nrl_net_compat.h"
 
 #include <time.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
+#include <esp_log.h>
+#include <esp_sntp.h>
+#include <esp_timer.h>
+#include <esp_wifi.h>
 #include <esp_heap_caps.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
+
+static const char *TAG = "LCD";
 #include <esp_adc/adc_oneshot.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -143,7 +149,7 @@ bool initPanel()
     bus_cfg.quadhd_io_num = -1;
     bus_cfg.max_transfer_sz = kWidth * kBufLines * static_cast<int>(sizeof(uint16_t));
     if (spi_bus_initialize(SPI3_HOST, &bus_cfg, SPI_DMA_CH_AUTO) != ESP_OK) {
-        Serial.println("[LCD] SPI bus init failed");
+        ESP_LOGI(TAG,"[LCD] SPI bus init failed");
         return false;
     }
 
@@ -156,7 +162,7 @@ bool initPanel()
     io_cfg.lcd_cmd_bits = 8;
     io_cfg.lcd_param_bits = 8;
     if (esp_lcd_new_panel_io_spi(SPI3_HOST, &io_cfg, &s_panel_io) != ESP_OK) {
-        Serial.println("[LCD] panel IO init failed");
+        ESP_LOGI(TAG,"[LCD] panel IO init failed");
         return false;
     }
 
@@ -165,7 +171,7 @@ bool initPanel()
     panel_cfg.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
     panel_cfg.bits_per_pixel = 16;
     if (esp_lcd_new_panel_st7789(s_panel_io, &panel_cfg, &s_panel) != ESP_OK) {
-        Serial.println("[LCD] ST7789 init failed");
+        ESP_LOGI(TAG,"[LCD] ST7789 init failed");
         return false;
     }
 
@@ -184,7 +190,7 @@ bool initPanel()
 // wants from its tick callback.
 uint32_t lvglTick()
 {
-    return static_cast<uint32_t>(millis());
+    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
 
 // esp_lcd finished pushing a chunk over SPI -> let LVGL reuse the buffer.
@@ -222,13 +228,13 @@ bool initLvgl()
     const size_t buf_bytes = static_cast<size_t>(kWidth) * kBufLines * 2u;
     s_draw_buf = static_cast<uint8_t *>(heap_caps_malloc(buf_bytes, MALLOC_CAP_DMA));
     if (s_draw_buf == nullptr) {
-        Serial.println("[LCD] draw buffer alloc failed");
+        ESP_LOGI(TAG,"[LCD] draw buffer alloc failed");
         return false;
     }
 
     s_disp = lv_display_create(kWidth, kHeight);
     if (s_disp == nullptr) {
-        Serial.println("[LCD] lv_display_create failed");
+        ESP_LOGI(TAG,"[LCD] lv_display_create failed");
         return false;
     }
     lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565);
@@ -251,7 +257,7 @@ void initBatteryAdc()
     adc_oneshot_unit_init_cfg_t unit_cfg = {};
     unit_cfg.unit_id = ADC_UNIT_1;
     if (adc_oneshot_new_unit(&unit_cfg, &s_adc) != ESP_OK) {
-        Serial.println("[LCD] battery ADC unit init failed");
+        ESP_LOGI(TAG,"[LCD] battery ADC unit init failed");
         return;
     }
 
@@ -259,7 +265,7 @@ void initBatteryAdc()
     chan_cfg.atten = ADC_ATTEN_DB_12;
     chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
     if (adc_oneshot_config_channel(s_adc, ADC_CHANNEL_2, &chan_cfg) != ESP_OK) {
-        Serial.println("[LCD] battery ADC channel config failed");
+        ESP_LOGI(TAG,"[LCD] battery ADC channel config failed");
         return;
     }
 
@@ -285,7 +291,7 @@ void initBatteryAdc()
     }
 #endif
     if (!s_adc_ready) {
-        Serial.println("[LCD] battery ADC not calibrated (eFuse missing) -- voltage hidden");
+        ESP_LOGI(TAG,"[LCD] battery ADC not calibrated (eFuse missing) -- voltage hidden");
     }
 }
 
@@ -483,9 +489,15 @@ void refreshCaller()
 
 void refreshClock()
 {
-    if (!s_time_sync_started && WiFi.status() == WL_CONNECTED) {
+    if (!s_time_sync_started && nrlWifiStaConnected()) {
         // CST-8 == UTC+8 (China). NTP servers are tried in order.
-        configTzTime("CST-8", "ntp.aliyun.com", "ntp.ntsc.ac.cn", "pool.ntp.org");
+        setenv("TZ", "CST-8", 1);
+        tzset();
+        esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, "ntp.aliyun.com");
+        esp_sntp_setservername(1, "ntp.ntsc.ac.cn");
+        esp_sntp_setservername(2, "pool.ntp.org");
+        esp_sntp_init();
         s_time_sync_started = true;
     }
 
@@ -506,8 +518,9 @@ void refreshWifi()
 {
     char wifi_text[28];
     uint32_t color = kColorSub;
-    if (WiFi.status() == WL_CONNECTED) {
-        const int rssi = WiFi.RSSI();
+    if (nrlWifiStaConnected()) {
+        wifi_ap_record_t ap_info = {};
+        const int rssi = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) ? ap_info.rssi : 0;
         snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "  %ddB", rssi);
         if (rssi >= -65) {
             color = kColorGood;
@@ -601,15 +614,19 @@ void refreshIp()
                                : "---";
         snprintf(ip_text, sizeof(ip_text), "%s", host);
         color = tx ? kColorTx : kColorAccent;
-    } else if (WiFi.status() == WL_CONNECTED) {
-        snprintf(ip_text, sizeof(ip_text), "%s", WiFi.localIP().toString().c_str());
+    } else if (nrlWifiStaConnected()) {
+        char sta_buf[16] = {};
+        nrlIpToString(nrlWifiStaIp(), sta_buf, sizeof(sta_buf));
+        snprintf(ip_text, sizeof(ip_text), "%s", sta_buf);
         color = kColorIp;
     } else {
-        const wifi_mode_t mode = WiFi.getMode();
+        wifi_mode_t mode = WIFI_MODE_NULL;
+        esp_wifi_get_mode(&mode);
         if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {
             // WiFi join failed -> config AP is up; show the hotspot address.
-            snprintf(ip_text, sizeof(ip_text), "%s",
-                     WiFi.softAPIP().toString().c_str());
+            char ap_buf[16] = {};
+            nrlIpToString(nrlWifiApIp(), ap_buf, sizeof(ap_buf));
+            snprintf(ip_text, sizeof(ip_text), "%s", ap_buf);
             color = kColorApWarn;
         } else {
             snprintf(ip_text, sizeof(ip_text), "---");
@@ -645,7 +662,7 @@ extern "C" void Display_Init(void)
 
     gpio_set_level(static_cast<gpio_num_t>(NRL_PIN_DISPLAY_BL), 1);
     s_ready = true;
-    Serial.println("[LCD] ST7789 display ready");
+    ESP_LOGI(TAG,"[LCD] ST7789 display ready");
 }
 
 extern "C" void Display_Poll(void)
@@ -654,7 +671,7 @@ extern "C" void Display_Poll(void)
         return;
     }
 
-    const uint32_t now = millis();
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     if (s_last_battery_ms == 0u || (now - s_last_battery_ms) >= kBatteryIntervalMs) {
         s_last_battery_ms = now;
         s_battery_mv = readBatteryMv();

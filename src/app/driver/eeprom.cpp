@@ -16,7 +16,10 @@
 
 #include "eeprom.h"
 #include "i2c1.h"
-#include <Arduino.h>
+#include <esp_rom_sys.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <string.h>
 
 static constexpr uint32_t EEPROM_DIRECT_EEPROM_LIMIT = 0x2000U; // Use only first 8KB on real EEPROM.
@@ -31,7 +34,7 @@ static inline bool EEPROM_IsDirectEepromRange(uint32_t address, uint32_t size)
            size <= (EEPROM_DIRECT_EEPROM_LIMIT - address);
 }
 
-#if defined(ARDUINO_ARCH_ESP32) && !defined(ENABLE_OPENCV)
+#if (defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)) && !defined(ENABLE_OPENCV)
 #include "../../lib/shared_flash.h"
 
 // ESP32: emulate the radio's EEPROM address space in the internal flash "shared" partition.
@@ -195,15 +198,15 @@ static inline uint8_t EEPROM_ControlByteWrite(uint32_t Address)
 
 static bool EEPROM_WaitReady(uint8_t controlByteWrite, uint32_t timeoutMs)
 {
-    const uint32_t start = millis();
-    while ((uint32_t)(millis() - start) < timeoutMs) {
+    const uint32_t start = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    while ((uint32_t)((esp_timer_get_time() / 1000ULL) - start) < timeoutMs) {
         I2C_Start();
         const int ack = I2C_Write(controlByteWrite);
         I2C_Stop();
         if (ack == 0) {
             return true;
         }
-        delayMicroseconds(EEPROM_READY_POLL_INTERVAL_US);
+        esp_rom_delay_us(EEPROM_READY_POLL_INTERVAL_US);
     }
     return false;
 }
@@ -221,7 +224,7 @@ void EEPROM_ReadBuffer(uint32_t Address, void *pBuffer, uint8_t Size) {
         return;
     }
 
-#if defined(ARDUINO_ARCH_ESP32) && !defined(ENABLE_OPENCV)
+#if (defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)) && !defined(ENABLE_OPENCV)
     const uint32_t requestSize = (uint32_t)Size;
     const bool directEepromWindow = EEPROM_IsDirectEepromRange(Address, requestSize);
 
@@ -265,7 +268,7 @@ void EEPROM_ReadBuffer(uint32_t Address, void *pBuffer, uint8_t Size) {
     }
 #endif
 
-    noInterrupts();
+    portDISABLE_INTERRUPTS();
     I2C_Start();
 
     // 24xx 系列控制字节: 1010 A2 A1 A0 R/W
@@ -276,7 +279,7 @@ void EEPROM_ReadBuffer(uint32_t Address, void *pBuffer, uint8_t Size) {
         I2C_Write((Address >> 8) & 0xFF) < 0 ||
         I2C_Write((Address >> 0) & 0xFF) < 0) {
         I2C_Stop();
-        interrupts();
+        portENABLE_INTERRUPTS();
         return;
     }
 
@@ -284,43 +287,43 @@ void EEPROM_ReadBuffer(uint32_t Address, void *pBuffer, uint8_t Size) {
 
     if (I2C_Write(IIC_ADD + 1) < 0) {
         I2C_Stop();
-        interrupts();
+        portENABLE_INTERRUPTS();
         return;
     }
 
     I2C_ReadBuffer(pBuffer, Size);
 
     I2C_Stop();
-    interrupts();
+    portENABLE_INTERRUPTS();
 
 }
 
 bool EEPROM_Probe(uint32_t Address)
 {
-#if defined(ARDUINO_ARCH_ESP32) && !defined(ENABLE_OPENCV)
+#if (defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)) && !defined(ENABLE_OPENCV)
     if (Address >= EEPROM_DIRECT_EEPROM_LIMIT && EEPROM_SharedLogicalSize() > 0U) {
         return Address < EEPROM_SharedLogicalSize();
     }
 #endif
-    noInterrupts();
+    portDISABLE_INTERRUPTS();
     I2C_Start();
 
     const uint8_t iic_add = EEPROM_ControlByteWrite(Address);
     if (I2C_Write(iic_add) < 0) {
         I2C_Stop();
-        interrupts();
+        portENABLE_INTERRUPTS();
         return false;
     }
 
     // 发送 16-bit word address（块内寻址）
     if (I2C_Write((Address >> 8) & 0xFF) < 0 || I2C_Write(Address & 0xFF) < 0) {
         I2C_Stop();
-        interrupts();
+        portENABLE_INTERRUPTS();
         return false;
     }
 
     I2C_Stop();
-    interrupts();
+    portENABLE_INTERRUPTS();
     return true;
 }
 
@@ -330,7 +333,7 @@ void EEPROM_WriteBuffer(uint32_t Address, const void *pBuffer, uint8_t WRITE_SIZ
         return;
     }
 
-#if defined(ARDUINO_ARCH_ESP32) && !defined(ENABLE_OPENCV)
+#if (defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)) && !defined(ENABLE_OPENCV)
     const uint32_t requestSize = (uint32_t)WRITE_SIZE;
     const bool directEepromWindow = EEPROM_IsDirectEepromRange(Address, requestSize);
 
@@ -390,7 +393,7 @@ void EEPROM_WriteBuffer(uint32_t Address, const void *pBuffer, uint8_t WRITE_SIZ
     if (memcmp(pBuffer, buffer, WRITE_SIZE) != 0) {
         const uint8_t IIC_ADD = EEPROM_ControlByteWrite(Address);
 
-        noInterrupts();
+        portDISABLE_INTERRUPTS();
 
         I2C_Start();
 
@@ -399,9 +402,9 @@ void EEPROM_WriteBuffer(uint32_t Address, const void *pBuffer, uint8_t WRITE_SIZ
             I2C_Write((Address) & 0xFF) < 0 ||
             I2C_WriteBuffer(pBuffer, WRITE_SIZE) < 0) {
             I2C_Stop();
-            interrupts();
+            portENABLE_INTERRUPTS();
             if (EEPROM_POST_WRITE_DELAY_MS > 0U) {
-                delay(EEPROM_POST_WRITE_DELAY_MS);
+                vTaskDelay(pdMS_TO_TICKS(EEPROM_POST_WRITE_DELAY_MS));
             }
             return;
         }
@@ -410,11 +413,11 @@ void EEPROM_WriteBuffer(uint32_t Address, const void *pBuffer, uint8_t WRITE_SIZ
         // 写周期 ACK 轮询（比固定 delay 更可靠）
         (void)EEPROM_WaitReady(IIC_ADD, EEPROM_WRITE_READY_TIMEOUT_MS);
 
-        interrupts();
+        portENABLE_INTERRUPTS();
     }
     // 兜底延时，避免某些器件/布线在连续访问时不稳
     if (EEPROM_POST_WRITE_DELAY_MS > 0U) {
-        delay(EEPROM_POST_WRITE_DELAY_MS);
+        vTaskDelay(pdMS_TO_TICKS(EEPROM_POST_WRITE_DELAY_MS));
     }
 
 }
@@ -435,7 +438,7 @@ void EEPROM_ReadBufferLarge(uint32_t Address, void *pBuffer, size_t Size) {
         Address += (uint32_t)chunk;
         dst += chunk;
         Size -= chunk;
-        delay(0);
+        taskYIELD();
     }
 }
 
@@ -444,7 +447,7 @@ void EEPROM_WriteBufferLarge(uint32_t Address, const void *pBuffer, size_t Size)
         return;
     }
 
-#if defined(ARDUINO_ARCH_ESP32) && !defined(ENABLE_OPENCV)
+#if (defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)) && !defined(ENABLE_OPENCV)
     if (Address < EEPROM_DIRECT_EEPROM_LIMIT &&
         Size > (size_t)(EEPROM_DIRECT_EEPROM_LIMIT - Address) &&
         EEPROM_SharedLogicalSize() > 0U) {
@@ -489,7 +492,7 @@ void EEPROM_WriteBufferLarge(uint32_t Address, const void *pBuffer, size_t Size)
             Address += chunk;
             src += chunk;
             remaining -= chunk;
-            delay(0);
+            taskYIELD();
         }
 
         free(verify);
@@ -508,6 +511,6 @@ void EEPROM_WriteBufferLarge(uint32_t Address, const void *pBuffer, size_t Size)
         Address += (uint32_t)chunk;
         src += chunk;
         Size -= chunk;
-        delay(0);
+        taskYIELD();
     }
 }
