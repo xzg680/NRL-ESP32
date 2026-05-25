@@ -1,5 +1,6 @@
 dependencies:
-  espressif/esp-sr: "^1.4.2"
+  espressif/esp-sr:
+    version: ">=2.0.0"
   # LVGL (格子派 ST7789 LCD UI) is vendored at components/lvgl/ by
   # scripts/fetch_lvgl.py at build time. It is deliberately NOT listed here
   # because the IDF component manager would (a) overwrite it from the

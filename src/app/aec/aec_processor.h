@@ -1,13 +1,12 @@
 #ifndef APP_AEC_AEC_PROCESSOR_H
 #define APP_AEC_AEC_PROCESSOR_H
 
-// Gezipai-only acoustic echo cancellation built on the Espressif esp-sr AFE.
+// Optional esp-sr AFE processing built on the Espressif AFE.
 //
-// Pipeline (the NRL audio path is 8 kHz, the esp-sr AFE is fixed at 16 kHz):
-//   ES7210 capture 8kHz [mic, reference]
-//     -> upsample 8k->16k
-//     -> AFE feed (2-channel interleaved: mic + reference)
-//     -> AFE fetch (echo-cancelled mono 16k)
+// Pipeline (capture is 16 kHz, the NRL/G.711 network uplink stays 8 kHz):
+//   ES8311 capture 16kHz [mic, optional reference]
+//     -> AFE feed (mono mic, or 2-channel interleaved mic + reference for AEC)
+//     -> AFE fetch (processed mono 16k)
 //     -> downsample 16k->8k
 //     -> output callback (clean 8k mic audio for the NRL uplink)
 
@@ -25,19 +24,29 @@ typedef void (*AEC_OutputCallback)(const int16_t *clean_8k,
 
 // Create the AFE instance, resamplers and the fetch task. Call once, after
 // PSRAM is up. Returns false if esp-sr could not allocate the AFE.
-bool AEC_Init(void);
+bool AEC_Init(bool enable_aec, bool enable_ai_noise);
 
 // True once AEC_Init() has succeeded.
 bool AEC_IsReady(void);
 
+// Runtime route switches. The AFE instance can stay resident while the uplink
+// is switched between raw passthrough and processed output.
+void AEC_SetRuntimeEnabled(bool enable_aec, bool enable_ai_noise);
+
+// True when the active AFE instance was created with a reference channel.
+bool AEC_UsesReference(void);
+
+// True when the processed AFE output should be forwarded right now.
+bool AEC_IsRuntimeActive(void);
+
 // Register the sink for echo-cancelled audio (e.g. the NRL uplink).
 void AEC_SetOutputCallback(AEC_OutputCallback callback, void *user_data);
 
-// Submit one captured 8 kHz frame: mic and reference are separate mono
-// buffers of `sample_count` samples each (the ES8311 I2S frame size, 80).
+// Submit one captured 16 kHz frame: mic is mono; ref is required only when
+// AEC_UsesReference() is true (the ES8311 I2S frame size is 160).
 // Safe to call from the I2S capture task. Non-blocking.
-void AEC_SubmitCapture(const int16_t *mic_8k,
-                       const int16_t *ref_8k,
+void AEC_SubmitCapture(const int16_t *mic_16k,
+                       const int16_t *ref_16k,
                        size_t sample_count);
 
 #ifdef __cplusplus

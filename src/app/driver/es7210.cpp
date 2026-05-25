@@ -173,16 +173,14 @@ struct Es7210RegInit {
 //     ADC1->left slot, ADC2->right slot of I2S DIN. The ESP32 I2S RX is
 //     already configured for stereo I2S by the ES8311 driver, and reads
 //     the LEFT slot, so MIC1 lands in the captured frame.
-//   * clock divider computed for sample_rate=8 kHz, MCLK=2.048 MHz
+//   * clock divider computed for sample_rate=16 kHz, MCLK=4.096 MHz
 //     (= 256 x fs, the rate the ES8311 driver programs):
 //       REG02 = adc_div(1) | doubler(1)<<6 | dll_bypass(1)<<7 = 0xC1
-//         -> the doubler brings the 2.048 MHz MCLK to a 4.096 MHz
-//            internal ADC clock, matching the reference {4.096 MHz, 8 kHz}
+//         -> the doubler brings the 4.096 MHz MCLK to an 8.192 MHz
+//            internal ADC clock, matching the reference {8.192 MHz, 16 kHz}
 //            coefficient row (adc_div=1, osr=0x20).
 //       REG07 = OSR = 0x20
-//       REG04:REG05 = LRCK divider = MCLK/LRCK = 2048000/8000 = 256 = 0x0100
-//     If the ES7210 fails to lock at 2.048 MHz MCLK, the fallback is to
-//     raise the I2S MCLK multiple to 512x (4.096 MHz) and use REG02=0x81.
+//       REG04:REG05 = LRCK divider = MCLK/LRCK = 4096000/16000 = 256 = 0x0100
 constexpr Es7210RegInit kEs7210InitSeq[] = {
     {ES7210_RESET_REG00,         0xFF}, // full reset
     {ES7210_RESET_REG00,         0x32}, // release reset

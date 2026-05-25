@@ -4,6 +4,7 @@
 #include "wifi_config_portal_sections.generated.h"
 #include "wifi_update_portal_page.generated.h"
 #include "nrl_version.h"
+#include "../app/driver/board_pins.h"
 
 #include <WiFi.h>
 
@@ -197,15 +198,42 @@ String WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config
 {
     String html = String(kWifiConfigPortalAudioSectionsTemplate);
     html.reserve(strlen(kWifiConfigPortalAudioSectionsTemplate) + 9000u);
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
     String aec_section = String(kWifiConfigPortalAecSectionTemplate);
-    replaceToken(aec_section, "{{AEC_CHECKED}}", checkedAttr(config->aec_enabled));
+#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
+    String aec_toggle = String(kWifiConfigPortalAecToggleTemplate);
+    replaceToken(aec_toggle, "{{AEC_CHECKED}}", checkedAttr(config->aec_enabled));
+    replaceToken(aec_toggle, "{{AEC_REF_NETWORK_SELECTED}}",
+                 (config->aec_reference_source == EXTERNAL_RADIO_AEC_REF_NETWORK) ? " selected" : "");
+    replaceToken(aec_toggle, "{{AEC_REF_MIC_SELECTED}}",
+#if NRL_HAS_ES7210
+                 (config->aec_reference_source == EXTERNAL_RADIO_AEC_REF_MIC) ? " selected" : ""
+#else
+                 " disabled"
+#endif
+    );
+    replaceToken(aec_section, "{{AFE_GROUP_I18N}}", "aec");
+    replaceToken(aec_section, "{{AFE_GROUP_LABEL}}", "AEC / AI");
+#else
+    String aec_toggle = "";
+    replaceToken(aec_section, "{{AFE_GROUP_I18N}}", "aiNoiseLabel");
+    replaceToken(aec_section, "{{AFE_GROUP_LABEL}}", "AI Noise Reduction");
+#endif
+    replaceToken(aec_section, "{{AEC_TOGGLE}}", aec_toggle);
+    replaceToken(aec_section, "{{AI_NOISE_CHECKED}}", checkedAttr(config->ai_noise_enabled));
 #endif
     replaceToken(html, "{{AEC_SECTION}}",
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
                  aec_section
 #else
                  ""
+#endif
+    );
+    replaceToken(html, "{{ES8311_ADC_SECTION}}",
+#if NRL_HAS_ES7210
+                 ""
+#else
+                 String(kWifiConfigPortalEs8311AdcSectionTemplate)
 #endif
     );
     replaceToken(html, "{{HP_DRIVE_CHECKED}}", checkedAttr(config->hp_drive_enabled));
@@ -246,6 +274,7 @@ String WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config
     replaceToken(html, "{{ADC_EQ_BYPASS_VALUE}}", boolValue(config->adc_eq_bypass));
     replaceToken(html, "{{ADC_HPF_CHECKED}}", checkedAttr(config->adc_hpf));
     replaceToken(html, "{{ADC_HPF_VALUE}}", boolValue(config->adc_hpf));
+    replaceToken(html, "{{MIC_HPF_CHECKED}}", checkedAttr(config->mic_hpf_enabled));
     replaceToken(html, "{{ADCEQ_B0_SLIDER}}", buildDacEqSlider("adceq_b0", "ADCEQ B0 (REG1D-20)", "adceqB0", config->adceq_b0));
     replaceToken(html, "{{ADCEQ_A1_SLIDER}}", buildDacEqSlider("adceq_a1", "ADCEQ A1 (REG21-24)", "adceqA1", config->adceq_a1));
     replaceToken(html, "{{ADCEQ_A2_SLIDER}}", buildDacEqSlider("adceq_a2", "ADCEQ A2 (REG25-28)", "adceqA2", config->adceq_a2));

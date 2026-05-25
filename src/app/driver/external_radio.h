@@ -25,6 +25,11 @@ struct SciSerialConfig {
     uint8_t stop_bits;
 };
 
+enum ExternalRadioAecReferenceSource : uint8_t {
+    EXTERNAL_RADIO_AEC_REF_NETWORK = 0,
+    EXTERNAL_RADIO_AEC_REF_MIC = 1,
+};
+
 struct ExternalRadioConfig {
     uint8_t channel;
     uint16_t server_port;
@@ -75,6 +80,12 @@ struct ExternalRadioConfig {
     uint32_t wifi_dns;
     bool wifi_dhcp_enabled;
     bool aec_enabled;
+    bool ai_noise_enabled;
+    uint8_t aec_reference_source;
+    // Software high-pass filter on captured mic audio (1-pole IIR,
+    // ~200 Hz cutoff at 8 kHz). Strips DC offset and low-frequency rumble
+    // before AEC / network uplink. See ES8311_SetMicHpfEnabled().
+    bool mic_hpf_enabled;
     uint16_t ptt_timeout_s;
     SciSerialConfig sci;
     char wifi_ssid[33];
@@ -114,9 +125,16 @@ bool EXTERNAL_RADIO_SetAdcAutomuteConfig(uint8_t winsize, uint8_t noise_gate, ui
 bool EXTERNAL_RADIO_SetAdcHpfConfig(uint8_t hpfs1, bool eq_bypass, bool hpf, uint8_t hpfs2, bool persist);
 bool EXTERNAL_RADIO_SetAdcEqCoefficients(uint32_t b0, uint32_t a1, uint32_t a2, uint32_t b1, uint32_t b2, bool persist);
 bool EXTERNAL_RADIO_SetSciConfig(uint32_t baud, uint8_t data_bits, char parity, uint8_t stop_bits, bool persist);
-// Acoustic echo cancellation (Gezipai/esp-sr AEC). Persisted only; the ES8311
-// driver reads it at boot, so a toggle takes effect after the next restart.
+// Acoustic echo cancellation (Gezipai/esp-sr AEC). When AFE is resident, this
+// toggles the processed path at runtime and can also persist the preference.
 bool EXTERNAL_RADIO_SetAecEnabled(bool enabled, bool persist);
+bool EXTERNAL_RADIO_SetAecReferenceSource(uint8_t source, bool persist);
+// esp-sr speech enhancement / AI noise reduction. When AFE is resident, this
+// toggles the processed path at runtime and can also persist the preference.
+bool EXTERNAL_RADIO_SetAiNoiseEnabled(bool enabled, bool persist);
+// Software microphone high-pass filter (~200 Hz cutoff). Takes effect
+// immediately on the running passthrough task; no codec restart needed.
+bool EXTERNAL_RADIO_SetMicHpfEnabled(bool enabled, bool persist);
 // PTT button auto-off / maximum continuous transmit time, in seconds. A short
 // press latches transmit on; it is forced off again after this many seconds.
 bool EXTERNAL_RADIO_SetPttTimeout(uint16_t value, bool persist);

@@ -43,6 +43,7 @@
     .group-label{border-top:1px solid var(--line);padding-top:12px;margin-top:2px;color:var(--accent-2);font-size:13px;font-weight:700;}
     .subgrid>.group-label:first-child{border-top:0;padding-top:0;margin-top:0;}
     .eq-panel{border:1px solid var(--line);border-radius:8px;padding:12px;background:#f8fafc;}
+    .eq-preset-form{display:flex;justify-content:flex-end;margin:0 0 10px;}
     .eq-control{margin:12px 0;}
     .eq-row{display:grid;grid-template-columns:minmax(0,1fr) 170px;gap:12px;align-items:center;}
     input.eq-slider{padding:0;min-height:32px;}
@@ -65,6 +66,7 @@
       .group-label{padding-top:10px;}
       .span-2{grid-column:auto;}
       .eq-row{grid-template-columns:1fr;}
+      .eq-preset-form{justify-content:stretch;}
       .eq-control{margin:10px 0;}
       input.eq-value{font-size:12px;}
       .actions{justify-content:stretch;}

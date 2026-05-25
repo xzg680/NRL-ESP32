@@ -362,6 +362,8 @@ static String savedValueForArg(const ExternalRadioConfig *config, const String &
     if (name == "line_out_volume") return String(config->line_out_volume);
     if (name == "hp_drive_enabled") return config->hp_drive_enabled ? "1" : "0";
     if (name == "aec_enabled") return config->aec_enabled ? "1" : "0";
+    if (name == "aec_reference_source") return String(config->aec_reference_source);
+    if (name == "ai_noise_enabled") return config->ai_noise_enabled ? "1" : "0";
     if (name == "adc_dmic_enabled") return config->adc_dmic_enabled ? "1" : "0";
     if (name == "adc_linsel") return config->adc_linsel ? "1" : "0";
     if (name == "adc_pga_gain") return String(config->adc_pga_gain);
@@ -383,6 +385,7 @@ static String savedValueForArg(const ExternalRadioConfig *config, const String &
     if (name == "adc_hpfs2") return String(config->adc_hpfs2);
     if (name == "adc_eq_bypass") return config->adc_eq_bypass ? "1" : "0";
     if (name == "adc_hpf") return config->adc_hpf ? "1" : "0";
+    if (name == "mic_hpf_enabled") return config->mic_hpf_enabled ? "1" : "0";
     if (name == "adceq_b0") return String(config->adceq_b0);
     if (name == "adceq_a1") return String(config->adceq_a1);
     if (name == "adceq_a2") return String(config->adceq_a2);
@@ -465,6 +468,8 @@ static void logChangedFields(const ExternalRadioConfig *before,
     LOG_UINT(line_out_volume);
     LOG_BOOL(hp_drive_enabled);
     LOG_BOOL(aec_enabled);
+    LOG_BOOL(ai_noise_enabled);
+    LOG_BOOL(mic_hpf_enabled);
     LOG_BOOL(drc_enabled);
     LOG_UINT(drc_winsize);
     LOG_UINT(drc_maxlevel);
@@ -1035,11 +1040,25 @@ static void handleSaveNrl()
     if (ok && s_server.hasArg("hp_drive_present")) {
         ok = EXTERNAL_RADIO_SetHpDriveEnabled(s_server.hasArg("hp_drive_enabled"), false);
     }
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
     if (ok && s_server.hasArg("aec_present")) {
         ok = EXTERNAL_RADIO_SetAecEnabled(s_server.hasArg("aec_enabled"), false);
     }
+    if (ok && s_server.hasArg("aec_reference_source")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("aec_reference_source"), &value) &&
+             value <= EXTERNAL_RADIO_AEC_REF_MIC &&
+             EXTERNAL_RADIO_SetAecReferenceSource(static_cast<uint8_t>(value), false);
+    }
 #endif
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
+    if (ok && s_server.hasArg("ai_noise_present")) {
+        ok = EXTERNAL_RADIO_SetAiNoiseEnabled(s_server.hasArg("ai_noise_enabled"), false);
+    }
+#endif
+    if (ok && s_server.hasArg("mic_hpf_enabled_present")) {
+        ok = EXTERNAL_RADIO_SetMicHpfEnabled(s_server.hasArg("mic_hpf_enabled"), false);
+    }
     if (ok && s_server.hasArg("drc_present")) {
         ok = EXTERNAL_RADIO_SetDrcEnabled(s_server.hasArg("drc_enabled"), false);
     }
@@ -1092,7 +1111,9 @@ static void handleSaveNrl()
             ok = EXTERNAL_RADIO_SetDacEqCoefficients(b0, b1, a1, false);
         }
     }
-    if (ok && (s_server.hasArg("adc_system_present") || s_server.hasArg("adc_pga_gain"))) {
+    if (ok && (s_server.hasArg("adc_dmic_present") ||
+               s_server.hasArg("adc_linsel_present") ||
+               s_server.hasArg("adc_pga_gain"))) {
         const ExternalRadioConfig *current = EXTERNAL_RADIO_GetConfig();
         bool dmic = current != nullptr && current->adc_dmic_enabled;
         bool linsel = current == nullptr || current->adc_linsel;
@@ -1100,12 +1121,12 @@ static void handleSaveNrl()
         unsigned long value = 0UL;
         if (s_server.hasArg("adc_dmic_enabled")) {
             dmic = s_server.arg("adc_dmic_enabled") == "1";
-        } else if (s_server.hasArg("adc_system_present")) {
+        } else if (s_server.hasArg("adc_dmic_present")) {
             dmic = false;
         }
         if (s_server.hasArg("adc_linsel")) {
             linsel = s_server.arg("adc_linsel") == "1";
-        } else if (s_server.hasArg("adc_system_present")) {
+        } else if (s_server.hasArg("adc_linsel_present")) {
             linsel = false;
         }
         if (ok && s_server.hasArg("adc_pga_gain")) {
@@ -1116,7 +1137,7 @@ static void handleSaveNrl()
             ok = EXTERNAL_RADIO_SetAdcSystemConfig(dmic, linsel, pga, false);
         }
     }
-    if (ok && (s_server.hasArg("adc_ramp_present") || s_server.hasArg("adc_ramprate"))) {
+    if (ok && (s_server.hasArg("adc_dmic_sense_present") || s_server.hasArg("adc_ramprate"))) {
         const ExternalRadioConfig *current = EXTERNAL_RADIO_GetConfig();
         uint8_t ramprate = current != nullptr ? current->adc_ramprate : 4u;
         bool dmic_sense = current != nullptr && current->adc_dmic_sense;
@@ -1127,14 +1148,17 @@ static void handleSaveNrl()
         }
         if (s_server.hasArg("adc_dmic_sense")) {
             dmic_sense = s_server.arg("adc_dmic_sense") == "1";
-        } else if (s_server.hasArg("adc_ramp_present")) {
+        } else if (s_server.hasArg("adc_dmic_sense_present")) {
             dmic_sense = false;
         }
         if (ok) {
             ok = EXTERNAL_RADIO_SetAdcRampConfig(ramprate, dmic_sense, false);
         }
     }
-    if (ok && (s_server.hasArg("adc_scale_present") || s_server.hasArg("adc_scale"))) {
+    if (ok && (s_server.hasArg("adc_sync_present") ||
+               s_server.hasArg("adc_inv_present") ||
+               s_server.hasArg("adc_ramclr_present") ||
+               s_server.hasArg("adc_scale"))) {
         const ExternalRadioConfig *current = EXTERNAL_RADIO_GetConfig();
         bool sync = current == nullptr || current->adc_sync;
         bool inv = current != nullptr && current->adc_inv;
@@ -1143,17 +1167,17 @@ static void handleSaveNrl()
         unsigned long value = 0UL;
         if (s_server.hasArg("adc_sync")) {
             sync = s_server.arg("adc_sync") == "1";
-        } else if (s_server.hasArg("adc_scale_present")) {
+        } else if (s_server.hasArg("adc_sync_present")) {
             sync = false;
         }
         if (s_server.hasArg("adc_inv")) {
             inv = s_server.arg("adc_inv") == "1";
-        } else if (s_server.hasArg("adc_scale_present")) {
+        } else if (s_server.hasArg("adc_inv_present")) {
             inv = false;
         }
         if (s_server.hasArg("adc_ramclr")) {
             ramclr = s_server.arg("adc_ramclr") == "1";
-        } else if (s_server.hasArg("adc_scale_present")) {
+        } else if (s_server.hasArg("adc_ramclr_present")) {
             ramclr = false;
         }
         if (ok && s_server.hasArg("adc_scale")) {
@@ -1164,7 +1188,8 @@ static void handleSaveNrl()
             ok = EXTERNAL_RADIO_SetAdcScaleConfig(sync, inv, ramclr, scale, false);
         }
     }
-    if (ok && (s_server.hasArg("alc_present") ||
+    if (ok && (s_server.hasArg("alc_enabled_present") ||
+               s_server.hasArg("adc_automute_enabled_present") ||
                s_server.hasArg("alc_winsize") ||
                s_server.hasArg("alc_maxlevel") ||
                s_server.hasArg("alc_minlevel"))) {
@@ -1177,12 +1202,12 @@ static void handleSaveNrl()
         unsigned long value = 0UL;
         if (s_server.hasArg("alc_enabled")) {
             alc = s_server.arg("alc_enabled") == "1";
-        } else if (s_server.hasArg("alc_present")) {
+        } else if (s_server.hasArg("alc_enabled_present")) {
             alc = false;
         }
         if (s_server.hasArg("adc_automute_enabled")) {
             automute = s_server.arg("adc_automute_enabled") == "1";
-        } else if (s_server.hasArg("alc_present")) {
+        } else if (s_server.hasArg("adc_automute_enabled_present")) {
             automute = false;
         }
         if (ok && s_server.hasArg("alc_winsize")) {
@@ -1225,9 +1250,17 @@ static void handleSaveNrl()
             ok = EXTERNAL_RADIO_SetAdcAutomuteConfig(winsize, noise_gate, volume, false);
         }
     }
-    if (ok && (s_server.hasArg("adc_hpf_present") ||
+    if (ok && (s_server.hasArg("adc_eq_bypass_present") ||
+               s_server.hasArg("adc_hpf_present") ||
                s_server.hasArg("adc_hpfs1") ||
                s_server.hasArg("adc_hpfs2"))) {
+        // Each REG1C-affecting control posts only its own _present marker
+        // and its own checkbox; the other two stay in the saved config and
+        // are preserved via init-from-current. The previous design had both
+        // EQ-bypass and Dynamic-HPF forms posting a shared adc_hpf_present
+        // plus stale cross-form hidden mirrors of the other checkbox, which
+        // could revert a freshly-unchecked checkbox the next time its
+        // sibling was toggled.
         const ExternalRadioConfig *current = EXTERNAL_RADIO_GetConfig();
         uint8_t hpfs1 = current != nullptr ? current->adc_hpfs1 : 10u;
         bool eq_bypass = current == nullptr || current->adc_eq_bypass;
@@ -1244,7 +1277,7 @@ static void handleSaveNrl()
         }
         if (s_server.hasArg("adc_eq_bypass")) {
             eq_bypass = s_server.arg("adc_eq_bypass") == "1";
-        } else if (s_server.hasArg("adc_hpf_present")) {
+        } else if (s_server.hasArg("adc_eq_bypass_present")) {
             eq_bypass = false;
         }
         if (s_server.hasArg("adc_hpf")) {

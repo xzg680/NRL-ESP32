@@ -32,6 +32,7 @@ constexpr uint8_t kNrlTypeServerVoice = 9u;
 constexpr uint8_t kNrlTypeAtCommand = 11u;
 constexpr uint8_t kNrlTypeSciTransparent = 12u;
 constexpr size_t kAudioCodecFrameSamples = 80u;
+constexpr size_t kAudioCapture16kFrameSamples = kAudioCodecFrameSamples * 2u;
 constexpr size_t kG711PayloadBytes = 160u;
 constexpr size_t kG711RxPayloadMaxBytes = 500u;
 constexpr size_t kSciPayloadMaxBytes = 256u;
@@ -446,12 +447,36 @@ static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
     }
 }
 
+static size_t downsample16kTo8kForG711(const int16_t *pcm16k,
+                                       const size_t sample_count,
+                                       int16_t *pcm8k,
+                                       const size_t pcm8k_capacity)
+{
+    if (pcm16k == nullptr || pcm8k == nullptr || pcm8k_capacity == 0u) {
+        return 0u;
+    }
+    const size_t pairs = sample_count / 2u;
+    const size_t out_count = (pairs < pcm8k_capacity) ? pairs : pcm8k_capacity;
+    for (size_t i = 0; i < out_count; ++i) {
+        const int32_t a = pcm16k[i * 2u];
+        const int32_t b = pcm16k[i * 2u + 1u];
+        pcm8k[i] = static_cast<int16_t>((a + b) / 2);
+    }
+    return out_count;
+}
+
 static void es8311FrameHook(const int16_t *samples,
                             const size_t sample_count,
                             ES8311_AudioMode_t mode,
                             void *)
 {
     if (mode != ES8311_AUDIO_MODE_RECEIVE) {
+        return;
+    }
+    if (sample_count == kAudioCapture16kFrameSamples) {
+        int16_t pcm8k[kAudioCodecFrameSamples];
+        const size_t out_count = downsample16kTo8kForG711(samples, sample_count, pcm8k, kAudioCodecFrameSamples);
+        sendVoiceFrame(pcm8k, out_count);
         return;
     }
     sendVoiceFrame(samples, sample_count);

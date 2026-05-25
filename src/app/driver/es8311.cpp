@@ -17,7 +17,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
 #include "aec/aec_processor.h"
 #include "driver/external_radio.h"
 #endif
@@ -42,9 +42,10 @@ constexpr int kPinMclk = NRL_PIN_I2S_MCLK;
 constexpr int kPinPaEn = NRL_PIN_PA_EN;
 
 constexpr i2s_port_t kI2sPort = I2S_NUM_0;
-constexpr int kSampleRate = 8000;
+constexpr int kSampleRate = 16000;
 constexpr int kMclkRate = kSampleRate * 256;
-constexpr size_t kFrameSamples = 80;
+constexpr size_t kFrameSamples = 160;
+constexpr size_t kNetworkFrameSamples = kFrameSamples / 2u;
 // I2S bus stays stereo (2 slots/frame) so BCLK timing matches ES8311's clock
 // divider expectations. ES8311 is mono internally �?it reads/writes the LEFT
 // slot only. We duplicate mono content into both slots in i2s_write_frame.
@@ -121,12 +122,13 @@ constexpr uint8_t kEs8311DacVolumeDefault = 180U;
 // REG0D bits: PDN_ANA(7) PDN_IBIASGEN(6) PDN_ADCBIASGEN(5) PDN_ADCVERFGEN(4)
 //             PDN_DACVREFGEN(3) PDN_VREF(2) VMIDSEL(1:0)
 // NOTE: PDN_VREF (bit 2) has REVERSE polarity vs other PDN bits!
-//   0 = disable internal reference (BAD), 1 = enable reference (default)
-// 0x06 = enable everything analog + enable VREF + VMIDSEL=normal operation.
-// Old value 0x01 had bit2=0 which DISABLED the internal reference, leaving
-// DAC modulator without proper analog reference (root cause of DC offsets,
-// random startup polarity, dependence on external load to settle).
-constexpr uint8_t kEs8311PowerUpAnalog = 0x01;
+//   0 = disable internal reference (BAD), 1 = enable reference
+// VMIDSEL: 0=down, 1=startup normal charge, 2=normal operation, 3=startup fast.
+// 0x06 = all analog/bias/vref blocks enabled + VREF on + VMID in normal
+// operation. Earlier 0x01 left VREF disabled and VMID in startup-charge mode,
+// which starved the ADC/DAC modulators of a stable reference — that is the
+// root cause of the high mic noise floor and random DC offset / distortion.
+constexpr uint8_t kEs8311PowerUpAnalog = 0x06;
 constexpr uint8_t kEs8311PowerUpPgaAdc = 0x02;
 constexpr uint8_t kEs8311PowerUpDac = 0x00;
 constexpr uint8_t kEs8311OutputDriveLine = 0x00; // REG13: HPSW=0 bit6=0
@@ -163,13 +165,18 @@ static ES8311_AudioMode_t s_audio_mode = ES8311_AUDIO_MODE_RECEIVE;
 static ES8311_FrameHook_t s_frame_hook = nullptr;
 static void *s_frame_hook_user_data = nullptr;
 
-constexpr size_t kOutputQueueSamples = kFrameSamples * 64u;
+constexpr size_t kOutputQueueSamples = kNetworkFrameSamples * 64u;
 static int16_t s_output_queue[kOutputQueueSamples];
 static size_t s_output_queue_head = 0;
 static size_t s_output_queue_tail = 0;
 static size_t s_output_queue_count = 0;
 static SemaphoreHandle_t s_output_queue_mutex = nullptr;
 static uint32_t s_last_output_queue_log_ms = 0;
+static volatile uint8_t s_aec_reference_source = 0; // 0=network playback, 1=second mic
+static constexpr size_t kAecNetworkRefDelayFrames = 12; // ~120 ms at 160 samples/frame
+static int16_t s_aec_network_ref[kFrameSamples * kAecNetworkRefDelayFrames];
+static size_t s_aec_network_ref_head = 0;
+static size_t s_aec_network_ref_fill = 0;
 static uint8_t s_mic_volume = kEs8311AdcVolumeDefault;
 static uint8_t s_line_out_volume = kEs8311DacVolumeDefault;
 static bool s_hp_drive_enabled = false;
@@ -208,6 +215,92 @@ static uint32_t s_adceq_a1 = 0U;
 static uint32_t s_adceq_a2 = 0U;
 static uint32_t s_adceq_b1 = 0U;
 static uint32_t s_adceq_b2 = 0U;
+
+// Software 4th-order IIR high-pass filter (two RBJ biquads, Direct Form I) on
+// captured mic frames:
+//   y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
+// Coefficients are pre-computed for a 4th-order Butterworth response, cutoff
+// fc = 200 Hz, sample rate fs = 16000 Hz. -24 dB/oct rolloff below fc,
+// unity passband. See RBJ "Audio EQ Cookbook" — these are the normalized
+// values (after dividing the raw cookbook formulas by a0 = 1 + alpha).
+//   omega = 2*pi*fc/fs       = pi/40  ~= 0.07854
+//   cos(omega)               ~= 0.996917
+//   Q1 ~= 0.541196, Q2 ~= 1.306563
+// Filter is enabled/disabled at runtime via the web/AT "mic_hpf_enabled"
+// flag; state is reset on each toggle so the first frame after enabling
+// doesn't carry a spike from stale x1/x2/y1/y2.
+constexpr float kMicHpf1B0 =  0.93097528f;
+constexpr float kMicHpf1B1 = -1.86195056f;
+constexpr float kMicHpf1B2 =  0.93097528f;
+constexpr float kMicHpf1A1 = -1.85907624f;
+constexpr float kMicHpf1A2 =  0.86482488f;
+constexpr float kMicHpf2B0 =  0.96935382f;
+constexpr float kMicHpf2B1 = -1.93870765f;
+constexpr float kMicHpf2B2 =  0.96935382f;
+constexpr float kMicHpf2A1 = -1.93571484f;
+constexpr float kMicHpf2A2 =  0.94170045f;
+static volatile bool s_mic_hpf_enabled = false;
+static float s_mic_hpf1_x1 = 0.0f;
+static float s_mic_hpf1_x2 = 0.0f;
+static float s_mic_hpf1_y1 = 0.0f;
+static float s_mic_hpf1_y2 = 0.0f;
+static float s_mic_hpf2_x1 = 0.0f;
+static float s_mic_hpf2_x2 = 0.0f;
+static float s_mic_hpf2_y1 = 0.0f;
+static float s_mic_hpf2_y2 = 0.0f;
+
+static inline void mic_hpf_reset(void) {
+    s_mic_hpf1_x1 = 0.0f;
+    s_mic_hpf1_x2 = 0.0f;
+    s_mic_hpf1_y1 = 0.0f;
+    s_mic_hpf1_y2 = 0.0f;
+    s_mic_hpf2_x1 = 0.0f;
+    s_mic_hpf2_x2 = 0.0f;
+    s_mic_hpf2_y1 = 0.0f;
+    s_mic_hpf2_y2 = 0.0f;
+}
+
+static inline void mic_hpf_apply(int16_t *frame, const size_t count) {
+    if (!s_mic_hpf_enabled || frame == nullptr) {
+        return;
+    }
+    float x11 = s_mic_hpf1_x1;
+    float x12 = s_mic_hpf1_x2;
+    float y11 = s_mic_hpf1_y1;
+    float y12 = s_mic_hpf1_y2;
+    float x21 = s_mic_hpf2_x1;
+    float x22 = s_mic_hpf2_x2;
+    float y21 = s_mic_hpf2_y1;
+    float y22 = s_mic_hpf2_y2;
+    for (size_t i = 0; i < count; ++i) {
+        const float x = static_cast<float>(frame[i]);
+        const float y_stage1 = kMicHpf1B0 * x + kMicHpf1B1 * x11 + kMicHpf1B2 * x12
+                               - kMicHpf1A1 * y11 - kMicHpf1A2 * y12;
+        x12 = x11;
+        x11 = x;
+        y12 = y11;
+        y11 = y_stage1;
+
+        const float y = kMicHpf2B0 * y_stage1 + kMicHpf2B1 * x21 + kMicHpf2B2 * x22
+                        - kMicHpf2A1 * y21 - kMicHpf2A2 * y22;
+        x22 = x21;
+        x21 = y_stage1;
+        y22 = y21;
+        y21 = y;
+        int32_t out = static_cast<int32_t>(y);
+        if (out > INT16_MAX) { out = INT16_MAX; }
+        else if (out < INT16_MIN) { out = INT16_MIN; }
+        frame[i] = static_cast<int16_t>(out);
+    }
+    s_mic_hpf1_x1 = x11;
+    s_mic_hpf1_x2 = x12;
+    s_mic_hpf1_y1 = y11;
+    s_mic_hpf1_y2 = y12;
+    s_mic_hpf2_x1 = x21;
+    s_mic_hpf2_x2 = x22;
+    s_mic_hpf2_y1 = y21;
+    s_mic_hpf2_y2 = y22;
+}
 
 static bool es8311_write_reg(uint8_t reg, uint8_t value) {
     bool ok = false;
@@ -576,6 +669,10 @@ static bool es8311_configure_codec(void) {
         Serial.println("[ES8311] REG11 bias config failed");
         return false;
     }
+    // Let the bias generators settle before powering up the rest of the
+    // analog block. Without this delay the ADC sees transient bias and
+    // produces an audible "settling" hiss for the first second.
+    delay(40);
 
     if (!es8311_write_reg(ES8311_REG00_RESET, 0x80)) {
         Serial.println("[ES8311] REG00 reset/slave failed");
@@ -630,7 +727,15 @@ static bool es8311_configure_codec(void) {
         Serial.println("[ES8311] REG1C (ADC EQ) failed");
         return false;
     }
-    if (!es8311_write_reg(ES8311_REG44_GPIO, 0x58)) {
+    // REG44 ADCDAT_SEL (bits 6:4): 0 = "ADC + ADC" duplicates the mic on
+    // both I2S slots (default). The earlier 0x58 value selected
+    // "ADC + DACR", which fed the DAC output back onto the right I2S slot
+    // as an AEC reference — but the current board variants run AFE as a
+    // single-mic path unless a true playback reference is explicitly wired,
+    // and routing DAC content onto a mic slot only invites
+    // crosstalk. Keep bit3 (I2C_WL, "internal use") set, matching the
+    // earlier 0x08 writes from the init sequence.
+    if (!es8311_write_reg(ES8311_REG44_GPIO, 0x08)) {
         Serial.println("[ES8311] REG44 final failed");
         return false;
     }
@@ -679,6 +784,11 @@ static bool es8311_configure_codec(void) {
         Serial.println("[ES8311] REG0D power-up analog failed");
         return false;
     }
+    // VMID needs ~tens of ms to charge up after enabling the analog block.
+    // Apply ADC/DAC config after VMID is stable, otherwise the first frames
+    // captured by the ADC carry a sliding DC bias that sounds like a
+    // low-frequency "thump" plus elevated noise.
+    delay(40);
     if (!es8311_apply_adc_config()) {
         Serial.println("[ES8311] REG15 ADC ramp rate failed");
         return false;
@@ -843,7 +953,7 @@ static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
     // Stereo I2S: 2 int16 per LRCK frame (L,R). ES8311 outputs ADC data on
     // LEFT only �?extract LEFT samples into dst.
     static_assert(kI2sSlotCount == 2, "i2s_read_frame assumes stereo I2S frame");
-    int16_t raw[kFrameSamples * kI2sSlotCount];  // size = 80*2 = 160
+    int16_t raw[kFrameSamples * kI2sSlotCount];  // size = 160*2 = 320
     size_t bytes_in_frame = 0;
     while (bytes_in_frame < kI2sFrameBytes) {
         size_t bytes_read = 0;
@@ -856,6 +966,7 @@ static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
         }
 
         if (bytes_read == 0) {
+            vTaskDelay(1);
             continue;
         }
 
@@ -890,7 +1001,7 @@ static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
 #endif
 
     // Take LEFT slot (mic). When dst_ref is given, also take the RIGHT slot,
-    // which on the Gezipai board carries the speaker echo reference for AEC.
+    // which is only used when a board-specific AEC reference is compiled in.
     for (size_t i = 0; i < kFrameSamples; ++i) {
         dst[i] = raw[i * 2];
         if (dst_ref != nullptr) {
@@ -907,7 +1018,7 @@ static bool i2s_write_frame(const int16_t *src) {
 
     // Stereo I2S: 2 int16 per LRCK frame. Duplicate mono src into both slots.
     static_assert(kI2sSlotCount == 2, "i2s_write_frame assumes stereo I2S frame");
-    int16_t raw[kFrameSamples * kI2sSlotCount];  // size = 80*2 = 160
+    int16_t raw[kFrameSamples * kI2sSlotCount];  // size = 160*2 = 320
 #if ES8311_FORCE_DAC_SILENCE
     (void)src;
     memset(raw, 0, sizeof(raw));
@@ -930,6 +1041,7 @@ static bool i2s_write_frame(const int16_t *src) {
         }
 
         if (bytes_written == 0) {
+            vTaskDelay(1);
             continue;
         }
 
@@ -948,6 +1060,52 @@ static void output_queue_clear_locked(void) {
     s_output_queue_head = 0;
     s_output_queue_tail = 0;
     s_output_queue_count = 0;
+}
+
+static void aec_network_ref_clear(void) {
+    memset(s_aec_network_ref, 0, sizeof(s_aec_network_ref));
+    s_aec_network_ref_head = 0;
+    s_aec_network_ref_fill = 0;
+}
+
+static void aec_network_ref_read(int16_t *dst, const size_t sample_count) {
+    if (dst == nullptr || sample_count == 0) {
+        return;
+    }
+    if (sample_count != kFrameSamples ||
+        s_aec_network_ref_fill < kAecNetworkRefDelayFrames) {
+        memset(dst, 0, sample_count * sizeof(int16_t));
+        return;
+    }
+    memcpy(dst,
+           s_aec_network_ref + (s_aec_network_ref_head * kFrameSamples),
+           kFrameSamples * sizeof(int16_t));
+}
+
+static void aec_network_ref_push(const int16_t *src, const size_t sample_count) {
+    if (src == nullptr || sample_count != kFrameSamples) {
+        return;
+    }
+    memcpy(s_aec_network_ref + (s_aec_network_ref_head * kFrameSamples),
+           src,
+           kFrameSamples * sizeof(int16_t));
+    s_aec_network_ref_head = (s_aec_network_ref_head + 1u) % kAecNetworkRefDelayFrames;
+    if (s_aec_network_ref_fill < kAecNetworkRefDelayFrames) {
+        ++s_aec_network_ref_fill;
+    }
+}
+
+static void upsample_8k_to_16k_frame(const int16_t *src8, int16_t *dst16) {
+    if (src8 == nullptr || dst16 == nullptr) {
+        return;
+    }
+    for (size_t i = 0; i < kNetworkFrameSamples; ++i) {
+        const int16_t current = src8[i];
+        const int16_t next = (i + 1u < kNetworkFrameSamples) ? src8[i + 1u] : current;
+        dst16[i * 2u] = current;
+        dst16[i * 2u + 1u] = static_cast<int16_t>(
+            (static_cast<int32_t>(current) + static_cast<int32_t>(next)) / 2);
+    }
 }
 
 static size_t output_queue_push(const int16_t *samples, size_t sample_count) {
@@ -1017,6 +1175,7 @@ static void output_queue_clear(void) {
         return;
     }
     output_queue_clear_locked();
+    aec_network_ref_clear();
     xSemaphoreGive(s_output_queue_mutex);
 }
 
@@ -1084,11 +1243,11 @@ static void es8311_log_mic_frame_stats(const int16_t *frame) {
 #endif
 }
 
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
 // Sink for echo-cancelled audio from the AEC processor: forward it to the
 // registered frame hook, exactly as raw mic capture would have been.
 static void es8311_aec_output(const int16_t *clean, size_t count, void *) {
-    if (s_frame_hook != nullptr) {
+    if (AEC_IsRuntimeActive() && s_frame_hook != nullptr) {
         s_frame_hook(clean, count, s_audio_mode, s_frame_hook_user_data);
     }
 }
@@ -1096,27 +1255,53 @@ static void es8311_aec_output(const int16_t *clean, size_t count, void *) {
 
 static void es8311_passthrough_task(void *) {
     static int16_t frame[kFrameSamples];
+    static int16_t playback_8k[kNetworkFrameSamples];
+    static int16_t playback_frame[kFrameSamples];
 
     while (s_passthrough_running) {
         const ES8311_AudioMode_t mode = s_audio_mode;
 
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
         static int16_t ref_frame[kFrameSamples];
-        const bool aec_active = AEC_IsReady();
-        if (!i2s_read_frame(frame, aec_active ? ref_frame : nullptr)) {
+        static int16_t network_ref_frame[kFrameSamples];
+        // The software HPF is a local passthrough filter. Do not use this
+        // switch to decide whether esp-sr should own the uplink; otherwise
+        // enabling the HPF can accidentally route BH4TDV mic audio into the
+        // AFE and silence the stream if the AFE is not producing frames.
+        const bool software_filter_enabled = s_mic_hpf_enabled;
+        const bool afe_ready = AEC_IsReady();
+        const bool processed_route = AEC_IsRuntimeActive();
+        const bool needs_ref = afe_ready && AEC_UsesReference();
+        if (!i2s_read_frame(frame, needs_ref ? ref_frame : nullptr)) {
             Serial.println("[ES8311][MIC] i2s_read_frame failed");
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
 
+        // Log raw mic energy first so the debug stats reflect what the ADC
+        // actually saw (helps diagnose whether elevated noise is upstream of
+        // the software HPF or not). Then apply the HPF, so AEC and the
+        // network uplink both see the filtered signal.
         es8311_log_mic_frame_stats(frame);
+        if (software_filter_enabled) {
+            mic_hpf_apply(frame, kFrameSamples);
+        }
 
-        if (aec_active) {
-            // mic = LEFT slot, speaker echo reference = RIGHT slot.
-            // The echo-cancelled result returns via es8311_aec_output.
-            (void)mode;
-            AEC_SubmitCapture(frame, ref_frame, kFrameSamples);
-        } else if (s_frame_hook != nullptr) {
+        if (afe_ready) {
+            const int16_t *ref = nullptr;
+            if (needs_ref) {
+                if (s_aec_reference_source == 1u) {
+                    ref = ref_frame;
+                } else {
+                    aec_network_ref_read(network_ref_frame, kFrameSamples);
+                    ref = network_ref_frame;
+                }
+            }
+            // mic = LEFT slot; reference is either RIGHT slot or delayed DAC playback.
+            // The processed result returns via es8311_aec_output.
+            AEC_SubmitCapture(frame, ref, kFrameSamples);
+        }
+        if (!processed_route && s_frame_hook != nullptr) {
             s_frame_hook(frame, kFrameSamples, mode, s_frame_hook_user_data);
         }
 #else
@@ -1127,6 +1312,7 @@ static void es8311_passthrough_task(void *) {
         }
 
         es8311_log_mic_frame_stats(frame);
+        mic_hpf_apply(frame, kFrameSamples);
 
         if (s_frame_hook != nullptr) {
             s_frame_hook(frame, kFrameSamples, mode, s_frame_hook_user_data);
@@ -1138,12 +1324,15 @@ static void es8311_passthrough_task(void *) {
         // received radio audio out the TO_MIC line.
         // In RX mode, DAC plays whatever is in the output queue (NRL downlink).
         // If the queue is empty, write silence so the DAC stays at VMID.
-        const size_t popped = output_queue_pop_frame(frame, kFrameSamples);
+        const size_t popped = output_queue_pop_frame(playback_8k, kNetworkFrameSamples);
         (void)popped;
-        if (!i2s_write_frame(frame)) {
+        upsample_8k_to_16k_frame(playback_8k, playback_frame);
+        aec_network_ref_push(playback_frame, kFrameSamples);
+        if (!i2s_write_frame(playback_frame)) {
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
+        vTaskDelay(1);
     }
 
     i2s_clear_dma();
@@ -1238,20 +1427,31 @@ bool ES8311_Init(void) {
         }
     }
 
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
-    // Bring up the esp-sr AEC before the passthrough task starts feeding it.
-    // The AEC switch (AT+AEC / web portal) is persisted in the radio config and
-    // read here at boot, so toggling it takes effect after the next restart.
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
+    // Bring up esp-sr before the passthrough task starts feeding it. Runtime
+    // switches only choose whether to use processed frames and which reference
+    // source to feed; the resident AFE stays alive.
     const ExternalRadioConfig *aec_cfg = EXTERNAL_RADIO_GetConfig();
-    if (aec_cfg != nullptr && aec_cfg->aec_enabled) {
-        AEC_SetOutputCallback(es8311_aec_output, nullptr);
-        if (AEC_Init()) {
-            Serial.println("[ES8311] AEC active: mic uplink is echo-cancelled");
-        } else {
-            Serial.println("[ES8311] AEC init failed -- mic uplink falls back to raw");
-        }
+    const bool runtime_ai_noise = (aec_cfg != nullptr) && aec_cfg->ai_noise_enabled;
+    ES8311_SetAecReferenceSource((aec_cfg != nullptr) ? aec_cfg->aec_reference_source : 0u);
+#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
+    const bool afe_has_aec = true;
+    const bool runtime_aec = (aec_cfg != nullptr) && aec_cfg->aec_enabled;
+#else
+    const bool afe_has_aec = false;
+    const bool runtime_aec = false;
+#endif
+    const bool afe_has_ai_noise = true;
+    AEC_SetOutputCallback(es8311_aec_output, nullptr);
+    if (AEC_Init(afe_has_aec, afe_has_ai_noise)) {
+        AEC_SetRuntimeEnabled(runtime_aec, runtime_ai_noise);
+        Serial.printf("[ES8311] esp-sr resident: aec_cap=%u ai_cap=%u route_aec=%u route_ai=%u\n",
+                      afe_has_aec ? 1u : 0u,
+                      afe_has_ai_noise ? 1u : 0u,
+                      runtime_aec ? 1u : 0u,
+                      runtime_ai_noise ? 1u : 0u);
     } else {
-        Serial.println("[ES8311] AEC disabled by config -- mic uplink is raw");
+        Serial.println("[ES8311] esp-sr resident init failed -- mic uplink falls back to raw");
     }
 #endif
 
@@ -1309,6 +1509,11 @@ bool ES8311_SetReceiveMode(void) {
 void ES8311_SetFrameHook(ES8311_FrameHook_t hook, void *user_data) {
     s_frame_hook = hook;
     s_frame_hook_user_data = user_data;
+}
+
+void ES8311_SetAecReferenceSource(const uint8_t source) {
+    s_aec_reference_source = (source == 1u) ? 1u : 0u;
+    aec_network_ref_clear();
 }
 
 size_t ES8311_QueueOutputSamples(const int16_t *samples, size_t sample_count) {
@@ -1464,6 +1669,30 @@ int ES8311_GetSampleRate(void) {
 
 size_t ES8311_GetFrameSamples(void) {
     return kFrameSamples;
+}
+
+void ES8311_SetMicHpfEnabled(const bool enabled) {
+    if (s_mic_hpf_enabled != enabled) {
+        s_mic_hpf_enabled = enabled;
+        mic_hpf_reset();
+        Serial.printf("[ES8311] mic HPF %s (4th-order, fc~=200Hz @ fs=%dHz, s1=%.6f/%.6f/%.6f/%.6f/%.6f s2=%.6f/%.6f/%.6f/%.6f/%.6f)\n",
+                      enabled ? "ENABLED" : "disabled",
+                      kSampleRate,
+                      static_cast<double>(kMicHpf1B0),
+                      static_cast<double>(kMicHpf1B1),
+                      static_cast<double>(kMicHpf1B2),
+                      static_cast<double>(kMicHpf1A1),
+                      static_cast<double>(kMicHpf1A2),
+                      static_cast<double>(kMicHpf2B0),
+                      static_cast<double>(kMicHpf2B1),
+                      static_cast<double>(kMicHpf2B2),
+                      static_cast<double>(kMicHpf2A1),
+                      static_cast<double>(kMicHpf2A2));
+    }
+}
+
+bool ES8311_GetMicHpfEnabled(void) {
+    return s_mic_hpf_enabled;
 }
 
 bool ES8311_PlayTestTone(const uint32_t durationMs) {

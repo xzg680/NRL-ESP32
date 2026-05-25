@@ -2,9 +2,10 @@
 
 #include "driver/board_pins.h"
 
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
 
 #include <Arduino.h>
+#include <esp_afe_config.h>
 #include <esp_afe_sr_models.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
@@ -12,14 +13,15 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <math.h>
+#include <model_path.h>
 #include <stdlib.h>
 #include <string.h>
 
 namespace {
 
 // ---- Resampler ---------------------------------------------------------
-// A windowed-sinc low-pass FIR shared by the 8k->16k upsampler and the
-// 16k->8k downsampler. Cutoff 0.25 cycles/sample = 4 kHz at 16 kHz.
+// Windowed-sinc low-pass FIR for the 16k->8k downsampler.
+// Cutoff 0.25 cycles/sample = 4 kHz at 16 kHz.
 constexpr size_t kFirTaps = 31;
 constexpr size_t kFirHalf = kFirTaps / 2; // 15
 float s_fir[kFirTaps];
@@ -46,32 +48,6 @@ inline int16_t clamp16(float v) {
     if (r > 32767) r = 32767;
     if (r < -32768) r = -32768;
     return static_cast<int16_t>(r);
-}
-
-// Per-channel 8k->16k upsampler: history of recent 8 kHz input samples.
-struct Upsampler {
-    float hist[kFirHalf + 1];
-};
-
-// out must hold 2 * n samples.
-void upsample2x(Upsampler &s, const int16_t *in, size_t n, int16_t *out) {
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t h = kFirHalf; h > 0; --h) {
-            s.hist[h] = s.hist[h - 1];
-        }
-        s.hist[0] = static_cast<float>(in[i]);
-
-        float ye = 0.0f; // even polyphase: taps 0,2,..,30
-        float yo = 0.0f; // odd  polyphase: taps 1,3,..,29
-        for (size_t t = 0; t <= kFirHalf; ++t) {
-            ye += s_fir[2 * t] * s.hist[t];
-        }
-        for (size_t t = 0; t < kFirHalf; ++t) {
-            yo += s_fir[2 * t + 1] * s.hist[t];
-        }
-        out[2 * i] = clamp16(2.0f * ye);
-        out[2 * i + 1] = clamp16(2.0f * yo);
-    }
 }
 
 // 16k->8k downsampler: history of recent 16 kHz input samples.
@@ -108,12 +84,11 @@ esp_afe_sr_data_t *s_afe = nullptr;
 int s_feed_chunk = 0;  // per-channel samples per feed (16 kHz)
 int s_fetch_chunk = 0; // samples per fetch (16 kHz)
 
-int16_t *s_feed_buf = nullptr; // interleaved [mic,ref] @16 kHz
+int16_t *s_feed_buf = nullptr; // interleaved channels @16 kHz
 size_t s_feed_cap = 0;         // per-channel capacity
 size_t s_feed_fill = 0;        // per-channel samples buffered
+size_t s_feed_channels = 1;    // 1=mic only, 2=mic+ref
 
-Upsampler s_up_mic;
-Upsampler s_up_ref;
 Downsampler s_down;
 
 int16_t s_out_frame[kOutFrameSamples];
@@ -125,6 +100,15 @@ void *s_out_user = nullptr;
 TaskHandle_t s_fetch_task = nullptr;
 volatile bool s_running = false;
 bool s_ready = false;
+bool s_has_reference = false;
+bool s_has_ai_noise = false;
+volatile bool s_runtime_aec_enabled = false;
+volatile bool s_runtime_ai_noise_enabled = false;
+srmodel_list_t *s_models = nullptr;
+
+const char *input_format_for(const bool use_ref_channel) {
+    return use_ref_channel ? "MR" : "M";
+}
 
 void aec_fetch_task(void *) {
     static int16_t down8[1024];
@@ -151,6 +135,7 @@ void aec_fetch_task(void *) {
             }
             off += block;
         }
+        vTaskDelay(1);
     }
     s_fetch_task = nullptr;
     vTaskDelete(nullptr);
@@ -158,58 +143,89 @@ void aec_fetch_task(void *) {
 
 } // namespace
 
-bool AEC_Init(void) {
+bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     if (s_ready) {
         return true;
+    }
+    if (!enable_aec && !enable_ai_noise) {
+        return false;
     }
 
     fir_init();
 
-    afe_config_t cfg = AFE_CONFIG_DEFAULT();
-    cfg.aec_init = true;
-    cfg.se_init = true;
-    cfg.vad_init = false;
-    cfg.wakenet_init = false;
-    cfg.voice_communication_init = true;
-    cfg.voice_communication_agc_init = true;
-    cfg.afe_mode = SR_MODE_HIGH_PERF;
-    cfg.memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
-    cfg.pcm_config.total_ch_num = 2;
-    cfg.pcm_config.mic_num = 1;
-    cfg.pcm_config.ref_num = 1;
-    cfg.pcm_config.sample_rate = 16000;
+    const bool use_ref_channel = enable_aec;
+    s_models = esp_srmodel_init("model");
+    if (s_models == nullptr) {
+        Serial.println("[AEC] esp_srmodel_init('model') failed -- NSNET2 model partition missing?");
+        return false;
+    }
 
-    s_iface = &ESP_AFE_VC_HANDLE;
-    s_afe = s_iface->create_from_config(&cfg);
+    afe_config_t *cfg = afe_config_init(input_format_for(use_ref_channel),
+                                        s_models,
+                                        AFE_TYPE_VC,
+                                        AFE_MODE_LOW_COST);
+    if (cfg == nullptr) {
+        Serial.println("[AEC] afe_config_init failed");
+        esp_srmodel_deinit(s_models);
+        s_models = nullptr;
+        return false;
+    }
+
+    cfg->aec_init = use_ref_channel;
+    cfg->se_init = false;
+    cfg->vad_init = false;
+    cfg->wakenet_init = false;
+    cfg->agc_init = false;
+    cfg->afe_ns_mode = AFE_NS_MODE_NET;
+
+    s_iface = esp_afe_handle_from_config(cfg);
+    if (s_iface == nullptr) {
+        Serial.println("[AEC] esp_afe_handle_from_config failed");
+        afe_config_free(cfg);
+        esp_srmodel_deinit(s_models);
+        s_models = nullptr;
+        return false;
+    }
+
+    s_afe = s_iface->create_from_config(cfg);
+    afe_config_free(cfg);
     if (s_afe == nullptr) {
         Serial.println("[AEC] AFE create_from_config failed");
+        esp_srmodel_deinit(s_models);
+        s_models = nullptr;
         return false;
     }
 
     s_feed_chunk = s_iface->get_feed_chunksize(s_afe);
     s_fetch_chunk = s_iface->get_fetch_chunksize(s_afe);
+    s_feed_channels = static_cast<size_t>(s_iface->get_feed_channel_num(s_afe));
+    if (s_feed_channels == 0u) {
+        s_feed_channels = use_ref_channel ? 2u : 1u;
+    }
     if (s_feed_chunk <= 0) {
         Serial.println("[AEC] invalid feed chunk size");
         s_iface->destroy(s_afe);
         s_afe = nullptr;
+        esp_srmodel_deinit(s_models);
+        s_models = nullptr;
         return false;
     }
 
-    // Capacity: one feed chunk plus one upsampled I2S frame of headroom.
+    // Capacity: one feed chunk plus one 16 kHz I2S frame of headroom.
     s_feed_cap = static_cast<size_t>(s_feed_chunk) + 256u;
     s_feed_buf = static_cast<int16_t *>(
-        malloc(s_feed_cap * 2u * sizeof(int16_t)));
+        malloc(s_feed_cap * s_feed_channels * sizeof(int16_t)));
     if (s_feed_buf == nullptr) {
         Serial.println("[AEC] feed buffer alloc failed");
         s_iface->destroy(s_afe);
         s_afe = nullptr;
+        esp_srmodel_deinit(s_models);
+        s_models = nullptr;
         return false;
     }
 
     s_feed_fill = 0;
     s_out_fill = 0;
-    memset(&s_up_mic, 0, sizeof(s_up_mic));
-    memset(&s_up_ref, 0, sizeof(s_up_ref));
     memset(&s_down, 0, sizeof(s_down));
 
     s_running = true;
@@ -222,13 +238,22 @@ bool AEC_Init(void) {
         s_feed_buf = nullptr;
         s_iface->destroy(s_afe);
         s_afe = nullptr;
+        esp_srmodel_deinit(s_models);
+        s_models = nullptr;
         return false;
     }
 
     s_ready = true;
+    s_has_reference = enable_aec;
+    s_has_ai_noise = enable_ai_noise;
+    AEC_SetRuntimeEnabled(enable_aec, enable_ai_noise);
     Serial.printf("[AEC] ready: feed_chunk=%d fetch_chunk=%d (16kHz), "
-                  "8k<->16k resampling active\n",
-                  s_feed_chunk, s_fetch_chunk);
+                  "capture=16k output=8k, ch=%u aec=%u ai_noise=%u\n",
+                  s_feed_chunk,
+                  s_fetch_chunk,
+                  static_cast<unsigned>(s_feed_channels),
+                  s_has_reference ? 1u : 0u,
+                  s_has_ai_noise ? 1u : 0u);
     return true;
 }
 
@@ -236,60 +261,71 @@ bool AEC_IsReady(void) {
     return s_ready;
 }
 
+void AEC_SetRuntimeEnabled(const bool enable_aec, const bool enable_ai_noise) {
+    s_runtime_aec_enabled = s_has_reference && enable_aec;
+    s_runtime_ai_noise_enabled = s_has_ai_noise && enable_ai_noise;
+}
+
+bool AEC_UsesReference(void) {
+    return s_ready && s_has_reference;
+}
+
+bool AEC_IsRuntimeActive(void) {
+    return s_ready && (s_runtime_aec_enabled || s_runtime_ai_noise_enabled);
+}
+
 void AEC_SetOutputCallback(AEC_OutputCallback callback, void *user_data) {
     s_out_cb = callback;
     s_out_user = user_data;
 }
 
-void AEC_SubmitCapture(const int16_t *mic_8k,
-                       const int16_t *ref_8k,
+void AEC_SubmitCapture(const int16_t *mic_16k,
+                       const int16_t *ref_16k,
                        size_t sample_count) {
-    if (!s_ready || mic_8k == nullptr || ref_8k == nullptr ||
-        sample_count == 0) {
+    if (!s_ready || mic_16k == nullptr || sample_count == 0) {
+        return;
+    }
+    if (s_feed_channels > 1u && ref_16k == nullptr) {
         return;
     }
 
-    // Upsample this 8 kHz frame to 16 kHz for both channels.
-    static int16_t mic16[256];
-    static int16_t ref16[256];
-    if (sample_count * 2u > sizeof(mic16) / sizeof(mic16[0])) {
-        return; // frame larger than expected
-    }
-    upsample2x(s_up_mic, mic_8k, sample_count, mic16);
-    upsample2x(s_up_ref, ref_8k, sample_count, ref16);
-    const size_t n16 = sample_count * 2u;
-
-    if (s_feed_fill + n16 > s_feed_cap) {
+    if (s_feed_fill + sample_count > s_feed_cap) {
         // Overflow guard: drop to resync rather than corrupt memory.
         s_feed_fill = 0;
         return;
     }
 
-    // Append channel-interleaved: [mic, ref] (reference is the last channel).
-    for (size_t i = 0; i < n16; ++i) {
-        s_feed_buf[(s_feed_fill + i) * 2u] = mic16[i];
-        s_feed_buf[(s_feed_fill + i) * 2u + 1u] = ref16[i];
+    // Append channel-interleaved: [mic] or [mic, ref].
+    for (size_t i = 0; i < sample_count; ++i) {
+        s_feed_buf[(s_feed_fill + i) * s_feed_channels] = mic_16k[i];
+        if (s_feed_channels > 1u) {
+            s_feed_buf[(s_feed_fill + i) * s_feed_channels + 1u] = ref_16k[i];
+        }
     }
-    s_feed_fill += n16;
+    s_feed_fill += sample_count;
 
     // Feed full chunks to the AFE.
     while (s_feed_fill >= static_cast<size_t>(s_feed_chunk)) {
         s_iface->feed(s_afe, s_feed_buf);
+        vTaskDelay(1);
         const size_t remain = s_feed_fill - static_cast<size_t>(s_feed_chunk);
         if (remain > 0) {
             memmove(s_feed_buf,
-                    s_feed_buf + static_cast<size_t>(s_feed_chunk) * 2u,
-                    remain * 2u * sizeof(int16_t));
+                    s_feed_buf + static_cast<size_t>(s_feed_chunk) * s_feed_channels,
+                    remain * s_feed_channels * sizeof(int16_t));
         }
         s_feed_fill = remain;
     }
 }
 
-#else // !NRL_ENABLE_GEZIPAI_AEC
+#else // !NRL_ENABLE_AUDIO_AFE
 
-bool AEC_Init(void) { return false; }
+bool AEC_Init(bool, bool) { return false; }
 bool AEC_IsReady(void) { return false; }
+void AEC_SetRuntimeEnabled(bool, bool) {}
+bool AEC_UsesReference(void) { return false; }
+bool AEC_IsRuntimeActive(void) { return false; }
 void AEC_SetOutputCallback(AEC_OutputCallback, void *) {}
 void AEC_SubmitCapture(const int16_t *, const int16_t *, size_t) {}
 
-#endif // NRL_ENABLE_GEZIPAI_AEC
+#endif // NRL_ENABLE_AUDIO_AFE

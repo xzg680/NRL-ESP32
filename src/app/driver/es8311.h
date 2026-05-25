@@ -29,12 +29,17 @@ bool ES8311_SetAudioMode(ES8311_AudioMode_t mode);
 bool ES8311_SetReceiveMode(void);
 
 // Register a callback invoked from the ES8311 passthrough task.
-// The hook is called for captured receive-mode PCM16 frames at 8 kHz.
+// The hook is called for raw captured receive-mode PCM16 frames at 16 kHz.
+// AFE/AEC processed frames are already downsampled to 8 kHz for G.711.
 void ES8311_SetFrameHook(ES8311_FrameHook_t hook, void *user_data);
 
 // Queue PCM16 mono samples (8 kHz) for DAC playback.
 size_t ES8311_QueueOutputSamples(const int16_t *samples, size_t sample_count);
 void ES8311_ClearOutputQueue(void);
+
+// AEC reference source: 0 = delayed network playback, 1 = second I2S input
+// channel. Takes effect immediately while the resident AFE keeps running.
+void ES8311_SetAecReferenceSource(uint8_t source);
 bool ES8311_ApplyAudioConfig(uint8_t mic_volume,
                              uint8_t line_out_volume,
                              bool hp_drive_enabled,
@@ -76,6 +81,14 @@ bool ES8311_ApplyAudioConfig(uint8_t mic_volume,
 
 int ES8311_GetSampleRate(void);
 size_t ES8311_GetFrameSamples(void);
+
+// Software high-pass filter on captured mic audio. When enabled, a 4th-order
+// IIR HPF (~200 Hz cutoff at 16 kHz sample rate) is applied to every frame
+// before it reaches AEC / the frame hook, removing DC offset and low-frequency
+// rumble. Stateful: toggling resets the filter memory to avoid a transient
+// on the first frame.
+void ES8311_SetMicHpfEnabled(bool enabled);
+bool ES8311_GetMicHpfEnabled(void);
 
 // Convenience test tone output to verify speaker chain.
 bool ES8311_PlayTestTone(uint32_t durationMs);

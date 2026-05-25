@@ -4,6 +4,9 @@
 #include "eeprom.h"
 #include "es8311.h"
 #include "../../lib/nrl_audio_config.h"
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
+#include "aec/aec_processor.h"
+#endif
 
 #ifndef ENABLE_OPENCV
 #include <Arduino.h>
@@ -32,6 +35,8 @@ constexpr uint8_t kPersistedHpDriveOff = 1U;
 constexpr uint8_t kPersistedHpDriveOn = 2U;
 constexpr uint8_t kPersistedFlagOff = 1U;
 constexpr uint8_t kPersistedFlagOn = 2U;
+constexpr uint8_t kPersistedAecRefNetwork = 1U;
+constexpr uint8_t kPersistedAecRefMic = 2U;
 constexpr uint8_t kDefaultDrcWinsize = 0U;
 constexpr uint8_t kDefaultDrcMaxlevel = 0U;
 constexpr uint8_t kDefaultDrcMinlevel = 0U;
@@ -100,6 +105,25 @@ bool s_loaded = false;
 #if NRL_BOARD == NRL_BOARD_BH4TDV
 uint8_t s_last_channel_encoded = 0xFFu;
 #endif
+
+static uint8_t defaultAecReferenceSource(void)
+{
+#if NRL_HAS_ES7210
+    return EXTERNAL_RADIO_AEC_REF_MIC;
+#else
+    return EXTERNAL_RADIO_AEC_REF_NETWORK;
+#endif
+}
+
+static uint8_t normalizeAecReferenceSource(const uint8_t source)
+{
+#if NRL_HAS_ES7210
+    if (source == EXTERNAL_RADIO_AEC_REF_MIC) {
+        return EXTERNAL_RADIO_AEC_REF_MIC;
+    }
+#endif
+    return EXTERNAL_RADIO_AEC_REF_NETWORK;
+}
 
 static void copyBounded(char *dst, const size_t dst_size, const char *src)
 {
@@ -386,6 +410,9 @@ static void applyAudioConfigToCodec(void)
                             s_config.adceq_a2,
                             s_config.adceq_b1,
                             s_config.adceq_b2);
+    // The mic HPF is a pure-software filter (no I2C registers involved), so
+    // it is pushed to the codec driver separately from ES8311_ApplyAudioConfig.
+    ES8311_SetMicHpfEnabled(s_config.mic_hpf_enabled);
 }
 
 // Drives the BH4TDV radio's channel-select GPIOs. 格子派 has no channel-
@@ -430,7 +457,18 @@ static void applyDefaults(void)
     s_config.wifi_gateway = 0U;
     s_config.wifi_dns = 0U;
     s_config.wifi_dhcp_enabled = true;
+#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
     s_config.aec_enabled = true;
+#else
+    s_config.aec_enabled = false;
+#endif
+    s_config.aec_reference_source = defaultAecReferenceSource();
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
+    s_config.ai_noise_enabled = true;
+#else
+    s_config.ai_noise_enabled = false;
+#endif
+    s_config.mic_hpf_enabled = true;
     s_config.ptt_timeout_s = kDefaultPttTimeoutS;
     copyBounded(s_config.server_host, sizeof(s_config.server_host), NRL_AUDIO_SERVER_HOST);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), NRL_AUDIO_CALLSIGN);
@@ -501,6 +539,13 @@ static void normalizeConfig(void)
     if (s_config.ptt_timeout_s < kMinPttTimeoutS || s_config.ptt_timeout_s > kMaxPttTimeoutS) {
         s_config.ptt_timeout_s = kDefaultPttTimeoutS;
     }
+#if !defined(NRL_ENABLE_AEC) || !NRL_ENABLE_AEC
+    s_config.aec_enabled = false;
+#endif
+    s_config.aec_reference_source = normalizeAecReferenceSource(s_config.aec_reference_source);
+#if !defined(NRL_ENABLE_AUDIO_AFE) || !NRL_ENABLE_AUDIO_AFE
+    s_config.ai_noise_enabled = false;
+#endif
 }
 
 static bool loadPersistedConfig(void)
@@ -563,14 +608,45 @@ static bool loadPersistedConfig(void)
         s_config.wifi_dhcp_enabled = persisted.wifi_dhcp_enabled != kPersistedFlagOff;
         // reserved3[0] holds the AEC flag; 0 (configs written before the flag
         // existed) reads as "default on".
+#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
         s_config.aec_enabled = persisted.reserved3[0] != kPersistedFlagOff;
+#else
+        s_config.aec_enabled = false;
+#endif
+        // reserved3[2] holds the esp-sr speech-enhancement / AI denoise flag.
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
+        s_config.ai_noise_enabled = persisted.reserved3[2] != kPersistedFlagOff;
+#else
+        s_config.ai_noise_enabled = false;
+#endif
+        // reserved3[1] holds the software mic HPF flag (~200 Hz). Same
+        // "0 == not written yet, treat as default" pattern as AEC above.
+        s_config.mic_hpf_enabled = persisted.reserved3[1] != kPersistedFlagOff;
+        if (persisted.reserved3[3] == kPersistedAecRefMic) {
+            s_config.aec_reference_source = EXTERNAL_RADIO_AEC_REF_MIC;
+        } else if (persisted.reserved3[3] == kPersistedAecRefNetwork) {
+            s_config.aec_reference_source = EXTERNAL_RADIO_AEC_REF_NETWORK;
+        } else {
+            s_config.aec_reference_source = defaultAecReferenceSource();
+        }
     } else {
         s_config.wifi_ip = 0U;
         s_config.wifi_netmask = 0U;
         s_config.wifi_gateway = 0U;
         s_config.wifi_dns = 0U;
         s_config.wifi_dhcp_enabled = true;
+#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
         s_config.aec_enabled = true;
+#else
+        s_config.aec_enabled = false;
+#endif
+        s_config.aec_reference_source = defaultAecReferenceSource();
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
+        s_config.ai_noise_enabled = true;
+#else
+        s_config.ai_noise_enabled = false;
+#endif
+        s_config.mic_hpf_enabled = true;
     }
     if (persisted.version == kConfigVersion) {
         loadAdcRegisters(persisted.adc_reg14,
@@ -637,6 +713,11 @@ static bool savePersistedConfig(void)
     persisted.wifi_dns = s_config.wifi_dns;
     persisted.wifi_dhcp_enabled = s_config.wifi_dhcp_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[0] = s_config.aec_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.reserved3[1] = s_config.mic_hpf_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.reserved3[2] = s_config.ai_noise_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.reserved3[3] = (s_config.aec_reference_source == EXTERNAL_RADIO_AEC_REF_MIC)
+                                 ? kPersistedAecRefMic
+                                 : kPersistedAecRefNetwork;
     persisted.adc_reg14 = adcReg14();
     persisted.adc_reg15 = adcReg15();
     persisted.adc_reg16 = adcReg16();
@@ -1177,6 +1258,44 @@ bool EXTERNAL_RADIO_SetAecEnabled(const bool enabled, const bool persist)
 {
     EXTERNAL_RADIO_Init();
     s_config.aec_enabled = enabled;
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
+    AEC_SetRuntimeEnabled(s_config.aec_enabled, s_config.ai_noise_enabled);
+#endif
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAecReferenceSource(const uint8_t source, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.aec_reference_source = normalizeAecReferenceSource(source);
+    ES8311_SetAecReferenceSource(s_config.aec_reference_source);
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetAiNoiseEnabled(const bool enabled, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.ai_noise_enabled = enabled;
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
+    AEC_SetRuntimeEnabled(s_config.aec_enabled, s_config.ai_noise_enabled);
+#endif
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetMicHpfEnabled(const bool enabled, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.mic_hpf_enabled = enabled;
+    ES8311_SetMicHpfEnabled(enabled);
     if (persist) {
         return savePersistedConfig();
     }

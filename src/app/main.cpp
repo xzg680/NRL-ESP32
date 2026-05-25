@@ -73,6 +73,7 @@ void setup()
                                 config->adceq_a2,
                                 config->adceq_b1,
                                 config->adceq_b2);
+        ES8311_SetMicHpfEnabled(config->mic_hpf_enabled);
     }
 
     STATUS_IO_Init();

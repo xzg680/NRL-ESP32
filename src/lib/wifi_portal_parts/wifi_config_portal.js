@@ -46,12 +46,17 @@ const translations = {
         volume: 'Volume',
         adc: 'ADC',
         dac: 'DAC',
-        aec: 'AEC',
+        aec: 'AEC / AI',
         drc: 'DRC',
         eq: 'EQ',
         input: 'Input',
         aecLabel: 'Acoustic Echo Cancellation',
-        aecText: 'Enable esp-sr echo cancellation on mic uplink (restart to apply)',
+        aecText: 'Enable esp-sr echo cancellation on mic uplink',
+        aecReferenceSource: 'AEC Reference Source',
+        aecRefNetwork: 'Network playback',
+        aecRefMic: 'Second microphone',
+        aiNoiseLabel: 'AI Noise Reduction',
+        aiNoiseText: 'Enable esp-sr NSNET2 noise suppression on mic uplink',
         dmic: 'DMIC',
         dmicText: 'REG14 bit6 select DMIC from MIC1P',
         micInput: 'MIC1P-MIC1N Input',
@@ -163,12 +168,17 @@ const translations = {
         volume: '音量',
         adc: 'ADC 输入',
         dac: 'DAC 输出',
-        aec: 'AEC 回声消除',
+        aec: 'AEC / AI 降噪',
         drc: 'DRC 动态范围控制',
         eq: 'EQ 均衡',
         input: '输入',
         aecLabel: '声学回声消除',
-        aecText: '启用 esp-sr 麦克风上行回声消除（重启后生效）',
+        aecText: '启用 esp-sr 麦克风上行回声消除',
+        aecReferenceSource: 'AEC 参照来源',
+        aecRefNetwork: '网络下行语音',
+        aecRefMic: '第二路麦克风',
+        aiNoiseLabel: 'AI降噪',
+        aiNoiseText: '启用 esp-sr NSNET2 麦克风上行降噪',
         dmic: '数字麦克风',
         dmicText: 'REG14 bit6 从 MIC1P 选择 DMIC',
         micInput: 'MIC1P-MIC1N 输入',
@@ -368,6 +378,19 @@ const translations = {
       syncEqValue(slider);
       postAndApply(slider.form);
     }
+
+    window.applyAdcEqPreset = function (button) {
+      const form = button ? button.form : null;
+      if (!form) return;
+      form.querySelectorAll('input[type="hidden"][name]').forEach((preset) => {
+        document.querySelectorAll('input.eq-slider[name="' + preset.name + '"]').forEach((slider) => {
+          slider.value = preset.value;
+          syncEqValue(slider);
+        });
+      });
+      button.disabled = true;
+      postAndApply(form).then((reply) => flashButtonFeedback(button, reply && reply.ok));
+    };
 
     function syncAutoSliderValue(slider) {
       const box = slider.parentElement.querySelector('.eq-value');

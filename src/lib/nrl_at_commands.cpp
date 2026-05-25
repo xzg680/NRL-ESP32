@@ -199,7 +199,7 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendUnsignedLine(payload, capacity, used, "MIC_GAIN", (config != nullptr) ? config->mic_volume : 0u) &&
            appendUnsignedLine(payload, capacity, used, "VOLUME", (config != nullptr) ? config->line_out_volume : 0u) &&
            appendKeyValueLine(payload, capacity, used, "HP_DRIVE", hp_drive) &&
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
            appendKeyValueLine(payload, capacity, used, "AEC",
                               (config != nullptr && config->aec_enabled) ? "ON" : "OFF") &&
 #endif
@@ -399,7 +399,7 @@ static bool appendAllConfigLines(NrlAtCommandResult *result)
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", config->mic_volume) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOLUME", config->line_out_volume) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", config->hp_drive_enabled ? "ON" : "OFF")
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
            && appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AEC", config->aec_enabled ? "ON" : "OFF")
 #endif
            ;
@@ -764,7 +764,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
-#if defined(NRL_ENABLE_GEZIPAI_AEC) && NRL_ENABLE_GEZIPAI_AEC
+#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
     if (stringEqualsIgnoreCase(command.command, "AEC")) {
         if (is_query) {
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AEC", config->aec_enabled ? "ON" : "OFF");
