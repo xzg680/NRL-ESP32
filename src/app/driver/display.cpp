@@ -295,10 +295,10 @@ void initBatteryAdc()
     }
 }
 
-// Reads the battery voltage in millivolts, or 0 if unavailable. The sense pin
-// sits behind a 1:2 divider, so the calibrated reading is multiplied by 3 to
-// match the 小智 格子派 board's measurement.
-int readBatteryMv()
+// Reads the raw (uncalibrated) battery voltage in millivolts, or 0 if
+// unavailable. The sense pin sits behind a 1:2 divider, so the ADC reading is
+// multiplied by 3 to match the 小智 格子派 board's measurement.
+int readBatteryRawMv()
 {
     if (!s_adc_ready || s_adc == nullptr || s_adc_cali == nullptr) {
         return 0;
@@ -322,6 +322,25 @@ int readBatteryMv()
         return 0;
     }
     return voltage * 3;
+}
+
+// Applies the persisted calibration multiplier (battery_cal_milli / 1000) to
+// the raw voltage. Falls back to the raw value if the config cannot be read.
+int applyBatteryCalibration(const int raw_mv)
+{
+    if (raw_mv <= 0) {
+        return 0;
+    }
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    const unsigned scale = (cfg != nullptr && cfg->battery_cal_milli != 0u)
+                               ? cfg->battery_cal_milli
+                               : 1000u;
+    return static_cast<int>((static_cast<long>(raw_mv) * static_cast<long>(scale) + 500L) / 1000L);
+}
+
+int readBatteryMv()
+{
+    return applyBatteryCalibration(readBatteryRawMv());
 }
 
 //================================ UI build ===================================
@@ -694,9 +713,21 @@ extern "C" void Display_Poll(void)
     lv_timer_handler();
 }
 
+extern "C" int Display_GetBatteryRawMv(void)
+{
+    return readBatteryRawMv();
+}
+
+extern "C" int Display_GetBatteryCalibratedMv(void)
+{
+    return applyBatteryCalibration(readBatteryRawMv());
+}
+
 #else // !NRL_HAS_DISPLAY
 
 extern "C" void Display_Init(void) {}
 extern "C" void Display_Poll(void) {}
+extern "C" int Display_GetBatteryRawMv(void) { return 0; }
+extern "C" int Display_GetBatteryCalibratedMv(void) { return 0; }
 
 #endif // NRL_HAS_DISPLAY

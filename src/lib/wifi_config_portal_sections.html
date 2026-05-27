@@ -73,6 +73,28 @@
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
     </form>
   </div>
+</section>{{BATTERY_SECTION}}
+<!-- @endtemplate -->
+
+<!-- @template BATTERY_SECTION -->
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="battery">Battery</h2><span class="hint" data-i18n="batteryHint">Calibrate the on-board battery sense against a multimeter.</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_nrl">
+      <div class="subgrid">
+        <div><label data-i18n="batteryRaw">Raw reading (mV)</label><input value="{{BATT_RAW_MV}}" readonly tabindex="-1"></div>
+        <div><label data-i18n="batteryCalibrated">Calibrated (mV)</label><input value="{{BATT_CAL_MV}}" readonly tabindex="-1"></div>
+        <div class="span-2"><label data-i18n="batteryActual">Measured by multimeter (mV) -- click Calibrate to fit the scale to this value</label><input name="battery_actual_mv" value="" placeholder="e.g. 4180"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="batteryCalibrate">Calibrate</button></div>
+    </form>
+    <form class="item-form span-2" method="post" action="/save_nrl">
+      <div class="subgrid">
+        <div class="span-2"><label data-i18n="batteryScale">Calibration scale (500-2000, where 1000 = no correction)</label><input name="battery_cal_milli" value="{{BATT_CAL_MILLI}}"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+    </form>
+  </div>
 </section>
 <!-- @endtemplate -->
 

@@ -12,6 +12,10 @@ static const char *TAG = "SCI";
 
 namespace {
 
+// Both boards drive the NRL transparent-passthrough link from UART1; only the
+// GPIO mapping (NRL_PIN_SCI_RX/TX in board_pins.h) differs. Console logs are
+// routed via USB-Serial-JTAG on both boards (sdkconfig:
+// CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y), so UART0 is left free for other use.
 constexpr uart_port_t kSciPort = UART_NUM_1;
 constexpr size_t kSciRxBufBytes = 512u;
 

@@ -62,6 +62,10 @@ namespace {
 
 constexpr unsigned long kButtonDebounceMs = 30UL;
 constexpr unsigned long kVolumeSaveDelayMs = 2000UL;
+// Volume +/- auto-repeat: after the first press, wait this long before the
+// held button starts firing again, then step at kVolumeRepeatIntervalMs.
+constexpr unsigned long kVolumeRepeatDelayMs = 400UL;
+constexpr unsigned long kVolumeRepeatIntervalMs = 80UL;
 // A press shorter than this toggles the transmit latch; a longer press is a
 // momentary (push-to-talk) hold that ends the moment the button is released.
 constexpr unsigned long kPttLongPressMs = 500UL;
@@ -75,9 +79,17 @@ struct DebouncedButton {
     unsigned long changed_ms;
 };
 
+struct AutoRepeat {
+    bool active;
+    unsigned long next_fire_ms;
+};
+
 DebouncedButton s_btn_vol_up   = {NRL_PIN_BTN_VOL_UP,   1, false, 0UL};
 DebouncedButton s_btn_vol_down = {NRL_PIN_BTN_VOL_DOWN, 1, false, 0UL};
 DebouncedButton s_btn_ptt      = {NRL_PIN_BTN_PTT,      1, false, 0UL};
+
+AutoRepeat s_btn_vol_up_repeat   = {false, 0UL};
+AutoRepeat s_btn_vol_down_repeat = {false, 0UL};
 
 bool s_net_audio_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
@@ -184,6 +196,27 @@ static void adjustLineOutVolume(const int pct_delta)
     s_volume_dirty = true;
     s_volume_change_ms = nrl_millis_now();
     ESP_LOGI(TAG, "line_out_volume=%d (%d%%)", volume, pct);
+}
+
+// Step the speaker volume on the initial press, and again at a steady cadence
+// while the button is held so the user can sweep up/down by holding.
+static void pollVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
+                             const int pct_delta, const unsigned long now)
+{
+    if (pollButtonPressEdge(btn, now)) {
+        adjustLineOutVolume(pct_delta);
+        rep.active = true;
+        rep.next_fire_ms = now + kVolumeRepeatDelayMs;
+        return;
+    }
+    if (!btn.pressed) {
+        rep.active = false;
+        return;
+    }
+    if (rep.active && (long)(now - rep.next_fire_ms) >= 0) {
+        adjustLineOutVolume(pct_delta);
+        rep.next_fire_ms = now + kVolumeRepeatIntervalMs;
+    }
 }
 
 // Effective PTT auto-off timeout in milliseconds, from the persisted config.
@@ -307,12 +340,8 @@ extern "C" void STATUS_IO_Poll(void)
 
     const unsigned long now = nrl_millis_now();
 
-    if (pollButtonPressEdge(s_btn_vol_up, now)) {
-        adjustLineOutVolume(+1);
-    }
-    if (pollButtonPressEdge(s_btn_vol_down, now)) {
-        adjustLineOutVolume(-1);
-    }
+    pollVolumeButton(s_btn_vol_up,   s_btn_vol_up_repeat,   +1, now);
+    pollVolumeButton(s_btn_vol_down, s_btn_vol_down_repeat, -1, now);
     updatePtt(now);
 
     // Yellow LED follows the transmit state (mic uplink in progress).

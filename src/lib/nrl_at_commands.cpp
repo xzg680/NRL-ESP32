@@ -3,6 +3,8 @@
 #include "nrl_net_compat.h"
 #include "nrl_version.h"
 
+#include "driver/board_pins.h"
+#include "driver/display.h"
 #include "driver/es8311.h"
 #include "driver/external_radio.h"
 #include "driver/sci_serial.h"
@@ -198,6 +200,11 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendKeyValueLine(payload, capacity, used, "CALL", (config != nullptr) ? config->callsign : "") &&
            appendUnsignedLine(payload, capacity, used, "SSID", (config != nullptr) ? config->callsign_ssid : 0u) &&
            appendUnsignedLine(payload, capacity, used, "PTT_TIMEOUT", (config != nullptr) ? config->ptt_timeout_s : 0u) &&
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+           appendUnsignedLine(payload, capacity, used, "BATT", static_cast<unsigned>(Display_GetBatteryCalibratedMv())) &&
+           appendUnsignedLine(payload, capacity, used, "BATT_RAW", static_cast<unsigned>(Display_GetBatteryRawMv())) &&
+           appendUnsignedLine(payload, capacity, used, "BATT_CAL", (config != nullptr) ? config->battery_cal_milli : 0u) &&
+#endif
            appendUnsignedLine(payload, capacity, used, "MIC_GAIN", (config != nullptr) ? config->mic_volume : 0u) &&
            appendUnsignedLine(payload, capacity, used, "VOLUME", (config != nullptr) ? config->line_out_volume : 0u) &&
            appendKeyValueLine(payload, capacity, used, "HP_DRIVE", hp_drive) &&
@@ -398,6 +405,11 @@ static bool appendAllConfigLines(NrlAtCommandResult *result)
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "CALL", config->callsign) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "SSID", config->callsign_ssid) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "PTT_TIMEOUT", config->ptt_timeout_s) &&
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT", static_cast<unsigned>(Display_GetBatteryCalibratedMv())) &&
+           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT_RAW", static_cast<unsigned>(Display_GetBatteryRawMv())) &&
+           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT_CAL", config->battery_cal_milli) &&
+#endif
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", config->mic_volume) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOLUME", config->line_out_volume) &&
            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", config->hp_drive_enabled ? "ON" : "OFF")
@@ -711,6 +723,68 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "PTT_TIMEOUT", EXTERNAL_RADIO_GetConfig()->ptt_timeout_s);
         return;
     }
+
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+    // Read-only: the current calibrated battery voltage in millivolts. Always
+    // 0 if the ADC is not initialised (e.g. before Display_Init).
+    if (stringEqualsIgnoreCase(command.command, "BATT")) {
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT",
+                           static_cast<unsigned>(Display_GetBatteryCalibratedMv()));
+        return;
+    }
+
+    // Read-only: the raw (pre-calibration) battery voltage in millivolts.
+    // Useful for working out a fresh calibration factor by comparing against a
+    // multimeter reading.
+    if (stringEqualsIgnoreCase(command.command, "BATT_RAW")) {
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT_RAW",
+                           static_cast<unsigned>(Display_GetBatteryRawMv()));
+        return;
+    }
+
+    // Battery calibration scale factor in units of 1/1000 (1000 = no
+    // correction). Accepts 500..2000.
+    if (stringEqualsIgnoreCase(command.command, "BATT_CAL")) {
+        if (is_query) {
+            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT_CAL", config->battery_cal_milli);
+            return;
+        }
+        unsigned long value = 0u;
+        if (!parseUnsignedValue(command.value, &value) || value < 500u || value > 2000u ||
+            !EXTERNAL_RADIO_SetBatteryCalibration(static_cast<uint16_t>(value), true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "BATT_CAL");
+            return;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT_CAL", EXTERNAL_RADIO_GetConfig()->battery_cal_milli);
+        return;
+    }
+
+    // Auto-calibrate from a multimeter reading: AT+BATT_CAL_AUTO=<actual_mv>.
+    // Samples the raw voltage now, computes scale = actual_mv * 1000 / raw_mv,
+    // clamps to the valid range, and persists it.
+    if (stringEqualsIgnoreCase(command.command, "BATT_CAL_AUTO")) {
+        unsigned long actual_mv = 0u;
+        if (is_query || !parseUnsignedValue(command.value, &actual_mv) ||
+            actual_mv < 1000u || actual_mv > 9000u) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "BATT_CAL_AUTO");
+            return;
+        }
+        const int raw_mv = Display_GetBatteryRawMv();
+        if (raw_mv <= 0) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "BATT_CAL_AUTO");
+            return;
+        }
+        const unsigned long scale = (actual_mv * 1000ul + static_cast<unsigned long>(raw_mv) / 2ul) /
+                                    static_cast<unsigned long>(raw_mv);
+        if (scale < 500ul || scale > 2000ul ||
+            !EXTERNAL_RADIO_SetBatteryCalibration(static_cast<uint16_t>(scale), true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "BATT_CAL_AUTO");
+            return;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT_CAL", EXTERNAL_RADIO_GetConfig()->battery_cal_milli);
+        return;
+    }
+#endif
 
     if (stringEqualsIgnoreCase(command.command, "MIC_GAIN")) {
         if (is_query) {

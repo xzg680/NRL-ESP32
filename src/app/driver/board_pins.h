@@ -73,11 +73,15 @@
 
 #elif NRL_BOARD == NRL_BOARD_GEZIPAI
 
-// SCI radio-control serial -- the on-board ST7789 LCD uses GPIO 4-7/15/16, so
-// SCI is moved off the default GPIO 4/5 to free the LCD backlight (4) and
-// reset (5). GPIO 8/9 are otherwise unused on the 格子派 board.
-#define NRL_PIN_SCI_RX          9
-#define NRL_PIN_SCI_TX          8
+// SCI radio-control serial -- 格子派 exposes the NRL transparent-passthrough
+// link on its U0 header, which is wired to the chip's default U0 pins
+// (GPIO 44 = U0RXD, GPIO 43 = U0TXD). The UART peripheral itself is UART1
+// (routed through the GPIO matrix in sci_serial.cpp, identical to BH4TDV);
+// UART0 is left free for other use. IDF console output is on USB-Serial-JTAG
+// (sdkconfig: CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y) so neither UART carries
+// log traffic that would collide with the radio data.
+#define NRL_PIN_SCI_RX          44
+#define NRL_PIN_SCI_TX          43
 
 // User controls -- 3 push buttons (press-to-GND, read with INPUT_PULLUP)
 #define NRL_PIN_BTN_VOL_UP      1    // IO1  -- volume up

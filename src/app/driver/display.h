@@ -19,6 +19,15 @@ void Display_Init(void);
 // internally throttled so a tight 20 ms poll loop is fine.
 void Display_Poll(void);
 
+// Battery sense (gezipai only; returns 0 on boards without a battery ADC).
+// Both readings are in millivolts. The raw reading is the uncalibrated ADC
+// voltage * 3 (divider); the calibrated reading additionally multiplies by
+// the configured battery_cal_milli / 1000 correction factor.
+// These take a fresh sample, so callers do not have to wait for the next
+// Display_Poll() refresh.
+int Display_GetBatteryRawMv(void);
+int Display_GetBatteryCalibratedMv(void);
+
 #ifdef __cplusplus
 }
 #endif

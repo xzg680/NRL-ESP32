@@ -53,6 +53,9 @@ constexpr uint8_t kDefaultSciStopBits = 1U;
 constexpr uint16_t kDefaultPttTimeoutS = 300U;  // 5 minutes
 constexpr uint16_t kMinPttTimeoutS = 5U;
 constexpr uint16_t kMaxPttTimeoutS = 3600U;
+constexpr uint16_t kDefaultBatteryCalMilli = 1000U;  // 1.000x: no correction
+constexpr uint16_t kMinBatteryCalMilli = 500U;       // 0.5x
+constexpr uint16_t kMaxBatteryCalMilli = 2000U;      // 2.0x
 
 struct PersistedExternalRadioConfig {
     uint32_t magic;
@@ -473,6 +476,7 @@ static void applyDefaults(void)
 #endif
     s_config.mic_hpf_enabled = true;
     s_config.ptt_timeout_s = kDefaultPttTimeoutS;
+    s_config.battery_cal_milli = kDefaultBatteryCalMilli;
     copyBounded(s_config.server_host, sizeof(s_config.server_host), NRL_AUDIO_SERVER_HOST);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), NRL_AUDIO_CALLSIGN);
     sanitizeCallsign(s_config.callsign);
@@ -541,6 +545,10 @@ static void normalizeConfig(void)
     s_config.adceq_b2 &= kAdcEqCoefficientMask;
     if (s_config.ptt_timeout_s < kMinPttTimeoutS || s_config.ptt_timeout_s > kMaxPttTimeoutS) {
         s_config.ptt_timeout_s = kDefaultPttTimeoutS;
+    }
+    if (s_config.battery_cal_milli < kMinBatteryCalMilli ||
+        s_config.battery_cal_milli > kMaxBatteryCalMilli) {
+        s_config.battery_cal_milli = kDefaultBatteryCalMilli;
     }
 #if !defined(NRL_ENABLE_AEC) || !NRL_ENABLE_AEC
     s_config.aec_enabled = false;
@@ -668,14 +676,18 @@ static bool loadPersistedConfig(void)
     } else {
         applyDefaultAdcConfig();
     }
-    // PTT timeout lives in reserved4 (added without a config version bump);
-    // configs written before this feature have it as 0, which normalizeConfig()
+    // PTT timeout lives in reserved4[0..1] and battery calibration in
+    // reserved4[2..3] (both added without a config version bump). Configs
+    // written before these features have the bytes as 0, which normalizeConfig()
     // maps back to the default.
     if (persisted.version == kConfigVersion) {
         s_config.ptt_timeout_s = static_cast<uint16_t>(persisted.reserved4[0]) |
                                  (static_cast<uint16_t>(persisted.reserved4[1]) << 8);
+        s_config.battery_cal_milli = static_cast<uint16_t>(persisted.reserved4[2]) |
+                                     (static_cast<uint16_t>(persisted.reserved4[3]) << 8);
     } else {
         s_config.ptt_timeout_s = 0U;
+        s_config.battery_cal_milli = 0U;
     }
     normalizeConfig();
     return true;
@@ -736,6 +748,8 @@ static bool savePersistedConfig(void)
     persisted.adceq_b2 = s_config.adceq_b2 & kAdcEqCoefficientMask;
     persisted.reserved4[0] = static_cast<uint8_t>(s_config.ptt_timeout_s & 0xFFU);
     persisted.reserved4[1] = static_cast<uint8_t>((s_config.ptt_timeout_s >> 8) & 0xFFU);
+    persisted.reserved4[2] = static_cast<uint8_t>(s_config.battery_cal_milli & 0xFFU);
+    persisted.reserved4[3] = static_cast<uint8_t>((s_config.battery_cal_milli >> 8) & 0xFFU);
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
@@ -1322,6 +1336,19 @@ bool EXTERNAL_RADIO_SetPttTimeout(const uint16_t value, const bool persist)
         return false;
     }
     s_config.ptt_timeout_s = value;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetBatteryCalibration(const uint16_t scale_milli, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (scale_milli < kMinBatteryCalMilli || scale_milli > kMaxBatteryCalMilli) {
+        return false;
+    }
+    s_config.battery_cal_milli = scale_milli;
     if (persist) {
         return savePersistedConfig();
     }

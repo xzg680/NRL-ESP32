@@ -10,6 +10,7 @@
 #include "../app/driver/es8311.h"
 #include "../app/driver/external_radio.h"
 #include "../app/driver/board_pins.h"
+#include "../app/driver/display.h"
 
 #include <driver/gpio.h>
 #include <esp_http_server.h>
@@ -579,6 +580,7 @@ static std::string savedValueForArg(const ExternalRadioConfig *config, const std
     if (name == "callsign") return std::string(config->callsign);
     if (name == "callsign_ssid") return std::to_string(config->callsign_ssid);
     if (name == "ptt_timeout") return std::to_string(config->ptt_timeout_s);
+    if (name == "battery_cal_milli") return std::to_string(config->battery_cal_milli);
     if (name == "mic_volume") return std::to_string(config->mic_volume);
     if (name == "line_out_volume") return std::to_string(config->line_out_volume);
     if (name == "hp_drive_enabled") return config->hp_drive_enabled ? "1" : "0";
@@ -685,6 +687,7 @@ static void logChangedFields(const ExternalRadioConfig *before,
     LOG_STR(callsign);
     LOG_UINT(callsign_ssid);
     LOG_UINT(ptt_timeout_s);
+    LOG_UINT(battery_cal_milli);
     LOG_UINT(mic_volume);
     LOG_UINT(line_out_volume);
     LOG_BOOL(hp_drive_enabled);
@@ -1285,6 +1288,29 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
              value >= 5UL && value <= 3600UL &&
              EXTERNAL_RADIO_SetPttTimeout(static_cast<uint16_t>(value), false);
     }
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+    // Auto-calibrate the battery sense from a multimeter reading. Empty value
+    // skips it (so the form can be submitted with only the manual scale).
+    if (ok && s_server.hasArg("battery_actual_mv") && !s_server.arg("battery_actual_mv").empty()) {
+        unsigned long actual_mv = 0UL;
+        const int raw_mv = Display_GetBatteryRawMv();
+        if (parseUIntArg(s_server.arg("battery_actual_mv"), &actual_mv) &&
+            actual_mv >= 1000UL && actual_mv <= 9000UL && raw_mv > 0) {
+            const unsigned long scale = (actual_mv * 1000UL + static_cast<unsigned long>(raw_mv) / 2UL) /
+                                        static_cast<unsigned long>(raw_mv);
+            ok = scale >= 500UL && scale <= 2000UL &&
+                 EXTERNAL_RADIO_SetBatteryCalibration(static_cast<uint16_t>(scale), false);
+        } else {
+            ok = false;
+        }
+    }
+    if (ok && s_server.hasArg("battery_cal_milli")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("battery_cal_milli"), &value) &&
+             value >= 500UL && value <= 2000UL &&
+             EXTERNAL_RADIO_SetBatteryCalibration(static_cast<uint16_t>(value), false);
+    }
+#endif
     if (ok && s_server.hasArg("mic_volume")) {
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("mic_volume"), &value) &&

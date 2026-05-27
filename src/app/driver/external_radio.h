@@ -87,6 +87,10 @@ struct ExternalRadioConfig {
     // before AEC / network uplink. See ES8311_SetMicHpfEnabled().
     bool mic_hpf_enabled;
     uint16_t ptt_timeout_s;
+    // Battery-voltage calibration factor, in units of 1/1000 (1000 = 1.000x).
+    // The raw ADC reading is multiplied by this divided by 1000 to compensate
+    // for divider-resistor tolerance. Valid range: 500..2000.
+    uint16_t battery_cal_milli;
     SciSerialConfig sci;
     char wifi_ssid[33];
     char wifi_password[65];
@@ -138,6 +142,9 @@ bool EXTERNAL_RADIO_SetMicHpfEnabled(bool enabled, bool persist);
 // PTT button auto-off / maximum continuous transmit time, in seconds. A short
 // press latches transmit on; it is forced off again after this many seconds.
 bool EXTERNAL_RADIO_SetPttTimeout(uint16_t value, bool persist);
+// Battery-voltage calibration. `scale_milli` is the multiplier in units of
+// 1/1000 (1000 = no correction). Accepts 500..2000.
+bool EXTERNAL_RADIO_SetBatteryCalibration(uint16_t scale_milli, bool persist);
 #endif
 
 #endif // DRIVER_EXTERNAL_RADIO_H

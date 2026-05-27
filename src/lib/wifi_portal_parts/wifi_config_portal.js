@@ -241,7 +241,14 @@ const translations = {
         scanFailed: '扫描失败',
         saveItem: '保存',
         saved: '已保存',
-        saveFailed: '保存失败'
+        saveFailed: '保存失败',
+        battery: '电池',
+        batteryHint: '使用万用表校准板载电池电压采样。',
+        batteryRaw: '原始读数 (mV)',
+        batteryCalibrated: '校准后 (mV)',
+        batteryActual: '万用表测量值 (mV) -- 点击校准按当前读数拟合系数',
+        batteryCalibrate: '校准',
+        batteryScale: '校准系数 (500-2000，1000 表示不修正)'
       }
     };
 
