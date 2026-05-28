@@ -2,6 +2,7 @@ set(app_sources
     app/main.cpp
     app/aec/aec_processor.cpp
     app/aec/esp_sr_probe.cpp
+    app/driver/audio_passthrough.cpp
     app/driver/eeprom.cpp
     app/driver/display.cpp
     app/driver/es7210.cpp

@@ -580,6 +580,7 @@ static std::string savedValueForArg(const ExternalRadioConfig *config, const std
     if (name == "callsign") return std::string(config->callsign);
     if (name == "callsign_ssid") return std::to_string(config->callsign_ssid);
     if (name == "ptt_timeout") return std::to_string(config->ptt_timeout_s);
+    if (name == "voice_payload_bytes") return std::to_string(config->voice_payload_bytes);
     if (name == "battery_cal_milli") return std::to_string(config->battery_cal_milli);
     if (name == "mic_volume") return std::to_string(config->mic_volume);
     if (name == "line_out_volume") return std::to_string(config->line_out_volume);
@@ -688,6 +689,7 @@ static void logChangedFields(const ExternalRadioConfig *before,
     LOG_UINT(callsign_ssid);
     LOG_UINT(ptt_timeout_s);
     LOG_UINT(battery_cal_milli);
+    LOG_UINT(voice_payload_bytes);
     LOG_UINT(mic_volume);
     LOG_UINT(line_out_volume);
     LOG_BOOL(hp_drive_enabled);
@@ -1287,6 +1289,12 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
         ok = parseUIntArg(s_server.arg("ptt_timeout"), &value) &&
              value >= 5UL && value <= 3600UL &&
              EXTERNAL_RADIO_SetPttTimeout(static_cast<uint16_t>(value), false);
+    }
+    if (ok && s_server.hasArg("voice_payload_bytes")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("voice_payload_bytes"), &value) &&
+             value >= 160UL && value <= 500UL &&
+             EXTERNAL_RADIO_SetVoicePayloadBytes(static_cast<uint16_t>(value), false);
     }
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
     // Auto-calibrate the battery sense from a multimeter reading. Empty value

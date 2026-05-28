@@ -39,11 +39,19 @@ bool AEC_UsesReference(void);
 // True when the processed AFE output should be forwarded right now.
 bool AEC_IsRuntimeActive(void);
 
+// True when echo cancellation specifically is currently selected at runtime
+// (independent of AI noise). Lets callers decide whether to feed a real
+// reference channel or zeros.
+bool AEC_IsRuntimeAecEnabled(void);
+
 // Register the sink for echo-cancelled audio (e.g. the NRL uplink).
 void AEC_SetOutputCallback(AEC_OutputCallback callback, void *user_data);
 
-// Submit one captured 16 kHz frame: mic is mono; ref is required only when
-// AEC_UsesReference() is true (the ES8311 I2S frame size is 160).
+// Submit one captured 16 kHz frame: mic is mono. ref may be null even when
+// the AFE was created with a reference channel; passing null causes the
+// reference slot to be filled with silence, so the AEC subtraction is a no-op
+// while NSNET2 (AI noise) keeps running. Used to "soft-disable" AEC without
+// tearing the AFE down.
 // Safe to call from the I2S capture task. Non-blocking.
 void AEC_SubmitCapture(const int16_t *mic_16k,
                        const int16_t *ref_16k,

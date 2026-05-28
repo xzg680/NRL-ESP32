@@ -229,6 +229,7 @@ std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *
     replaceToken(html, "{{CALLSIGN}}", htmlEscape(config->callsign));
     replaceToken(html, "{{CALLSIGN_SSID}}", fromU32(config->callsign_ssid));
     replaceToken(html, "{{PTT_TIMEOUT}}", fromU32(config->ptt_timeout_s));
+    replaceToken(html, "{{VOICE_PAYLOAD_BYTES}}", fromU32(config->voice_payload_bytes));
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
     std::string battery_section = std::string(kWifiConfigPortalBatterySectionTemplate);
     replaceToken(battery_section, "{{BATT_RAW_MV}}", fromI32(Display_GetBatteryRawMv()));

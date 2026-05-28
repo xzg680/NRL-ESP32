@@ -56,6 +56,9 @@ constexpr uint16_t kMaxPttTimeoutS = 3600U;
 constexpr uint16_t kDefaultBatteryCalMilli = 1000U;  // 1.000x: no correction
 constexpr uint16_t kMinBatteryCalMilli = 500U;       // 0.5x
 constexpr uint16_t kMaxBatteryCalMilli = 2000U;      // 2.0x
+constexpr uint16_t kDefaultVoicePayloadBytes = 160U; // 20 ms G.711 A-law
+constexpr uint16_t kMinVoicePayloadBytes = 160U;
+constexpr uint16_t kMaxVoicePayloadBytes = 500U;
 
 struct PersistedExternalRadioConfig {
     uint32_t magic;
@@ -418,7 +421,7 @@ static void applyAudioConfigToCodec(void)
                             s_config.adceq_b2);
     // The mic HPF is a pure-software filter (no I2C registers involved), so
     // it is pushed to the codec driver separately from ES8311_ApplyAudioConfig.
-    ES8311_SetMicHpfEnabled(s_config.mic_hpf_enabled);
+    AUDIO_SetMicHpfEnabled(s_config.mic_hpf_enabled);
 }
 
 // Drives the BH4TDV radio's channel-select GPIOs. 格子派 has no channel-
@@ -477,6 +480,7 @@ static void applyDefaults(void)
     s_config.mic_hpf_enabled = true;
     s_config.ptt_timeout_s = kDefaultPttTimeoutS;
     s_config.battery_cal_milli = kDefaultBatteryCalMilli;
+    s_config.voice_payload_bytes = kDefaultVoicePayloadBytes;
     copyBounded(s_config.server_host, sizeof(s_config.server_host), NRL_AUDIO_SERVER_HOST);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), NRL_AUDIO_CALLSIGN);
     sanitizeCallsign(s_config.callsign);
@@ -549,6 +553,10 @@ static void normalizeConfig(void)
     if (s_config.battery_cal_milli < kMinBatteryCalMilli ||
         s_config.battery_cal_milli > kMaxBatteryCalMilli) {
         s_config.battery_cal_milli = kDefaultBatteryCalMilli;
+    }
+    if (s_config.voice_payload_bytes < kMinVoicePayloadBytes ||
+        s_config.voice_payload_bytes > kMaxVoicePayloadBytes) {
+        s_config.voice_payload_bytes = kDefaultVoicePayloadBytes;
     }
 #if !defined(NRL_ENABLE_AEC) || !NRL_ENABLE_AEC
     s_config.aec_enabled = false;
@@ -685,9 +693,15 @@ static bool loadPersistedConfig(void)
                                  (static_cast<uint16_t>(persisted.reserved4[1]) << 8);
         s_config.battery_cal_milli = static_cast<uint16_t>(persisted.reserved4[2]) |
                                      (static_cast<uint16_t>(persisted.reserved4[3]) << 8);
+        // voice_payload_bytes shares the version-5 layout: reserved2[0..1] were
+        // unused before this field was added, so old saves read 0 here and
+        // normalizeConfig() promotes that to kDefaultVoicePayloadBytes.
+        s_config.voice_payload_bytes = static_cast<uint16_t>(persisted.reserved2[0]) |
+                                       (static_cast<uint16_t>(persisted.reserved2[1]) << 8);
     } else {
         s_config.ptt_timeout_s = 0U;
         s_config.battery_cal_milli = 0U;
+        s_config.voice_payload_bytes = 0U;
     }
     normalizeConfig();
     return true;
@@ -750,6 +764,8 @@ static bool savePersistedConfig(void)
     persisted.reserved4[1] = static_cast<uint8_t>((s_config.ptt_timeout_s >> 8) & 0xFFU);
     persisted.reserved4[2] = static_cast<uint8_t>(s_config.battery_cal_milli & 0xFFU);
     persisted.reserved4[3] = static_cast<uint8_t>((s_config.battery_cal_milli >> 8) & 0xFFU);
+    persisted.reserved2[0] = static_cast<uint8_t>(s_config.voice_payload_bytes & 0xFFU);
+    persisted.reserved2[1] = static_cast<uint8_t>((s_config.voice_payload_bytes >> 8) & 0xFFU);
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
@@ -1298,7 +1314,7 @@ bool EXTERNAL_RADIO_SetAecReferenceSource(const uint8_t source, const bool persi
 {
     EXTERNAL_RADIO_Init();
     s_config.aec_reference_source = normalizeAecReferenceSource(source);
-    ES8311_SetAecReferenceSource(s_config.aec_reference_source);
+    AUDIO_SetAecReferenceSource(s_config.aec_reference_source);
     if (persist) {
         return savePersistedConfig();
     }
@@ -1322,7 +1338,7 @@ bool EXTERNAL_RADIO_SetMicHpfEnabled(const bool enabled, const bool persist)
 {
     EXTERNAL_RADIO_Init();
     s_config.mic_hpf_enabled = enabled;
-    ES8311_SetMicHpfEnabled(enabled);
+    AUDIO_SetMicHpfEnabled(enabled);
     if (persist) {
         return savePersistedConfig();
     }
@@ -1349,6 +1365,19 @@ bool EXTERNAL_RADIO_SetBatteryCalibration(const uint16_t scale_milli, const bool
         return false;
     }
     s_config.battery_cal_milli = scale_milli;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetVoicePayloadBytes(const uint16_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (value < kMinVoicePayloadBytes || value > kMaxVoicePayloadBytes) {
+        return false;
+    }
+    s_config.voice_payload_bytes = value;
     if (persist) {
         return savePersistedConfig();
     }

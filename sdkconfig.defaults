@@ -61,6 +61,20 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
 CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ=240
 
+# --- WiFi voice latency tuning ---
+# AMPDU TX aggregation batches up to TX_BA_WIN frames into a single 802.11
+# aggregate before transmitting. For a tcpdump trace of our 62.5 ms G.711
+# voice flow this manifests as 2-packet bursts separated by 80-100 ms gaps
+# (the MAC waits for a TX opportunity, then dumps the queue). Disabling
+# AMPDU TX trades raw throughput for steady per-packet TX timing; we never
+# saturate WiFi bandwidth so it's the right trade for a walkie-talkie.
+# CONFIG_ESP_WIFI_AMPDU_TX_ENABLED is not set
+# CONFIG_ESP32_WIFI_AMPDU_TX_ENABLED is not set
+# Pin the lwIP/TCPIP task to core 0 so it doesn't migrate into the audio
+# task's core mid-frame.
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+# CONFIG_LWIP_TCPIP_TASK_AFFINITY_NO_AFFINITY is not set
+
 # --- HTTP config portal ---
 # Browser POSTs often carry User-Agent/Sec-Fetch/etc. headers larger than the
 # IDF httpd defaults. Keep the portal tolerant of normal mobile/desktop

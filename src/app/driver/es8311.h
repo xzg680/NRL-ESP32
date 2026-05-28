@@ -1,6 +1,8 @@
 #ifndef DRIVER_ES8311_H
 #define DRIVER_ES8311_H
 
+#include "driver/audio_passthrough.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -9,37 +11,21 @@
 extern "C" {
 #endif
 
-typedef enum {
-    ES8311_AUDIO_MODE_RECEIVE = 0,   // Full-duplex bridge: ADC captures MIC, DAC plays NRL downlink.
-} ES8311_AudioMode_t;
-
-typedef void (*ES8311_FrameHook_t)(const int16_t *samples,
-                                   size_t sample_count,
-                                   ES8311_AudioMode_t mode,
-                                   void *user_data);
-
-// Initialize the ES8311 codec and start I2S pass-through.
+// Initialize the ES8311 codec: configure I2S clocks, the codec via I2C, then
+// start the audio passthrough task. On boards where the ES8311 also drives
+// the DAC only (gezipai), the mic path is via ES7210 over the same I2S bus.
 bool ES8311_Init(void);
 
 // True if the codec initialization sequence already succeeded.
 bool ES8311_IsReady(void);
 
-// Switch ES8311 external audio route.
-bool ES8311_SetAudioMode(ES8311_AudioMode_t mode);
+// Switch the codec's external audio routing for a given audio mode.
+bool ES8311_SetAudioMode(AUDIO_Mode_t mode);
 bool ES8311_SetReceiveMode(void);
 
-// Register a callback invoked from the ES8311 passthrough task.
-// The hook is called for raw captured receive-mode PCM16 frames at 16 kHz.
-// AFE/AEC processed frames are already downsampled to 8 kHz for G.711.
-void ES8311_SetFrameHook(ES8311_FrameHook_t hook, void *user_data);
-
-// Queue PCM16 mono samples (8 kHz) for DAC playback.
-size_t ES8311_QueueOutputSamples(const int16_t *samples, size_t sample_count);
-void ES8311_ClearOutputQueue(void);
-
-// AEC reference source: 0 = delayed network playback, 1 = second I2S input
-// channel. Takes effect immediately while the resident AFE keeps running.
-void ES8311_SetAecReferenceSource(uint8_t source);
+// Push the full per-codec audio configuration (volumes, DRC, ADC config, EQ
+// coefficients) into the ES8311 registers. Mirrors the persisted config in
+// ExternalRadioConfig.
 bool ES8311_ApplyAudioConfig(uint8_t mic_volume,
                              uint8_t line_out_volume,
                              bool hp_drive_enabled,
@@ -78,23 +64,6 @@ bool ES8311_ApplyAudioConfig(uint8_t mic_volume,
                              uint32_t adceq_a2,
                              uint32_t adceq_b1,
                              uint32_t adceq_b2);
-
-int ES8311_GetSampleRate(void);
-size_t ES8311_GetFrameSamples(void);
-
-// Software high-pass filter on captured mic audio. When enabled, a 4th-order
-// IIR HPF (~200 Hz cutoff at 16 kHz sample rate) is applied to every frame
-// before it reaches AEC / the frame hook, removing DC offset and low-frequency
-// rumble. Stateful: toggling resets the filter memory to avoid a transient
-// on the first frame.
-void ES8311_SetMicHpfEnabled(bool enabled);
-bool ES8311_GetMicHpfEnabled(void);
-
-// Convenience test tone output to verify speaker chain.
-bool ES8311_PlayTestTone(uint32_t durationMs);
-
-// Record from mic for durationMs and then play back the captured audio once.
-bool ES8311_RecordMicAndPlayback(uint32_t durationMs);
 
 #ifdef __cplusplus
 }

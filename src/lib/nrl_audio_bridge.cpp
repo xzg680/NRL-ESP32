@@ -8,6 +8,7 @@
 #include "nrl_wifi.h"
 #include "wifi_config_portal.h"
 
+#include "driver/audio_passthrough.h"
 #include "driver/es8311.h"
 #include "driver/external_radio.h"
 #include "driver/sci_serial.h"
@@ -43,7 +44,13 @@ constexpr uint8_t kNrlTypeAtCommand = 11u;
 constexpr uint8_t kNrlTypeSciTransparent = 12u;
 constexpr size_t kAudioCodecFrameSamples = 80u;
 constexpr size_t kAudioCapture16kFrameSamples = kAudioCodecFrameSamples * 2u;
-constexpr size_t kG711PayloadBytes = 160u;
+// Minimum / maximum G.711 A-law payload bytes per outbound voice packet. The
+// runtime value comes from ExternalRadioConfig::voice_payload_bytes and is
+// clamped into this range; the accumulator and stack packet buffer below are
+// sized at the max so the threshold can be changed at runtime without realloc.
+constexpr size_t kG711PayloadMinBytes = 160u;
+constexpr size_t kG711PayloadMaxBytes = 500u;
+constexpr size_t kG711PayloadDefaultBytes = kG711PayloadMinBytes;
 constexpr size_t kG711RxPayloadMaxBytes = 500u;
 constexpr size_t kSciPayloadMaxBytes = 256u;
 constexpr size_t kNrlMaxPayloadSize = 1024u;
@@ -237,11 +244,15 @@ static bool udpSendPacketTo(const uint8_t *packet,
         !nrlWifiStaConnected() || dest_port == 0u || dest_ip == 0u) {
         return false;
     }
-
     if (s_udp_mutex == nullptr) {
         return false;
     }
-    if (xSemaphoreTake(s_udp_mutex, 0) != pdTRUE) {
+    // Wait up to 5 ms for the mutex instead of returning false immediately.
+    // The bridge task's recvfrom() holds this mutex for microseconds at a
+    // time, but a non-blocking try-take meant occasional voice packets were
+    // silently dropped under contention -- showing up as occasional missing
+    // packets on the wire.
+    if (xSemaphoreTake(s_udp_mutex, pdMS_TO_TICKS(5)) != pdTRUE) {
         return false;
     }
 
@@ -335,6 +346,39 @@ static void handleIncomingSciPayload(const uint8_t *payload, const size_t payloa
     }
 }
 
+// The fixed NRL_AUDIO_RX_PACKET_TIMEOUT_MS (default 120 ms) was tuned for
+// ~20 ms G.711 frames. Voice senders configured for larger payloads (up to
+// 500 bytes = 62.5 ms) exceed it after just one or two packets of jitter,
+// which would call stopDownlinkPlayback() and flush the DAC queue mid-talk.
+// Scale to 4× the last observed frame duration so a few packets of jitter
+// don't tear the playback.
+static uint32_t currentRxPacketTimeoutMs(void)
+{
+    const uint32_t base_ms = static_cast<uint32_t>(NRL_AUDIO_RX_PACKET_TIMEOUT_MS);
+    if (s_last_voice_payload_size == 0u) {
+        return base_ms;
+    }
+    // G.711 8 kHz A-law: 8 bytes per millisecond of audio.
+    const uint32_t frame_ms = static_cast<uint32_t>(s_last_voice_payload_size) / 8u;
+    const uint32_t scaled = frame_ms * 4u;
+    return (scaled > base_ms) ? scaled : base_ms;
+}
+
+static size_t currentVoicePayloadBytes(void)
+{
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    const size_t configured = (config != nullptr)
+                                  ? static_cast<size_t>(config->voice_payload_bytes)
+                                  : kG711PayloadDefaultBytes;
+    if (configured < kG711PayloadMinBytes) {
+        return kG711PayloadDefaultBytes;
+    }
+    if (configured > kG711PayloadMaxBytes) {
+        return kG711PayloadMaxBytes;
+    }
+    return configured;
+}
+
 static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
 {
     if (pcm8k == nullptr || sample_count == 0u) {
@@ -344,20 +388,27 @@ static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
         return;
     }
 
-    static uint8_t alaw_accumulator[kG711PayloadBytes];
+    static uint8_t alaw_accumulator[kG711PayloadMaxBytes];
     static size_t alaw_accumulator_count = 0u;
+
+    const size_t target_bytes = currentVoicePayloadBytes();
+    // If the configured size shrunk while we already had more accumulated,
+    // drop the stale tail so we start clean at the new threshold.
+    if (alaw_accumulator_count > target_bytes) {
+        alaw_accumulator_count = 0u;
+    }
 
     const size_t used_samples = (sample_count < kAudioCodecFrameSamples) ? sample_count : kAudioCodecFrameSamples;
     for (size_t i = 0; i < used_samples; ++i) {
-        if (alaw_accumulator_count < kG711PayloadBytes) {
+        if (alaw_accumulator_count < target_bytes) {
             alaw_accumulator[alaw_accumulator_count++] = NRL_G711_EncodeALaw(pcm8k[i]);
         }
 
-        if (alaw_accumulator_count == kG711PayloadBytes) {
-            uint8_t packet[kNrlHeaderSize + kG711PayloadBytes];
+        if (alaw_accumulator_count >= target_bytes) {
+            uint8_t packet[kNrlHeaderSize + kG711PayloadMaxBytes];
             const size_t packet_size = buildNrlPacket(kNrlTypeVoice,
                                                       alaw_accumulator,
-                                                      kG711PayloadBytes,
+                                                      target_bytes,
                                                       packet,
                                                       sizeof(packet));
             if (packet_size > 0u) {
@@ -388,10 +439,10 @@ static size_t downsample16kTo8kForG711(const int16_t *pcm16k,
 
 static void es8311FrameHook(const int16_t *samples,
                             const size_t sample_count,
-                            ES8311_AudioMode_t mode,
+                            AUDIO_Mode_t mode,
                             void *)
 {
-    if (mode != ES8311_AUDIO_MODE_RECEIVE) {
+    if (mode != AUDIO_MODE_RECEIVE) {
         return;
     }
     if (sample_count == kAudioCapture16kFrameSamples) {
@@ -441,7 +492,6 @@ static bool ensureWifiAndUdp(void)
         s_next_wifi_retry_ms = 0u;
         s_wifi_connect_failures = 0u;
     }
-
     if (!s_udp_started) {
         struct in_addr literal = {};
         if (inet_aton(server_host, &literal) != 0) {
@@ -489,6 +539,17 @@ static bool ensureWifiAndUdp(void)
             s_udp_fd = -1;
             return false;
         }
+        // Mark every packet on this socket with DSCP EF (0xB8). The WiFi
+        // driver maps that to WMM access category AC_VO, which (a) bypasses
+        // AMPDU TX aggregation -- aggregation is what causes the observed
+        // 2-packet bursts followed by long gaps under WIFI_AMPDU_TX_ENABLED
+        // -- and (b) gets high MAC TX priority. Result: each sendto goes
+        // on-air immediately instead of being batched into the next TX
+        // opportunity with other queued packets.
+        const int tos = 0xB8;
+        if (setsockopt(s_udp_fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) < 0) {
+            ESP_LOGW(TAG, "udp set IP_TOS=0xB8 failed (continuing anyway)");
+        }
         s_udp_started = true;
         char ip_buf[16] = {};
         nrlIpToString(s_server_ip, ip_buf, sizeof(ip_buf));
@@ -508,7 +569,7 @@ static void startDownlinkPlayback(void)
         return;
     }
 
-    ES8311_ClearOutputQueue();
+    AUDIO_ClearOutputQueue();
     STATUS_IO_SetPttActive(true);
 
     if (!ES8311_SetReceiveMode()) {
@@ -570,7 +631,7 @@ static void stopDownlinkPlayback(void)
         return;
     }
 
-    ES8311_ClearOutputQueue();
+    AUDIO_ClearOutputQueue();
 
     if (!ES8311_SetReceiveMode()) {
         ESP_LOGI(TAG,"[NRL] failed to keep ES8311 in receive/speaker mode");
@@ -634,7 +695,7 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
         s_voice_decode_sample_total += static_cast<uint32_t>(chunk);
         ++s_voice_decode_chunks;
         if (chunk > 0u) {
-            ES8311_QueueOutputSamples(s_downlink_pcm_buffer, chunk);
+            AUDIO_QueueOutputSamples(s_downlink_pcm_buffer, chunk);
         }
         offset += chunk;
     }
@@ -862,7 +923,7 @@ static void bridgeTask(void *)
 
         const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
         if (s_downlink_playback_active &&
-            (now - s_last_rx_packet_ms) > static_cast<uint32_t>(NRL_AUDIO_RX_PACKET_TIMEOUT_MS)) {
+            (now - s_last_rx_packet_ms) > currentRxPacketTimeoutMs()) {
             stopDownlinkPlayback();
         }
         if ((now - s_last_heartbeat_ms) > static_cast<uint32_t>(NRL_AUDIO_HEARTBEAT_INTERVAL_MS)) {
@@ -905,10 +966,13 @@ bool NRLAudioBridge_Init(void)
             return false;
         }
     }
+    AUDIO_SetFrameHook(es8311FrameHook, nullptr);
 
-    ES8311_SetFrameHook(es8311FrameHook, nullptr);
-
-    if (xTaskCreate(bridgeTask, "nrl_audio_bridge", 8192, nullptr, 2, &s_bridge_task) != pdPASS) {
+    // Pin to core 0 so RX recvfrom() / heartbeat / AT replies share the WiFi
+    // and lwIP cores; voice TX from the audio task on core 1 still hits the
+    // same socket but lwIP's internal locking handles that.
+    if (xTaskCreatePinnedToCore(bridgeTask, "nrl_audio_bridge", 8192, nullptr,
+                                2, &s_bridge_task, 0) != pdPASS) {
         ESP_LOGI(TAG,"[NRL] failed to create bridge task");
         return false;
     }

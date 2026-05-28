@@ -231,7 +231,10 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
 
     s_running = true;
     // 8 KB: aec_fetch_task calls into esp-sr fetch().
-    if (xTaskCreatePinnedToCore(aec_fetch_task, "aec_fetch", 8192, nullptr, 4,
+    // Priority 9: just below the es8311 passthrough task (10) so capture and
+    // AFE pull stay tightly coupled, but both well above the mainLoopTask
+    // (priority 5) polls so they preempt the polls instead of round-robining.
+    if (xTaskCreatePinnedToCore(aec_fetch_task, "aec_fetch", 8192, nullptr, 9,
                                 &s_fetch_task, 1) != pdPASS) {
         ESP_LOGE(TAG, "fetch task create failed");
         s_running = false;
@@ -271,6 +274,10 @@ bool AEC_UsesReference(void) {
     return s_ready && s_has_reference;
 }
 
+bool AEC_IsRuntimeAecEnabled(void) {
+    return s_ready && s_runtime_aec_enabled;
+}
+
 bool AEC_IsRuntimeActive(void) {
     return s_ready && (s_runtime_aec_enabled || s_runtime_ai_noise_enabled);
 }
@@ -286,9 +293,6 @@ void AEC_SubmitCapture(const int16_t *mic_16k,
     if (!s_ready || mic_16k == nullptr || sample_count == 0) {
         return;
     }
-    if (s_feed_channels > 1u && ref_16k == nullptr) {
-        return;
-    }
 
     if (s_feed_fill + sample_count > s_feed_cap) {
         // Overflow guard: drop to resync rather than corrupt memory.
@@ -296,11 +300,15 @@ void AEC_SubmitCapture(const int16_t *mic_16k,
         return;
     }
 
-    // Append channel-interleaved: [mic] or [mic, ref].
+    // Append channel-interleaved: [mic] or [mic, ref]. A null ref_16k while
+    // the AFE expects 2 channels is treated as a silent reference (caller
+    // intentionally "soft-disabling" AEC).
+    const bool zero_ref = (s_feed_channels > 1u && ref_16k == nullptr);
     for (size_t i = 0; i < sample_count; ++i) {
         s_feed_buf[(s_feed_fill + i) * s_feed_channels] = mic_16k[i];
         if (s_feed_channels > 1u) {
-            s_feed_buf[(s_feed_fill + i) * s_feed_channels + 1u] = ref_16k[i];
+            s_feed_buf[(s_feed_fill + i) * s_feed_channels + 1u] =
+                zero_ref ? static_cast<int16_t>(0) : ref_16k[i];
         }
     }
     s_feed_fill += sample_count;
@@ -325,6 +333,7 @@ bool AEC_IsReady(void) { return false; }
 void AEC_SetRuntimeEnabled(bool, bool) {}
 bool AEC_UsesReference(void) { return false; }
 bool AEC_IsRuntimeActive(void) { return false; }
+bool AEC_IsRuntimeAecEnabled(void) { return false; }
 void AEC_SetOutputCallback(AEC_OutputCallback, void *) {}
 void AEC_SubmitCapture(const int16_t *, const int16_t *, size_t) {}
 

@@ -36,6 +36,8 @@
     channel: '信道 (0-7)',
     callsign: '呼号',
     callsignSsid: '呼号SSID',
+    pttTimeout: 'PTT 超时 (秒, 5-3600)',
+    voicePayloadBytes: '语音包大小 (字节, 160-500)',
     hpDrive: 'ES8311耳机驱动',
     hpDriveText: '启用耳机输出驱动 (REG13 HPSW)',
     audio: '音频',

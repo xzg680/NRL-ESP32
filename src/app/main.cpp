@@ -102,7 +102,7 @@ static void initApp()
                                 config->adceq_a2,
                                 config->adceq_b1,
                                 config->adceq_b2);
-        ES8311_SetMicHpfEnabled(config->mic_hpf_enabled);
+        AUDIO_SetMicHpfEnabled(config->mic_hpf_enabled);
     }
 
     STATUS_IO_Init();
@@ -121,7 +121,7 @@ static void initApp()
     // allocated by then there's no contiguous block left and xTaskCreate
     // fails -- which silently kills STA reconnect (the bridge owns the
     // WiFi state machine). NRLAudioBridge_Init only registers a frame hook
-    // via ES8311_SetFrameHook(); the hook is invoked later once ES8311
+    // via AUDIO_SetFrameHook(); the hook is invoked later once ES8311
     // starts its passthrough task, so the ordering swap is safe.
     if (!NRLAudioBridge_Init()) {
         ESP_LOGE(TAG, "NRL audio bridge init failed.");
@@ -175,5 +175,10 @@ extern "C" void app_main(void)
     // Detach the polling loop from the boot task so we can let app_main return
     // (IDF style). 6 KB stack is enough for the poll fan-out; bump if a
     // sub-system asks for more local stack down the line.
-    xTaskCreatePinnedToCore(mainLoopTask, "nrl_main_loop", 6144, nullptr, 5, nullptr, 1);
+    //
+    // Pinned to core 0 (where WiFi, lwIP TCPIP and bridgeTask live). Core 1
+    // is reserved for the audio pipeline (es8311 passthrough + aec_fetch).
+    // Keeping polls off core 1 stops Display_Poll / WifiConfigPortal_Poll
+    // from stealing audio-task CPU and bunching outbound voice packets.
+    xTaskCreatePinnedToCore(mainLoopTask, "nrl_main_loop", 6144, nullptr, 5, nullptr, 0);
 }

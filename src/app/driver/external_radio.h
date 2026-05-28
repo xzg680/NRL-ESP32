@@ -84,13 +84,17 @@ struct ExternalRadioConfig {
     uint8_t aec_reference_source;
     // Software high-pass filter on captured mic audio (1-pole IIR,
     // ~200 Hz cutoff at 8 kHz). Strips DC offset and low-frequency rumble
-    // before AEC / network uplink. See ES8311_SetMicHpfEnabled().
+    // before AEC / network uplink. See AUDIO_SetMicHpfEnabled().
     bool mic_hpf_enabled;
     uint16_t ptt_timeout_s;
     // Battery-voltage calibration factor, in units of 1/1000 (1000 = 1.000x).
     // The raw ADC reading is multiplied by this divided by 1000 to compensate
     // for divider-resistor tolerance. Valid range: 500..2000.
     uint16_t battery_cal_milli;
+    // G.711 A-law payload size, in bytes, of each outbound voice packet.
+    // Valid range: 160..500 (20..62.5 ms of audio at 8 kHz). The actual UDP
+    // packet length is this plus the 48-byte NRL header.
+    uint16_t voice_payload_bytes;
     SciSerialConfig sci;
     char wifi_ssid[33];
     char wifi_password[65];
@@ -145,6 +149,8 @@ bool EXTERNAL_RADIO_SetPttTimeout(uint16_t value, bool persist);
 // Battery-voltage calibration. `scale_milli` is the multiplier in units of
 // 1/1000 (1000 = no correction). Accepts 500..2000.
 bool EXTERNAL_RADIO_SetBatteryCalibration(uint16_t scale_milli, bool persist);
+// G.711 voice payload size per outbound NRL packet. Accepts 160..500 bytes.
+bool EXTERNAL_RADIO_SetVoicePayloadBytes(uint16_t value, bool persist);
 #endif
 
 #endif // DRIVER_EXTERNAL_RADIO_H
