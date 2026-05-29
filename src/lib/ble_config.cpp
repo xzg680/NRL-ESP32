@@ -3,6 +3,7 @@
 #include "nrl_audio_bridge.h"
 #include "nrl_net_compat.h"
 #include "nrl_version.h"
+#include "nrl_wifi.h"
 
 #include "../app/driver/external_radio.h"
 
@@ -42,6 +43,13 @@ char s_command_buffer[kCommandBufferSize] = {};
 size_t s_command_size = 0;
 bool s_reboot_pending = false;
 uint32_t s_reboot_at_ms = 0;
+// WiFi list/scan work is deferred out of the GATT write callback (NimBLE host
+// task) into BLEConfig_Poll() (mainLoopTask). The host task stack is only 4 KB
+// and is already deep inside the GATT stack when the callback runs; doing the
+// reporting there (with its multi-hundred-byte result buffers) overflowed it
+// and crashed. A blocking SCAN would also risk a BLE supervision timeout.
+bool s_scan_pending = false;   // fresh scan requested
+bool s_list_pending = false;   // cached-list dump requested
 
 // BT/WiFi coexistence management. The single radio is shared; while the BT
 // controller is up, coexist time-slices airtime and bunches voice packets.
@@ -228,10 +236,69 @@ static void sendHelp(void)
     sendLine("SET CHANNEL=<0..7>");
     sendLine("SET CALLSIGN=<callsign>");
     sendLine("SET CALL_SSID=<0..255>");
+    sendLine("LIST");
+    sendLine("SCAN");
     sendLine("SAVE");
     sendLine("APPLY");
     sendLine("RESET_NET");
     sendLine("REBOOT");
+}
+
+// Stream the unique SSIDs currently in `results[0..got)` back over BLE as
+// "WIFI=<ssid>,<rssi>" lines, then "OK <tag>".
+static void reportWifiResults(const NrlWifiScanResult *results, size_t got, const char *ok_tag)
+{
+    constexpr size_t kMaxReport = 24u;
+    char line[160];
+    size_t reported = 0;
+    for (size_t i = 0; i < got && reported < kMaxReport; ++i) {
+        if (results[i].ssid[0] == '\0') {
+            continue; // skip hidden / empty SSIDs
+        }
+        // De-duplicate: the same SSID can appear on several APs/channels.
+        bool dup = false;
+        for (size_t j = 0; j < i; ++j) {
+            if (strcmp(results[i].ssid, results[j].ssid) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        snprintf(line, sizeof(line), "WIFI=%s,%d",
+                 results[i].ssid, static_cast<int>(results[i].rssi));
+        sendLine(line);
+        ++reported;
+    }
+    sendLine(ok_tag);
+}
+
+// Return the WiFi list the device already scanned (e.g. the pre-scan done
+// when the config-portal AP comes up). Reads the cached results only -- no
+// new scan -- so it is safe to call directly from the GATT callback and
+// returns instantly. Empty if the device hasn't scanned yet (client can SCAN).
+static void reportCachedWifi(void)
+{
+    constexpr size_t kMaxReport = 24u;
+    static NrlWifiScanResult results[kMaxReport]; // off-stack; poll task only
+    const size_t got = nrlWifiScanGetCache(results, kMaxReport);
+    reportWifiResults(results, got, "OK LIST");
+}
+
+// Run a fresh blocking WiFi scan and stream the SSIDs. The scan blocks ~1.5-2s
+// so this is called from BLEConfig_Poll(), never from the BLE host callback.
+static void runWifiScanAndReport(void)
+{
+    constexpr size_t kMaxReport = 24u;
+    static NrlWifiScanResult results[kMaxReport]; // off-stack; poll task only
+
+    if (!nrlWifiScanStartBlocking(6000u)) {
+        sendLine("ERR SCAN");
+        return;
+    }
+    const size_t got = nrlWifiScanGetCache(results, kMaxReport);
+    reportWifiResults(results, got, "OK SCAN");
 }
 
 static void handleCommand(char *command)
@@ -250,6 +317,20 @@ static void handleCommand(char *command)
 
     if (strcasecmp(command, "GET") == 0) {
         sendConfig();
+        return;
+    }
+
+    if (strcasecmp(command, "LIST") == 0) {
+        // Cached list from the device's earlier scan (e.g. config-portal
+        // pre-scan). Deferred to the poll task: the report buffers are too
+        // large for the 4 KB NimBLE host task stack at GATT-callback depth.
+        s_list_pending = true;
+        return;
+    }
+
+    if (strcasecmp(command, "SCAN") == 0) {
+        // Defer to the poll loop; the scan blocks too long for this callback.
+        s_scan_pending = true;
         return;
     }
 
@@ -487,6 +568,20 @@ void BLEConfig_Poll(void)
     if (!s_client_connected && !s_advertising) {
         NimBLEDevice::startAdvertising();
         s_advertising = true;
+    }
+
+    if (s_list_pending) {
+        s_list_pending = false;
+        if (s_client_connected) {
+            reportCachedWifi();
+        }
+    }
+
+    if (s_scan_pending) {
+        s_scan_pending = false;
+        if (s_client_connected) {
+            runWifiScanAndReport();
+        }
     }
 
     if (s_reboot_pending && static_cast<int32_t>(nowMsBle() - s_reboot_at_ms) >= 0) {
