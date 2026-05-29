@@ -144,22 +144,11 @@ void aec_fetch_task(void *) {
 
 } // namespace
 
-bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
-    if (s_ready) {
-        return true;
-    }
-    if (!enable_aec && !enable_ai_noise) {
-        return false;
-    }
-
-    fir_init();
-
+// Build the AFE pipeline (handle + buffers + fetch task) using already-loaded
+// models. Shared between AEC_Init (first time) and AEC_Reconfigure (live
+// reinit on ai_noise toggle).
+static bool afe_create_pipeline(bool enable_aec, bool enable_ai_noise) {
     const bool use_ref_channel = enable_aec;
-    s_models = esp_srmodel_init("model");
-    if (s_models == nullptr) {
-        ESP_LOGE(TAG, "esp_srmodel_init('model') failed -- NSNET2 model partition missing?");
-        return false;
-    }
 
     afe_config_t *cfg = afe_config_init(input_format_for(use_ref_channel),
                                         s_models,
@@ -167,8 +156,6 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
                                         AFE_MODE_LOW_COST);
     if (cfg == nullptr) {
         ESP_LOGE(TAG, "afe_config_init failed");
-        esp_srmodel_deinit(s_models);
-        s_models = nullptr;
         return false;
     }
 
@@ -177,14 +164,18 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     cfg->vad_init = false;
     cfg->wakenet_init = false;
     cfg->agc_init = false;
+    // ★ key: `ns_init` (the boolean) is what truly stops NSNET2 RNN
+    // inference; `afe_ns_mode` only picks the model when ns_init is true.
+    // Toggling ns_init off here gives Reconfigure() a real runtime
+    // disable instead of "module is on but its output is hidden behind a
+    // routing flag".
+    cfg->ns_init = enable_ai_noise;
     cfg->afe_ns_mode = AFE_NS_MODE_NET;
 
     s_iface = esp_afe_handle_from_config(cfg);
     if (s_iface == nullptr) {
         ESP_LOGE(TAG, "esp_afe_handle_from_config failed");
         afe_config_free(cfg);
-        esp_srmodel_deinit(s_models);
-        s_models = nullptr;
         return false;
     }
 
@@ -192,8 +183,6 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     afe_config_free(cfg);
     if (s_afe == nullptr) {
         ESP_LOGE(TAG, "AFE create_from_config failed");
-        esp_srmodel_deinit(s_models);
-        s_models = nullptr;
         return false;
     }
 
@@ -207,12 +196,9 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
         ESP_LOGE(TAG, "invalid feed chunk size");
         s_iface->destroy(s_afe);
         s_afe = nullptr;
-        esp_srmodel_deinit(s_models);
-        s_models = nullptr;
         return false;
     }
 
-    // Capacity: one feed chunk plus one 16 kHz I2S frame of headroom.
     s_feed_cap = static_cast<size_t>(s_feed_chunk) + 256u;
     s_feed_buf = static_cast<int16_t *>(
         malloc(s_feed_cap * s_feed_channels * sizeof(int16_t)));
@@ -220,8 +206,6 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
         ESP_LOGE(TAG, "feed buffer alloc failed");
         s_iface->destroy(s_afe);
         s_afe = nullptr;
-        esp_srmodel_deinit(s_models);
-        s_models = nullptr;
         return false;
     }
 
@@ -230,10 +214,6 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
     memset(&s_down, 0, sizeof(s_down));
 
     s_running = true;
-    // 8 KB: aec_fetch_task calls into esp-sr fetch().
-    // Priority 9: just below the es8311 passthrough task (10) so capture and
-    // AFE pull stay tightly coupled, but both well above the mainLoopTask
-    // (priority 5) polls so they preempt the polls instead of round-robining.
     if (xTaskCreatePinnedToCore(aec_fetch_task, "aec_fetch", 8192, nullptr, 9,
                                 &s_fetch_task, 1) != pdPASS) {
         ESP_LOGE(TAG, "fetch task create failed");
@@ -242,22 +222,128 @@ bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
         s_feed_buf = nullptr;
         s_iface->destroy(s_afe);
         s_afe = nullptr;
+        return false;
+    }
+
+    s_has_reference = enable_aec;
+    s_has_ai_noise = enable_ai_noise;
+    s_ready = true;
+    AEC_SetRuntimeEnabled(enable_aec, enable_ai_noise);
+    return true;
+}
+
+// Tear down the pipeline. Models stay loaded so the next afe_create_pipeline()
+// avoids the multi-second NSNET2 model reload. Fetch task is unblocked by
+// feeding silence directly (bypassing our gated AEC_SubmitCapture); it sees
+// s_running=false on the next iteration and exits cleanly.
+static void afe_destroy_pipeline(void) {
+    if (!s_ready) {
+        return;
+    }
+    // Stop accepting new submits and signal the fetch task to wind down.
+    s_ready = false;
+    s_running = false;
+
+    // Feed a few silent frames straight into esp-sr so fetch() returns,
+    // the loop sees s_running=false, and the task self-deletes. Without
+    // this the task could block forever waiting for AFE output.
+    if (s_iface != nullptr && s_afe != nullptr && s_feed_buf != nullptr) {
+        memset(s_feed_buf, 0, s_feed_cap * s_feed_channels * sizeof(int16_t));
+        for (int i = 0; i < 4; ++i) {
+            s_iface->feed(s_afe, s_feed_buf);
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    }
+
+    // Up to ~500 ms for graceful exit, then last-resort force delete.
+    for (int waited = 0; waited < 50 && s_fetch_task != nullptr; ++waited) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (s_fetch_task != nullptr) {
+        ESP_LOGW(TAG, "fetch task didn't exit cleanly, forcing delete");
+        vTaskDelete(s_fetch_task);
+        s_fetch_task = nullptr;
+    }
+
+    if (s_iface != nullptr && s_afe != nullptr) {
+        s_iface->destroy(s_afe);
+    }
+    s_afe = nullptr;
+    s_iface = nullptr;
+    if (s_feed_buf != nullptr) {
+        free(s_feed_buf);
+        s_feed_buf = nullptr;
+    }
+    s_feed_fill = 0;
+    s_out_fill = 0;
+    s_has_reference = false;
+    s_has_ai_noise = false;
+    s_runtime_aec_enabled = false;
+    s_runtime_ai_noise_enabled = false;
+}
+
+bool AEC_Init(const bool enable_aec, const bool enable_ai_noise) {
+    if (s_ready) {
+        return true;
+    }
+    if (!enable_aec && !enable_ai_noise) {
+        return false;
+    }
+
+    fir_init();
+
+    s_models = esp_srmodel_init("model");
+    if (s_models == nullptr) {
+        ESP_LOGE(TAG, "esp_srmodel_init('model') failed -- NSNET2 model partition missing?");
+        return false;
+    }
+
+    if (!afe_create_pipeline(enable_aec, enable_ai_noise)) {
         esp_srmodel_deinit(s_models);
         s_models = nullptr;
         return false;
     }
 
-    s_ready = true;
-    s_has_reference = enable_aec;
-    s_has_ai_noise = enable_ai_noise;
-    AEC_SetRuntimeEnabled(enable_aec, enable_ai_noise);
     ESP_LOGI(TAG, "ready: feed_chunk=%d fetch_chunk=%d (16kHz), "
-             "capture=16k output=8k, ch=%u aec=%u ai_noise=%u",
+             "capture=16k output=8k, ch=%u aec=%u ai_noise=%u (ns_init=%u)",
              s_feed_chunk,
              s_fetch_chunk,
              static_cast<unsigned>(s_feed_channels),
              s_has_reference ? 1u : 0u,
-             s_has_ai_noise ? 1u : 0u);
+             s_has_ai_noise ? 1u : 0u,
+             enable_ai_noise ? 1u : 0u);
+    return true;
+}
+
+bool AEC_Reconfigure(const bool enable_aec, const bool enable_ai_noise) {
+    // Cold path: nothing is up yet, just do a normal init.
+    if (!s_ready) {
+        return AEC_Init(enable_aec, enable_ai_noise);
+    }
+    // No-op if nothing actually changed (the heavy reinit is wasted work).
+    if (s_has_reference == enable_aec && s_has_ai_noise == enable_ai_noise) {
+        AEC_SetRuntimeEnabled(enable_aec, enable_ai_noise);
+        return true;
+    }
+
+    ESP_LOGI(TAG, "reconfigure: aec=%u->%u ai_noise=%u->%u (will cut audio briefly)",
+             s_has_reference ? 1u : 0u, enable_aec ? 1u : 0u,
+             s_has_ai_noise ? 1u : 0u, enable_ai_noise ? 1u : 0u);
+
+    afe_destroy_pipeline();
+
+    // Models stay loaded across reinit. If both are off after the toggle
+    // there is no AFE to bring back -- the bypass path in
+    // audio_passthrough_task takes over with raw mic.
+    if (!enable_aec && !enable_ai_noise) {
+        return true;
+    }
+    if (!afe_create_pipeline(enable_aec, enable_ai_noise)) {
+        ESP_LOGE(TAG, "reconfigure failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "reconfigured: aec=%u ai_noise=%u",
+             s_has_reference ? 1u : 0u, s_has_ai_noise ? 1u : 0u);
     return true;
 }
 
@@ -329,6 +415,7 @@ void AEC_SubmitCapture(const int16_t *mic_16k,
 #else // !NRL_ENABLE_AUDIO_AFE
 
 bool AEC_Init(bool, bool) { return false; }
+bool AEC_Reconfigure(bool, bool) { return false; }
 bool AEC_IsReady(void) { return false; }
 void AEC_SetRuntimeEnabled(bool, bool) {}
 bool AEC_UsesReference(void) { return false; }

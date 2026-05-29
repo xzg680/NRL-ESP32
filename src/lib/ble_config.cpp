@@ -1,6 +1,7 @@
 #include "ble_config.h"
 
 #include "nrl_audio_bridge.h"
+#include "nrl_net_compat.h"
 #include "nrl_version.h"
 
 #include "../app/driver/external_radio.h"
@@ -42,6 +43,16 @@ size_t s_command_size = 0;
 bool s_reboot_pending = false;
 uint32_t s_reboot_at_ms = 0;
 
+// BT/WiFi coexistence management. The single radio is shared; while the BT
+// controller is up, coexist time-slices airtime and bunches voice packets.
+// We keep BLE up only while the WiFi STA is down (provisioning fallback) and
+// tear it down once the STA has been solidly connected for a grace period.
+constexpr uint32_t kBleStopAfterStaUpMs = 4000u;   // STA stable this long -> drop BLE
+constexpr uint32_t kBleStartAfterStaDownMs = 3000u; // STA down this long -> bring BLE back
+bool s_ble_auto_stopped = false;     // true once we tore BLE down due to WiFi
+uint32_t s_sta_up_since_ms = 0u;     // 0 = STA not currently up
+uint32_t s_sta_down_since_ms = 0u;   // 0 = STA not currently down
+
 static inline uint32_t nowMsBle()
 {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -80,6 +91,8 @@ static void sendConfig(void)
     snprintf(line, sizeof(line), "CHANNEL=%u", static_cast<unsigned>(config->channel));
     sendLine(line);
     snprintf(line, sizeof(line), "CALLSIGN=%s", config->callsign);
+    sendLine(line);
+    snprintf(line, sizeof(line), "CALL_SSID=%u", static_cast<unsigned>(config->callsign_ssid));
     sendLine(line);
     sendLine("OK GET");
 }
@@ -194,6 +207,13 @@ static bool setField(const char *key, const char *value, bool *restart_wifi, boo
         return EXTERNAL_RADIO_SetCallsign(value, false);
     }
 
+    if (strcmp(key, "CALL_SSID") == 0 || strcmp(key, "CALLSIGN_SSID") == 0) {
+        unsigned long ssid = 0;
+        return parseUnsigned(value, &ssid) &&
+               ssid <= 255 &&
+               EXTERNAL_RADIO_SetCallsignSsid(static_cast<uint8_t>(ssid), false);
+    }
+
     return false;
 }
 
@@ -206,6 +226,8 @@ static void sendHelp(void)
     sendLine("SET SERVER_HOST=<host_or_ip>");
     sendLine("SET SERVER_PORT=<1..65535>");
     sendLine("SET CHANNEL=<0..7>");
+    sendLine("SET CALLSIGN=<callsign>");
+    sendLine("SET CALL_SSID=<0..255>");
     sendLine("SAVE");
     sendLine("APPLY");
     sendLine("RESET_NET");
@@ -400,8 +422,64 @@ bool BLEConfig_Init(void)
     return true;
 }
 
+void BLEConfig_Stop(void)
+{
+    if (!s_initialized) {
+        return;
+    }
+    // deinit(true) stops advertising, closes any connection, shuts the NimBLE
+    // host down and disables/deinits the BT controller -- which is what
+    // actually drops WiFi/BT coexistence and frees the radio for WiFi. All
+    // server/characteristic objects are freed, so reset our pointers; a later
+    // BLEConfig_Init() rebuilds the GATT table from scratch.
+    NimBLEDevice::deinit(true);
+    s_server = nullptr;
+    s_tx = nullptr;
+    s_rx = nullptr;
+    s_initialized = false;
+    s_advertising = false;
+    s_client_connected = false;
+    ESP_LOGI(TAG, "BLE stopped (radio freed for WiFi)");
+}
+
+// Bring BLE up or down based on how long the WiFi STA has been up/down, so the
+// shared radio is dedicated to WiFi during normal voice operation but BLE
+// provisioning returns automatically when WiFi is unavailable.
+static void manageCoexistence(void)
+{
+    const uint32_t now = nowMsBle();
+    const bool sta_up = nrlWifiStaConnected();
+
+    if (sta_up) {
+        s_sta_down_since_ms = 0u;
+        if (s_sta_up_since_ms == 0u) {
+            s_sta_up_since_ms = now;
+        }
+        // Don't yank BLE out from under an in-progress provisioning session.
+        if (!s_ble_auto_stopped && s_initialized && !s_client_connected &&
+            (now - s_sta_up_since_ms) >= kBleStopAfterStaUpMs) {
+            ESP_LOGI(TAG, "WiFi STA stable, stopping BLE to end coexistence");
+            BLEConfig_Stop();
+            s_ble_auto_stopped = true;
+        }
+    } else {
+        s_sta_up_since_ms = 0u;
+        if (s_sta_down_since_ms == 0u) {
+            s_sta_down_since_ms = now;
+        }
+        if (s_ble_auto_stopped && !s_initialized &&
+            (now - s_sta_down_since_ms) >= kBleStartAfterStaDownMs) {
+            ESP_LOGI(TAG, "WiFi STA down, restarting BLE for fallback provisioning");
+            BLEConfig_Init();
+            s_ble_auto_stopped = false;
+        }
+    }
+}
+
 void BLEConfig_Poll(void)
 {
+    manageCoexistence();
+
     if (!s_initialized) {
         return;
     }

@@ -592,12 +592,19 @@ static void audio_passthrough_task(void *) {
             mic_hpf_apply(frame, kFrameSamples);
         }
 
-        if (afe_ready) {
+        // Full bypass when both AEC and AI noise are runtime-disabled: skip
+        // AEC_SubmitCapture() entirely so the AFE goes idle (no NSNET2 RNN
+        // inference, no feed-buffer churn). The frame hook below runs the
+        // raw mic stream directly. When the user toggles either flag back
+        // on, AEC_IsRuntimeActive() flips true and we start submitting
+        // again; the AFE recovers state within a few frames.
+        if (afe_ready && processed_route) {
             const int16_t *ref = nullptr;
             // Only resolve a reference when AEC is actually selected at
-            // runtime. With AEC off, leave ref = nullptr so AEC_SubmitCapture
-            // feeds zeros for the reference slot (soft-disable: NSNET2 keeps
-            // running, echo subtraction becomes a no-op).
+            // runtime. With AEC off but AI noise on (processed_route still
+            // true), leave ref = nullptr so AEC_SubmitCapture feeds zeros
+            // for the reference slot -- NSNET2 keeps running, echo
+            // subtraction becomes a no-op.
             if (needs_ref && AEC_IsRuntimeAecEnabled()) {
                 if (s_aec_reference_source == 1u) {
                     ref = ref_frame;

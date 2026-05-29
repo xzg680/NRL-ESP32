@@ -26,6 +26,14 @@ typedef void (*AEC_OutputCallback)(const int16_t *clean_8k,
 // PSRAM is up. Returns false if esp-sr could not allocate the AFE.
 bool AEC_Init(bool enable_aec, bool enable_ai_noise);
 
+// Live reinit. Destroys the current AFE (briefly cuts audio, ~100 ms) and
+// recreates it with the new ns_mode and ref-channel configuration. Models
+// stay loaded across the swap so no NSNET2 reload cost. Use this when the
+// user toggles AI noise reduction at runtime: AFE_NS_MODE_NET vs
+// AFE_NS_MODE_NONE is a create-time config, so soft-disabling (the trick
+// used for AEC) won't actually stop the NSNET2 RNN inference.
+bool AEC_Reconfigure(bool enable_aec, bool enable_ai_noise);
+
 // True once AEC_Init() has succeeded.
 bool AEC_IsReady(void);
 

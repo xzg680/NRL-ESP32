@@ -72,7 +72,7 @@
 | --- | --- |
 | WiFi SSID | `NRL-ESP32` |
 | WiFi 密码 | `12345678` |
-| 服务器地址 | `110.42.107.105` |
+| 服务器地址 | `101.133.166.204` |
 | 服务器端口 | `60050` |
 | 本地端口 | `60050` |
 | 呼号 | `NOCALL` |
@@ -98,7 +98,7 @@ HELP
 GET
 SET WIFI_SSID=your_ssid
 SET WIFI_PASS=your_password
-SET SERVER_HOST=110.42.107.105
+SET SERVER_HOST=101.133.166.204
 SET SERVER_PORT=60050
 SET CHANNEL=0
 SET CALLSIGN=NOCALL

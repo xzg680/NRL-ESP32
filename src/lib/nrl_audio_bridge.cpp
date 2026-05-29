@@ -250,8 +250,7 @@ static bool udpSendPacketTo(const uint8_t *packet,
     // Wait up to 5 ms for the mutex instead of returning false immediately.
     // The bridge task's recvfrom() holds this mutex for microseconds at a
     // time, but a non-blocking try-take meant occasional voice packets were
-    // silently dropped under contention -- showing up as occasional missing
-    // packets on the wire.
+    // silently dropped under contention.
     if (xSemaphoreTake(s_udp_mutex, pdMS_TO_TICKS(5)) != pdTRUE) {
         return false;
     }
@@ -539,16 +538,15 @@ static bool ensureWifiAndUdp(void)
             s_udp_fd = -1;
             return false;
         }
-        // Mark every packet on this socket with DSCP EF (0xB8). The WiFi
-        // driver maps that to WMM access category AC_VO, which (a) bypasses
-        // AMPDU TX aggregation -- aggregation is what causes the observed
-        // 2-packet bursts followed by long gaps under WIFI_AMPDU_TX_ENABLED
-        // -- and (b) gets high MAC TX priority. Result: each sendto goes
-        // on-air immediately instead of being batched into the next TX
-        // opportunity with other queued packets.
-        const int tos = 0xB8;
+        // Mark every packet on this socket with DSCP CS6 (=48, TOS byte 0xC0).
+        // 802.11e WMM maps DSCP CS6/CS7 to AC_VO (voice access category);
+        // DSCP EF (46, 0xB8) which we previously set actually maps to AC_VI
+        // (video). AC_VO has the lowest CW and shortest AIFS, so the MAC
+        // contends for the channel sooner and is less likely to bunch our
+        // outgoing voice packets with each other or with other traffic.
+        const int tos = 0xC0;
         if (setsockopt(s_udp_fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) < 0) {
-            ESP_LOGW(TAG, "udp set IP_TOS=0xB8 failed (continuing anyway)");
+            ESP_LOGW(TAG, "udp set IP_TOS=0xC0 (DSCP CS6 / AC_VO) failed (continuing anyway)");
         }
         s_udp_started = true;
         char ip_buf[16] = {};
@@ -966,6 +964,7 @@ bool NRLAudioBridge_Init(void)
             return false;
         }
     }
+
     AUDIO_SetFrameHook(es8311FrameHook, nullptr);
 
     // Pin to core 0 so RX recvfrom() / heartbeat / AT replies share the WiFi

@@ -6,4 +6,13 @@
 bool BLEConfig_Init(void);
 void BLEConfig_Poll(void);
 
+// Tear the BLE stack fully down (advertising, host, BT controller) so the
+// shared radio is freed for WiFi-only operation -- BT/WiFi coexistence
+// otherwise time-slices the single antenna and batches outbound voice
+// packets into ~100 ms bursts. BLEConfig_Poll() calls this automatically
+// once the WiFi STA has been connected for a grace period, and re-inits BLE
+// if the STA link later drops (so BLE provisioning stays available as a
+// fallback when WiFi is down).
+void BLEConfig_Stop(void);
+
 #endif // SRC_LIB_BLE_CONFIG_H

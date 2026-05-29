@@ -1324,9 +1324,18 @@ bool EXTERNAL_RADIO_SetAecReferenceSource(const uint8_t source, const bool persi
 bool EXTERNAL_RADIO_SetAiNoiseEnabled(const bool enabled, const bool persist)
 {
     EXTERNAL_RADIO_Init();
+    const bool changed = (s_config.ai_noise_enabled != enabled);
     s_config.ai_noise_enabled = enabled;
 #if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
-    AEC_SetRuntimeEnabled(s_config.aec_enabled, s_config.ai_noise_enabled);
+    // afe_ns_mode (NSNET2 vs NONE) is baked at AFE create time, so a runtime
+    // routing flag alone cannot stop the RNN. Re-create the AFE so the
+    // toggle has real effect; expect ~100 ms of audio dropout while it
+    // happens.
+    if (changed) {
+        AEC_Reconfigure(s_config.aec_enabled, s_config.ai_noise_enabled);
+    } else {
+        AEC_SetRuntimeEnabled(s_config.aec_enabled, s_config.ai_noise_enabled);
+    }
 #endif
     if (persist) {
         return savePersistedConfig();

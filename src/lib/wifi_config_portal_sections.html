@@ -100,11 +100,11 @@
 <!-- @endtemplate -->
 
 <!-- @template AEC_SECTION -->
-<div class="group-label span-2" data-i18n="{{AFE_GROUP_I18N}}">{{AFE_GROUP_LABEL}}</div>{{AEC_TOGGLE}}<form class="item-form span-2" method="post" action="/save_nrl"><label data-i18n="aiNoiseLabel">AI Noise Reduction</label><input type="hidden" name="ai_noise_present" value="1"><label class="hint"><input type="checkbox" name="ai_noise_enabled" value="1" onchange="submitSwitch(this)" {{AI_NOISE_CHECKED}}><span data-i18n="aiNoiseText">Enable esp-sr NSNET2 noise suppression on mic uplink</span></label></form>
+<div class="group-label span-2" data-i18n="{{AFE_GROUP_I18N}}">{{AFE_GROUP_LABEL}}</div><form class="item-form" method="post" action="/save_nrl"><label data-i18n="micHpfFilter">哑音过滤</label><input type="hidden" name="mic_hpf_enabled_present" value="1"><label class="hint"><input type="checkbox" name="mic_hpf_enabled" value="1" onchange="submitSwitch(this)" {{MIC_HPF_CHECKED}}><span data-i18n="micHpfFilterText">软件高通滤波 (~200Hz)</span></label></form><form class="item-form" method="post" action="/save_nrl"><label data-i18n="aiNoiseLabel">AI Noise Reduction</label><input type="hidden" name="ai_noise_present" value="1"><label class="hint"><input type="checkbox" name="ai_noise_enabled" value="1" onchange="submitSwitch(this)" {{AI_NOISE_CHECKED}}><span data-i18n="aiNoiseText">Enable esp-sr NSNET2 noise suppression on mic uplink</span></label></form>{{AEC_TOGGLE}}
 <!-- @endtemplate -->
 
 <!-- @template AEC_TOGGLE -->
-<form class="item-form span-2" method="post" action="/save_nrl"><label data-i18n="aecLabel">Acoustic Echo Cancellation</label><input type="hidden" name="aec_present" value="1"><label class="hint"><input type="checkbox" name="aec_enabled" value="1" onchange="submitSwitch(this)" {{AEC_CHECKED}}><span data-i18n="aecText">Enable esp-sr echo cancellation on mic uplink</span></label><label data-i18n="aecReferenceSource">AEC Reference Source</label><select name="aec_reference_source" onchange="submitSwitch(this)"><option value="0"{{AEC_REF_NETWORK_SELECTED}} data-i18n="aecRefNetwork">Network playback</option><option value="1"{{AEC_REF_MIC_SELECTED}} data-i18n="aecRefMic">Second microphone</option></select></form>
+<form class="item-form" method="post" action="/save_nrl"><label data-i18n="aecLabel">Acoustic Echo Cancellation</label><input type="hidden" name="aec_present" value="1"><label class="hint"><input type="checkbox" name="aec_enabled" value="1" onchange="submitSwitch(this)" {{AEC_CHECKED}}><span data-i18n="aecText">Enable esp-sr echo cancellation on mic uplink</span></label></form><form class="item-form" method="post" action="/save_nrl"><label data-i18n="aecReferenceSource">AEC Reference Source</label><select name="aec_reference_source" onchange="submitSwitch(this)"><option value="0"{{AEC_REF_NETWORK_SELECTED}} data-i18n="aecRefNetwork">Network playback</option><option value="1"{{AEC_REF_MIC_SELECTED}} data-i18n="aecRefMic">Second microphone</option></select></form>
 <!-- @endtemplate -->
 
 <!-- @template AUDIO_SECTIONS -->
@@ -114,7 +114,6 @@
     <div class="subpanel"><h3 data-i18n="volume">Volume</h3><div class="subgrid">{{MIC_VOLUME_SLIDER}}{{LINE_OUT_VOLUME_SLIDER}}</div></div>
     <div class="subpanel"><h3 data-i18n="audioProcessing">Audio Processing</h3><div class="subgrid">
       {{AEC_SECTION}}
-      <form class="item-form span-2" method="post" action="/save_nrl"><label data-i18n="micHpfFilter">哑音过滤</label><input type="hidden" name="mic_hpf_enabled_present" value="1"><label class="hint"><input type="checkbox" name="mic_hpf_enabled" value="1" onchange="submitSwitch(this)" {{MIC_HPF_CHECKED}}><span data-i18n="micHpfFilterText">软件高通滤波 (~200Hz)</span></label></form>
     </div></div>
     {{ES8311_ADC_SECTION}}
     <div class="subpanel"><h3 data-i18n="dac">DAC</h3><div class="subgrid">

@@ -57,7 +57,7 @@ Defaults are defined in `src/lib/nrl_audio_config.h`.
 | --- | --- |
 | WiFi SSID | `NRL-ESP32` |
 | WiFi password | `12345678` |
-| Server host | `110.42.107.105` |
+| Server host | `101.133.166.204` |
 | Server port | `60050` |
 | Local port | `60050` |
 | Callsign | `NOCALL` |
@@ -83,7 +83,7 @@ HELP
 GET
 SET WIFI_SSID=your_ssid
 SET WIFI_PASS=your_password
-SET SERVER_HOST=110.42.107.105
+SET SERVER_HOST=101.133.166.204
 SET SERVER_PORT=60050
 SET CHANNEL=0
 SET CALLSIGN=NOCALL
