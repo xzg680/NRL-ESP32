@@ -109,14 +109,20 @@
 
 <!-- @template AUDIO_SECTIONS -->
 <section class="panel">
-  <div class="section-head"><h2 data-i18n="audio">Audio</h2></div>
+  <div class="section-head">
+    <h2 data-i18n="audio">Audio</h2>
+    <div class="audio-actions">
+      <form class="inline-form" method="post" action="/save_nrl"><input type="hidden" name="audio_reset_defaults" value="1"><button class="secondary btn-small" type="submit" data-i18n="audioResetDefaults">恢复默认值</button></form>
+      <label class="switch-label"><input id="audio-expert-mode" type="checkbox" onchange="toggleAudioExpert(this.checked)"><span data-i18n="audioExpertMode">专家模式</span></label>
+    </div>
+  </div>
   <div class="grid">
     <div class="subpanel"><h3 data-i18n="volume">Volume</h3><div class="subgrid">{{MIC_VOLUME_SLIDER}}{{LINE_OUT_VOLUME_SLIDER}}</div></div>
     <div class="subpanel"><h3 data-i18n="audioProcessing">Audio Processing</h3><div class="subgrid">
       {{AEC_SECTION}}
     </div></div>
     {{ES8311_ADC_SECTION}}
-    <div class="subpanel"><h3 data-i18n="dac">DAC</h3><div class="subgrid">
+    <div class="subpanel" data-audio-expert="1" hidden><h3 data-i18n="dac">DAC</h3><div class="subgrid">
       <div class="group-label span-2" data-i18n="output">Output</div>
       <form class="item-form span-2" method="post" action="/save_nrl"><label data-i18n="hpDrive">ES8311 HP Drive</label><input type="hidden" name="hp_drive_present" value="1"><label class="hint"><input type="checkbox" name="hp_drive_enabled" value="1" onchange="submitSwitch(this)" {{HP_DRIVE_CHECKED}}><span data-i18n="hpDriveText">Enable headphone output drive (REG13 HPSW)</span></label></form>
       <div class="group-label span-2" data-i18n="drc">DRC</div>
@@ -131,7 +137,7 @@
 <!-- @endtemplate -->
 
 <!-- @template ES8311_ADC_SECTION -->
-    <div class="subpanel"><h3 data-i18n="adc">ADC</h3><div class="subgrid">
+    <div class="subpanel" data-audio-expert="1" hidden><h3 data-i18n="adc">ADC</h3><div class="subgrid">
       <div class="group-label span-2" data-i18n="input">Input</div>
       <form class="item-form" method="post" action="/save_nrl"><label data-i18n="dmic">DMIC</label><input type="hidden" name="adc_dmic_present" value="1"><label class="hint"><input type="checkbox" name="adc_dmic_enabled" value="1" onchange="submitSwitch(this)" {{ADC_DMIC_CHECKED}}><span data-i18n="dmicText">REG14 bit6 select DMIC from MIC1P</span></label></form>
       <form class="item-form" method="post" action="/save_nrl"><label data-i18n="micInput">MIC1P-MIC1N Input</label><input type="hidden" name="adc_linsel_present" value="1"><label class="hint"><input type="checkbox" name="adc_linsel" value="1" onchange="submitSwitch(this)" {{ADC_LINSEL_CHECKED}}><span data-i18n="micInputText">REG14 bit4 line input select</span></label></form>

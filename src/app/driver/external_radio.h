@@ -117,6 +117,7 @@ bool EXTERNAL_RADIO_SetCallsign(const char *value, bool persist);
 bool EXTERNAL_RADIO_SetCallsignSsid(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetMicVolume(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetLineOutVolume(uint8_t value, bool persist);
+bool EXTERNAL_RADIO_ResetAudioConfig(bool persist);
 bool EXTERNAL_RADIO_SetHpDriveEnabled(bool enabled, bool persist);
 bool EXTERNAL_RADIO_SetDrcEnabled(bool enabled, bool persist);
 bool EXTERNAL_RADIO_SetDrcWinsize(uint8_t value, bool persist);

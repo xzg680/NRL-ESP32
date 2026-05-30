@@ -976,12 +976,12 @@ static void sendSavedFieldsJson(const bool ok)
     body += ok ? "true" : "false";
     body += ",\"fields\":{";
     bool first = true;
-    for (int i = 0; i < s_server.args(); ++i) {
-        const std::string name = s_server.argName(i);
-        if (endsWith(name, "_present")) {
-            continue;
-        }
+    auto appendField = [&](const std::string &name) {
         const std::string value = savedValueForArg(config, name);
+        if (value.empty() && name != "wifi_ssid" && name != "wifi_password" &&
+            name != "server_host" && name != "callsign") {
+            return;
+        }
         if (!first) {
             body += ",";
         }
@@ -991,6 +991,33 @@ static void sendSavedFieldsJson(const bool ok)
         body += "\":\"";
         body += jsonEscape(value);
         body += "\"";
+    };
+    for (int i = 0; i < s_server.args(); ++i) {
+        const std::string name = s_server.argName(i);
+        if (endsWith(name, "_present") || name == "audio_reset_defaults") {
+            continue;
+        }
+        appendField(name);
+    }
+    if (s_server.hasArg("audio_reset_defaults")) {
+        static const char *kAudioFields[] = {
+            "mic_volume", "line_out_volume", "hp_drive_enabled",
+            "aec_enabled", "aec_reference_source", "ai_noise_enabled",
+            "mic_hpf_enabled", "drc_enabled", "drc_winsize",
+            "drc_maxlevel", "drc_minlevel", "dac_ramprate",
+            "dac_eq_bypass", "daceq_b0", "daceq_b1", "daceq_a1",
+            "adc_dmic_enabled", "adc_linsel", "adc_pga_gain",
+            "adc_ramprate", "adc_scale", "adc_dmic_sense",
+            "adc_sync", "adc_inv", "adc_ramclr", "alc_enabled",
+            "adc_automute_enabled", "alc_winsize", "alc_maxlevel",
+            "alc_minlevel", "adc_automute_winsize",
+            "adc_automute_noise_gate", "adc_automute_volume",
+            "adc_hpfs1", "adc_hpfs2", "adc_eq_bypass", "adc_hpf",
+            "adceq_b0", "adceq_a1", "adceq_a2", "adceq_b1", "adceq_b2",
+        };
+        for (const char *name : kAudioFields) {
+            appendField(name);
+        }
     }
     body += "}}";
     s_server.send(ok ? 200 : 400, "application/json; charset=utf-8", body);
@@ -1260,6 +1287,11 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
         have_snapshot = true;
     }
 
+    const bool reset_audio_defaults = s_server.hasArg("audio_reset_defaults");
+    if (ok && reset_audio_defaults) {
+        ok = EXTERNAL_RADIO_ResetAudioConfig(false);
+    }
+    if (ok && !reset_audio_defaults) {
     if (ok && s_server.hasArg("server_host")) {
         ok = EXTERNAL_RADIO_SetServerHost(s_server.arg("server_host").c_str(), false);
     }
@@ -1296,7 +1328,7 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
              value >= 160UL && value <= 500UL &&
              EXTERNAL_RADIO_SetVoicePayloadBytes(static_cast<uint16_t>(value), false);
     }
-#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+#if NRL_BOARD == NRL_BOARD_GEZIPAI
     // Auto-calibrate the battery sense from a multimeter reading. Empty value
     // skips it (so the form can be submitted with only the manual scale).
     if (ok && s_server.hasArg("battery_actual_mv") && !s_server.arg("battery_actual_mv").empty()) {
@@ -1618,6 +1650,7 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
         if (ok) {
             ok = EXTERNAL_RADIO_SetAdcEqCoefficients(b0, a1, a2, b1, b2, false);
         }
+    }
     }
     if (ok) {
         ok = EXTERNAL_RADIO_SaveConfig();

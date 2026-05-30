@@ -120,6 +120,8 @@ const translations = {
         noneFound: 'No WiFi networks found',
         scanFailed: 'Scan failed',
         saveItem: 'Save',
+        audioResetDefaults: 'Restore Defaults',
+        audioExpertMode: 'Expert Mode',
         saved: 'Saved',
         saveFailed: 'Save failed'
       },
@@ -292,6 +294,12 @@ const translations = {
       if (!dhcp) return;
       document.querySelectorAll('.wifi-static-field').forEach((input) => {
         input.disabled = dhcp.checked;
+      });
+    }
+
+    function toggleAudioExpert(enabled) {
+      document.querySelectorAll('[data-audio-expert]').forEach((panel) => {
+        panel.hidden = !enabled;
       });
     }
 
@@ -479,6 +487,11 @@ const translations = {
     function initPortal() {
       applyLanguage(currentLang());
       syncDhcpFields();
+      const expert = document.getElementById('audio-expert-mode');
+      if (expert) {
+        expert.checked = false;
+        toggleAudioExpert(false);
+      }
       document.querySelectorAll('form').forEach((form) => {
         // Intercept explicit Save-button submits: send via AJAX so the page
         // never reloads, then reflect the server's echoed values back into the

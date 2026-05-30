@@ -32,7 +32,7 @@ constexpr uint8_t kLegacyConfigVersion3 = 3U;
 constexpr uint8_t kLegacyConfigVersion4 = 4U;
 constexpr uint8_t kMinChannel = 0U;
 constexpr uint8_t kMaxChannel = 7U;
-constexpr uint8_t kDefaultMicVolume = 0xE0U;
+constexpr uint8_t kDefaultMicVolume = 180U;
 constexpr uint8_t kDefaultLineOutVolume = 180U;
 constexpr uint8_t kPersistedHpDriveOff = 1U;
 constexpr uint8_t kPersistedHpDriveOn = 2U;
@@ -347,6 +347,19 @@ static void applyDefaultAdcConfig(void)
     s_config.adceq_b2 = 0U;
 }
 
+static void applyDefaultAudioConfig(void)
+{
+    s_config.mic_volume = kDefaultMicVolume;
+    s_config.line_out_volume = kDefaultLineOutVolume;
+    s_config.hp_drive_enabled = false;
+    applyDefaultDrcConfig();
+    applyDefaultAdcConfig();
+    s_config.aec_enabled = false;
+    s_config.aec_reference_source = defaultAecReferenceSource();
+    s_config.ai_noise_enabled = false;
+    s_config.mic_hpf_enabled = true;
+}
+
 static void loadAdcRegisters(const uint8_t reg14,
                              const uint8_t reg15,
                              const uint8_t reg16,
@@ -453,11 +466,7 @@ static void applyDefaults(void)
     s_config.local_port = s_config.server_port;
     s_config.callsign_ssid = static_cast<uint8_t>(NRL_AUDIO_CALLSIGN_SSID);
     s_config.device_mode = static_cast<uint8_t>(NRL_AUDIO_DEVICE_MODE);
-    s_config.mic_volume = kDefaultMicVolume;
-    s_config.line_out_volume = kDefaultLineOutVolume;
-    s_config.hp_drive_enabled = false;
-    applyDefaultDrcConfig();
-    applyDefaultAdcConfig();
+    applyDefaultAudioConfig();
     applyDefaultSciConfig();
     s_config.wifi_ssid[0] = '\0';
     s_config.wifi_password[0] = '\0';
@@ -466,18 +475,6 @@ static void applyDefaults(void)
     s_config.wifi_gateway = 0U;
     s_config.wifi_dns = 0U;
     s_config.wifi_dhcp_enabled = true;
-#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
-    s_config.aec_enabled = true;
-#else
-    s_config.aec_enabled = false;
-#endif
-    s_config.aec_reference_source = defaultAecReferenceSource();
-#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
-    s_config.ai_noise_enabled = true;
-#else
-    s_config.ai_noise_enabled = false;
-#endif
-    s_config.mic_hpf_enabled = true;
     s_config.ptt_timeout_s = kDefaultPttTimeoutS;
     s_config.battery_cal_milli = kDefaultBatteryCalMilli;
     s_config.voice_payload_bytes = kDefaultVoicePayloadBytes;
@@ -654,17 +651,9 @@ static bool loadPersistedConfig(void)
         s_config.wifi_gateway = 0U;
         s_config.wifi_dns = 0U;
         s_config.wifi_dhcp_enabled = true;
-#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
-        s_config.aec_enabled = true;
-#else
         s_config.aec_enabled = false;
-#endif
         s_config.aec_reference_source = defaultAecReferenceSource();
-#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
-        s_config.ai_noise_enabled = true;
-#else
         s_config.ai_noise_enabled = false;
-#endif
         s_config.mic_hpf_enabled = true;
     }
     if (persisted.version == kConfigVersion) {
@@ -1012,6 +1001,22 @@ bool EXTERNAL_RADIO_SetLineOutVolume(const uint8_t value, const bool persist)
     EXTERNAL_RADIO_Init();
     s_config.line_out_volume = value;
     applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_ResetAudioConfig(const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    applyDefaultAudioConfig();
+    normalizeConfig();
+    applyAudioConfigToCodec();
+#if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
+    AEC_Reconfigure(s_config.aec_enabled, s_config.ai_noise_enabled);
+#endif
+    AUDIO_SetAecReferenceSource(s_config.aec_reference_source);
     if (persist) {
         return savePersistedConfig();
     }
