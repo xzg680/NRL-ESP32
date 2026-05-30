@@ -35,7 +35,7 @@
     </form>
     <form class="item-form span-2" method="post" action="/save_wifi">
       <div class="subgrid">
-        <div><label>DHCP</label><input type="hidden" name="wifi_dhcp_present" value="1"><label class="hint"><input id="wifi-dhcp-enabled" type="checkbox" name="wifi_dhcp_enabled" value="1" onchange="syncDhcpFields()" {{DHCP_CHECKED}}><span>Use DHCP for station IP</span></label></div>
+        <div class="span-2"><label>DHCP</label><input type="hidden" name="wifi_dhcp_present" value="1"><label class="hint"><input id="wifi-dhcp-enabled" type="checkbox" name="wifi_dhcp_enabled" value="1" onchange="syncDhcpFields()" {{DHCP_CHECKED}}><span>Use DHCP for station IP</span></label></div>
         <div><label>WiFi IP</label><input class="wifi-static-field" name="wifi_ip" value="{{WIFI_IP}}"></div>
         <div><label>WiFi Mask</label><input class="wifi-static-field" name="wifi_mask" value="{{WIFI_MASK}}"></div>
         <div><label>WiFi Gateway</label><input class="wifi-static-field" name="wifi_gateway" value="{{WIFI_GATEWAY}}"></div>

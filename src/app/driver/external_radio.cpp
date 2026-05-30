@@ -338,7 +338,7 @@ static void applyDefaultAdcConfig(void)
     s_config.adc_automute_volume = 0U;
     s_config.adc_hpfs1 = 10U;
     s_config.adc_eq_bypass = true;
-    s_config.adc_hpf = true;
+    s_config.adc_hpf = false;
     s_config.adc_hpfs2 = 10U;
     s_config.adceq_b0 = 0U;
     s_config.adceq_a1 = 0U;
