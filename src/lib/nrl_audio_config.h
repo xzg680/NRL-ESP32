@@ -37,7 +37,7 @@
 #endif
 
 #ifndef NRL_AUDIO_DEVICE_MODE
-#define NRL_AUDIO_DEVICE_MODE  55
+#define NRL_AUDIO_DEVICE_MODE  22
 #endif
 
 // Voice stream behaviour.

@@ -62,7 +62,7 @@ Defaults are defined in `src/lib/nrl_audio_config.h`.
 | Local port | `60050` |
 | Callsign | `NOCALL` |
 | Callsign SSID | `0` |
-| Device mode | `55` |
+| Device mode | `22` |
 | Downlink voice timeout | `120 ms` |
 | Heartbeat interval | `2000 ms` |
 
