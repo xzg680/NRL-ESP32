@@ -99,6 +99,13 @@ size_t s_sci_payload_count = 0u;
 uint32_t s_last_sci_rx_ms = 0u;
 uint32_t s_last_sci_log_ms = 0u;
 uint32_t s_last_sci_poll_ms = 0u;
+// Tail-audio suppression: when a downlink (network->radio) voice stream ends,
+// this is set to the wall-clock time until which captured radio audio is
+// dropped instead of forwarded to the network. 0 means no window pending. It
+// is written by the bridge task (stopDownlinkPlayback) and read by the audio
+// task (sendVoiceFrame); a uint32_t word read/write is atomic on the ESP32, so
+// no lock is needed and an occasional stale read is harmless.
+uint32_t s_tail_suppress_until_ms = 0u;
 
 constexpr uint32_t kWifiRetryBackoffMs = 30000u;
 constexpr uint8_t kWifiFallbackFailureThreshold = 3u;
@@ -387,6 +394,18 @@ static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
         return;
     }
 
+    // Tail-audio suppression: for a configured window after the device finishes
+    // playing a network voice stream out to the radio, drop captured radio audio
+    // so a repeater's echo response is not bounced back onto the network (which
+    // would mutually re-trigger two or more networked devices).
+    if (s_tail_suppress_until_ms != 0u) {
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        if (static_cast<int32_t>(now - s_tail_suppress_until_ms) < 0) {
+            return;
+        }
+        s_tail_suppress_until_ms = 0u;
+    }
+
     static uint8_t alaw_accumulator[kG711PayloadMaxBytes];
     static size_t alaw_accumulator_count = 0u;
 
@@ -643,6 +662,17 @@ static void stopDownlinkPlayback(void)
     s_voice_decode_chunks = 0u;
     s_last_voice_payload_size = 0u;
     STATUS_IO_SetPttActive(false);
+
+    // Arm the tail-audio suppression window now that downlink playback (the
+    // voice we just sent out to the radio) has ended. See sendVoiceFrame().
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    const uint32_t tail_ms = (config != nullptr) ? config->tail_suppress_ms : 0u;
+    if (tail_ms > 0u) {
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        s_tail_suppress_until_ms = now + tail_ms;
+    } else {
+        s_tail_suppress_until_ms = 0u;
+    }
 }
 
 static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payload_size)

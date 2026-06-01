@@ -1,6 +1,6 @@
 # NRL ESP32 Radio Bridge
 
-Current firmware version: `0.1.5`
+Current firmware version: `0.1.6`
 
 This project is an ESP32-S3 + ES8311 firmware for an NRL network radio bridge. It connects radio audio, PTT, SQL, channel selection, SCI serial passthrough, and network configuration in one embedded application. The current pin map targets the Moto3188/NRL hardware branch.
 

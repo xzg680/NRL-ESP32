@@ -59,6 +59,8 @@ constexpr uint16_t kMaxBatteryCalMilli = 2000U;      // 2.0x
 constexpr uint16_t kDefaultVoicePayloadBytes = 160U; // 20 ms G.711 A-law
 constexpr uint16_t kMinVoicePayloadBytes = 160U;
 constexpr uint16_t kMaxVoicePayloadBytes = 500U;
+constexpr uint16_t kDefaultTailSuppressMs = 0U;       // disabled
+constexpr uint16_t kMaxTailSuppressMs = 5000U;
 
 struct PersistedExternalRadioConfig {
     uint32_t magic;
@@ -478,6 +480,7 @@ static void applyDefaults(void)
     s_config.ptt_timeout_s = kDefaultPttTimeoutS;
     s_config.battery_cal_milli = kDefaultBatteryCalMilli;
     s_config.voice_payload_bytes = kDefaultVoicePayloadBytes;
+    s_config.tail_suppress_ms = kDefaultTailSuppressMs;
     copyBounded(s_config.server_host, sizeof(s_config.server_host), NRL_AUDIO_SERVER_HOST);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), NRL_AUDIO_CALLSIGN);
     sanitizeCallsign(s_config.callsign);
@@ -554,6 +557,10 @@ static void normalizeConfig(void)
     if (s_config.voice_payload_bytes < kMinVoicePayloadBytes ||
         s_config.voice_payload_bytes > kMaxVoicePayloadBytes) {
         s_config.voice_payload_bytes = kDefaultVoicePayloadBytes;
+    }
+    // 0 is a valid value (suppression off), so only the upper bound is clamped.
+    if (s_config.tail_suppress_ms > kMaxTailSuppressMs) {
+        s_config.tail_suppress_ms = kMaxTailSuppressMs;
     }
 #if !defined(NRL_ENABLE_AEC) || !NRL_ENABLE_AEC
     s_config.aec_enabled = false;
@@ -687,10 +694,15 @@ static bool loadPersistedConfig(void)
         // normalizeConfig() promotes that to kDefaultVoicePayloadBytes.
         s_config.voice_payload_bytes = static_cast<uint16_t>(persisted.reserved2[0]) |
                                        (static_cast<uint16_t>(persisted.reserved2[1]) << 8);
+        // tail_suppress_ms shares the version-5 layout in reserved2[2..3]. Old
+        // saves read 0 here, which is the default (suppression disabled).
+        s_config.tail_suppress_ms = static_cast<uint16_t>(persisted.reserved2[2]) |
+                                    (static_cast<uint16_t>(persisted.reserved2[3]) << 8);
     } else {
         s_config.ptt_timeout_s = 0U;
         s_config.battery_cal_milli = 0U;
         s_config.voice_payload_bytes = 0U;
+        s_config.tail_suppress_ms = 0U;
     }
     normalizeConfig();
     return true;
@@ -755,6 +767,8 @@ static bool savePersistedConfig(void)
     persisted.reserved4[3] = static_cast<uint8_t>((s_config.battery_cal_milli >> 8) & 0xFFU);
     persisted.reserved2[0] = static_cast<uint8_t>(s_config.voice_payload_bytes & 0xFFU);
     persisted.reserved2[1] = static_cast<uint8_t>((s_config.voice_payload_bytes >> 8) & 0xFFU);
+    persisted.reserved2[2] = static_cast<uint8_t>(s_config.tail_suppress_ms & 0xFFU);
+    persisted.reserved2[3] = static_cast<uint8_t>((s_config.tail_suppress_ms >> 8) & 0xFFU);
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
@@ -1392,6 +1406,19 @@ bool EXTERNAL_RADIO_SetVoicePayloadBytes(const uint16_t value, const bool persis
         return false;
     }
     s_config.voice_payload_bytes = value;
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetTailSuppressMs(const uint16_t value, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (value > kMaxTailSuppressMs) {
+        return false;
+    }
+    s_config.tail_suppress_ms = value;
     if (persist) {
         return savePersistedConfig();
     }

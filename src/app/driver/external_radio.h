@@ -95,6 +95,12 @@ struct ExternalRadioConfig {
     // Valid range: 160..500 (20..62.5 ms of audio at 8 kHz). The actual UDP
     // packet length is this plus the 48-byte NRL header.
     uint16_t voice_payload_bytes;
+    // Tail-audio suppression window, in milliseconds. After the device finishes
+    // playing a network voice stream out to the radio, captured radio audio is
+    // dropped (not forwarded to the network) for this long. This breaks the
+    // echo loop a repeater's response would otherwise create between two or more
+    // networked devices. 0 disables suppression; valid range 0..5000.
+    uint16_t tail_suppress_ms;
     SciSerialConfig sci;
     char wifi_ssid[33];
     char wifi_password[65];
@@ -152,6 +158,8 @@ bool EXTERNAL_RADIO_SetPttTimeout(uint16_t value, bool persist);
 bool EXTERNAL_RADIO_SetBatteryCalibration(uint16_t scale_milli, bool persist);
 // G.711 voice payload size per outbound NRL packet. Accepts 160..500 bytes.
 bool EXTERNAL_RADIO_SetVoicePayloadBytes(uint16_t value, bool persist);
+// Tail-audio suppression window in milliseconds (0 disables). Accepts 0..5000.
+bool EXTERNAL_RADIO_SetTailSuppressMs(uint16_t value, bool persist);
 #endif
 
 #endif // DRIVER_EXTERNAL_RADIO_H

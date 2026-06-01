@@ -2,7 +2,7 @@
 
 [English manual](README.en.md)
 
-当前固件版本：`0.1.5`
+当前固件版本：`0.1.6`
 
 本项目是基于 ESP32-S3 + ES8311 的 NRL 网络语音电台桥接固件，用于把电台音频、PTT、SQL、频道选择、串口透明传输和网络配置集中到一个嵌入式应用中。当前工程主要面向 Moto3188/NRL 分支硬件。
 
@@ -43,6 +43,11 @@
   - 支持麦克风输入增益、线路输出音量、HP Drive 输出模式配置。
   - 支持接收模式下的下行音频播放队列。
 
+- 尾音消除（防回波激发）
+  - ESP32 把网络语音播放给电台结束后，会在一段时间内丢弃电台返回的语音，不再转发到网络。
+  - 用于抑制电台所接中继台的应答回波，避免网络上 2 台以上设备相互激发。
+  - 默认 `0`（不抑制），范围 `0..5000` 毫秒，可通过 `AT+TAIL_SUPPRESS` 或 Web 配置页调节。
+
 - 屏幕显示（仅格子派）
   - 板载 ST7789 240x240 SPI 彩屏，使用 LVGL 渲染，简洁现代科技风格深色界面。
   - 中间主区域显示呼号（接收语音时为呼叫方，待机/发送时为本机配置的呼号），呼号下方是较小的 SSID，再下面一行是当前时间。
@@ -58,7 +63,7 @@
 - 远程 AT 命令配置
   - 支持查询和设置频道、服务器、呼号、SSID、音量、SCI 参数等。
   - 支持远程重启命令。
-  - 常用命令包括 `AT+CH`、`AT+D_IP`、`AT+D_PORT`、`AT+CALL`、`AT+SSID`、`AT+PTT_TIMEOUT`、`AT+MIC_GAIN`、`AT+VOLUME`、`AT+HP_DRIVE`、`AT+SCI`、`AT+REBOOT`。
+  - 常用命令包括 `AT+CH`、`AT+D_IP`、`AT+D_PORT`、`AT+CALL`、`AT+SSID`、`AT+PTT_TIMEOUT`、`AT+TAIL_SUPPRESS`、`AT+MIC_GAIN`、`AT+VOLUME`、`AT+HP_DRIVE`、`AT+SCI`、`AT+REBOOT`。
 
 - 参数持久化
   - 电台配置保存到共享 Flash/EEPROM 区域。

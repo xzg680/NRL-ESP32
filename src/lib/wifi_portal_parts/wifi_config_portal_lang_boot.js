@@ -38,6 +38,7 @@
     callsignSsid: '呼号SSID',
     pttTimeout: 'PTT 超时 (秒, 5-3600)',
     voicePayloadBytes: '语音包大小 (字节, 160-500)',
+    tailSuppressMs: '尾音消除 (毫秒, 0-5000, 0=关闭)',
     hpDrive: 'ES8311耳机驱动',
     hpDriveText: '启用耳机输出驱动 (REG13 HPSW)',
     audio: '音频',

@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NRL ESP32 Radio Bridge · 说明文档</title>
+<style>
+  :root {
+    --bg: #f6f8fa;
+    --surface: #ffffff;
+    --text: #1f2328;
+    --muted: #57606a;
+    --accent: #0969da;
+    --accent-soft: #ddf4ff;
+    --border: #d0d7de;
+    --code-bg: #f0f3f6;
+    --table-head: #f0f3f6;
+    --table-stripe: #fafbfc;
+    --shadow: 0 1px 3px rgba(27, 31, 36, 0.08), 0 8px 24px rgba(27, 31, 36, 0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --text: #e6edf3;
+      --muted: #9198a1;
+      --accent: #4493f8;
+      --accent-soft: #11243e;
+      --border: #30363d;
+      --code-bg: #1b222b;
+      --table-head: #1b222b;
+      --table-stripe: #12171d;
+      --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.3);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.7;
+  }
+  .layout { display: flex; max-width: 1180px; margin: 0 auto; gap: 32px; padding: 0 24px; }
+  /* Sidebar / TOC */
+  nav.toc {
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    height: 100vh;
+    overflow-y: auto;
+    width: 250px;
+    flex-shrink: 0;
+    padding: 28px 8px 28px 0;
+    font-size: 14px;
+  }
+  nav.toc .toc-title {
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 12px 12px;
+  }
+  nav.toc a {
+    display: block;
+    padding: 6px 12px;
+    color: var(--muted);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    border-radius: 0 6px 6px 0;
+    transition: all .15s ease;
+  }
+  nav.toc a:hover { color: var(--accent); background: var(--accent-soft); }
+  main {
+    flex: 1;
+    min-width: 0;
+    padding: 28px 0 80px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 32px 40px;
+  }
+  header.hero {
+    background: linear-gradient(135deg, var(--accent) 0%, #6f42c1 100%);
+    color: #fff;
+    border-radius: 14px;
+    padding: 40px;
+    margin-bottom: 28px;
+    box-shadow: var(--shadow);
+  }
+  header.hero h1 { margin: 0 0 8px; font-size: 30px; font-weight: 800; }
+  header.hero p { margin: 0; opacity: .92; font-size: 16px; }
+  .badges { margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .badge {
+    background: rgba(255,255,255,0.18);
+    border: 1px solid rgba(255,255,255,0.35);
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .badge a { color: #fff; text-decoration: none; }
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 40px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+    scroll-margin-top: 20px;
+  }
+  h2:first-child { margin-top: 0; }
+  h3 { font-size: 17px; font-weight: 700; margin: 26px 0 10px; scroll-margin-top: 20px; }
+  p { margin: 12px 0; }
+  ul { margin: 12px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+  /* Feature blocks */
+  .feature {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 14px 0;
+    background: var(--table-stripe);
+  }
+  .feature > .feature-title {
+    font-weight: 700;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .feature ul { margin: 10px 0 0; }
+  .feature-title .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent); flex-shrink: 0;
+  }
+  a { color: var(--accent); }
+  code {
+    font-family: "SFMono-Regular", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+    background: var(--code-bg);
+    padding: .15em .4em;
+    border-radius: 5px;
+    font-size: .88em;
+    border: 1px solid var(--border);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    line-height: 1.5;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: .86em; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 16px 0;
+    font-size: 14.5px;
+    overflow: hidden;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--border); }
+  th { background: var(--table-head); font-weight: 700; }
+  tr:nth-child(even) td { background: var(--table-stripe); }
+  tr:last-child td { border-bottom: none; }
+  td code, th code { white-space: nowrap; }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+  }
+  @media (max-width: 860px) {
+    nav.toc { display: none; }
+    .card { padding: 24px 20px; }
+    header.hero { padding: 28px 22px; }
+    .layout { padding: 0 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <nav class="toc">
+    <p class="toc-title">目录</p>
+    <a href="#features">支持功能</a>
+    <a href="#defaults">默认配置</a>
+    <a href="#ble">BLE 配置命令</a>
+    <a href="#pins">主要管脚</a>
+    <a href="#display">屏幕显示（格子派）</a>
+    <a href="#boot">启动流程</a>
+    <a href="#build">构建和烧录</a>
+    <a href="#flash">固件刷机</a>
+    <a href="#tree">目录结构</a>
+    <a href="#license">许可证</a>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <h1>NRL ESP32 Radio Bridge</h1>
+      <p>基于 ESP32-S3 + ES8311 的 NRL 网络语音电台桥接固件，把电台音频、PTT、SQL、频道选择、串口透明传输和网络配置集中到一个嵌入式应用中。当前工程主要面向 Moto3188 / NRL 分支硬件。</p>
+      <div class="badges">
+        <span class="badge">固件版本 v0.1.6</span>
+        <span class="badge">ESP32-S3 · ES8311</span>
+        <span class="badge"><a href="README.en.md">English manual ↗</a></span>
+      </div>
+    </header>
+
+    <div class="card">
+      <h2 id="features">支持功能</h2>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>NRL UDP 网络语音桥接</div>
+        <ul>
+          <li>电台 SQL 有效时，采集 ES8311 ADC 音频并通过 UDP 发送到 NRL 服务器。</li>
+          <li>收到服务器下行语音时，拉起 PTT 输出，并通过 ES8311 DAC 播放到电台音频输入。</li>
+          <li>使用 A-law 编解码，默认采样率 8 kHz。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>WiFi 和服务器配置门户</div>
+        <ul>
+          <li>设备启动后提供配置 AP 和 Web 页面。</li>
+          <li>默认配置入口 IP 为 <code>192.168.4.1</code>。</li>
+          <li>支持扫描附近 WiFi、配置 WiFi SSID/密码、服务器地址、端口、频道、呼号、音量等参数。</li>
+          <li>支持在 <code>/update</code> 页面通过 WiFi 上传 <code>firmware.bin</code> 进行 OTA 刷机。</li>
+          <li>长按 BOOT 键 5 秒可重置网络相关配置。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>BLE 蓝牙配置</div>
+        <ul>
+          <li>设备启动后广播 BLE 设备名 <code>NRL-ESP32-CFG</code>。</li>
+          <li>使用 Nordic UART 风格的 BLE 服务，通过手机或电脑 BLE 工具写入文本命令。</li>
+          <li>支持配置 WiFi SSID/密码、服务器地址、端口、频道和呼号。</li>
+          <li>配置保存后会自动重启 WiFi/UDP 连接。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>电台控制 IO</div>
+        <ul>
+          <li>PTT 输出控制电台发射。</li>
+          <li>SQL1/SQL2 输入检测电台接收状态。</li>
+          <li>三位频道选择输出，支持 <code>0..7</code> 共 8 个频道。</li>
+          <li>状态灯显示网络心跳、SQL 状态和 PTT 状态。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>PTT 按键发射控制（格子派）</div>
+        <ul>
+          <li>短按 PTT 键开启发射，再短按一次关闭发射（锁定式）。</li>
+          <li>长按 PTT 键为即时发射（按住发射），松开按键立即停止发送。</li>
+          <li>发射超时：发射持续超过设定时间后自动强制关闭（短按锁定和长按均受此限制）。</li>
+          <li>超时时间默认 5 分钟，范围 <code>5..3600</code> 秒，可通过 <code>AT+PTT_TIMEOUT</code> 或 Web 配置页调节。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>ES8311 音频编解码</div>
+        <ul>
+          <li>I2S 主模式驱动 ES8311。</li>
+          <li>支持麦克风输入增益、线路输出音量、HP Drive 输出模式配置。</li>
+          <li>支持接收模式下的下行音频播放队列。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>尾音消除（防回波激发）</div>
+        <ul>
+          <li>ESP32 把网络语音播放给电台结束后，会在一段时间内丢弃电台返回的语音，不再转发到网络。</li>
+          <li>用于抑制电台所接中继台的应答回波，避免网络上 2 台以上设备相互激发。</li>
+          <li>默认 <code>0</code>（不抑制），范围 <code>0..5000</code> 毫秒，可通过 <code>AT+TAIL_SUPPRESS</code> 或 Web 配置页调节。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>屏幕显示（仅格子派）</div>
+        <ul>
+          <li>板载 ST7789 240x240 SPI 彩屏，使用 LVGL 渲染，简洁现代科技风格深色界面。</li>
+          <li>中间主区域显示呼号（接收语音时为呼叫方，待机/发送时为本机配置的呼号），呼号下方是较小的 SSID，再下面一行是当前时间。</li>
+          <li>顶部状态栏左侧显示 WiFi 信号强度（dB 值），右侧显示电池电压。</li>
+          <li>底部显示设备获取到的局域网 IP 地址；WiFi 连接失败进入配网状态时，改为显示配置热点的 IP 地址。</li>
+          <li>时间通过 NTP 同步（CST-8 时区），未联网时显示 <code>--:--:--</code>。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>SCI 串口透明传输</div>
+        <ul>
+          <li>支持通过 NRL 数据包转发 SCI 串口数据。</li>
+          <li>默认 SCI 配置为 <code>9600,8,N,1</code>。</li>
+          <li>SCI 参数可通过 AT 命令更新。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>远程 AT 命令配置</div>
+        <ul>
+          <li>支持查询和设置频道、服务器、呼号、SSID、音量、SCI 参数等。</li>
+          <li>支持远程重启命令。</li>
+          <li>常用命令包括 <code>AT+CH</code>、<code>AT+D_IP</code>、<code>AT+D_PORT</code>、<code>AT+CALL</code>、<code>AT+SSID</code>、<code>AT+PTT_TIMEOUT</code>、<code>AT+TAIL_SUPPRESS</code>、<code>AT+MIC_GAIN</code>、<code>AT+VOLUME</code>、<code>AT+HP_DRIVE</code>、<code>AT+SCI</code>、<code>AT+REBOOT</code>。</li>
+        </ul>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title"><span class="dot"></span>参数持久化</div>
+        <ul>
+          <li>电台配置保存到共享 Flash/EEPROM 区域。</li>
+          <li>首次启动会写入默认配置，之后从持久化配置恢复。</li>
+        </ul>
+      </div>
+
+      <h2 id="defaults">默认配置</h2>
+      <p>默认参数定义在 <code>src/lib/nrl_audio_config.h</code>：</p>
+      <table>
+        <thead><tr><th>项目</th><th>默认值</th></tr></thead>
+        <tbody>
+          <tr><td>WiFi SSID</td><td><code>NRL-ESP32</code></td></tr>
+          <tr><td>WiFi 密码</td><td><code>12345678</code></td></tr>
+          <tr><td>服务器地址</td><td><code>101.133.166.204</code></td></tr>
+          <tr><td>服务器端口</td><td><code>60050</code></td></tr>
+          <tr><td>本地端口</td><td><code>60050</code></td></tr>
+          <tr><td>呼号</td><td><code>NOCALL</code></td></tr>
+          <tr><td>呼号 SSID</td><td><code>0</code></td></tr>
+          <tr><td>设备模式</td><td><code>55</code></td></tr>
+          <tr><td>下行语音超时</td><td><code>120 ms</code></td></tr>
+          <tr><td>心跳间隔</td><td><code>2000 ms</code></td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="ble">BLE 配置命令</h2>
+      <p>可使用 nRF Connect、LightBlue 等 BLE 工具连接 <code>NRL-ESP32-CFG</code>。</p>
+      <table>
+        <thead><tr><th>项目</th><th>UUID</th></tr></thead>
+        <tbody>
+          <tr><td>Service</td><td><code>6e400001-b5a3-f393-e0a9-e50e24dcca9e</code></td></tr>
+          <tr><td>RX Write</td><td><code>6e400002-b5a3-f393-e0a9-e50e24dcca9e</code></td></tr>
+          <tr><td>TX Notify</td><td><code>6e400003-b5a3-f393-e0a9-e50e24dcca9e</code></td></tr>
+        </tbody>
+      </table>
+      <p>向 RX 特征写入以换行结尾的文本命令：</p>
+      <pre><code>HELP
+GET
+SET WIFI_SSID=your_ssid
+SET WIFI_PASS=your_password
+SET SERVER_HOST=101.133.166.204
+SET SERVER_PORT=60050
+SET CHANNEL=0
+SET CALLSIGN=NOCALL
+SAVE
+APPLY
+RESET_NET
+REBOOT</code></pre>
+      <p><code>SET</code> 命令会立即保存配置；如果改动了 WiFi 或服务器参数，会自动让网络桥重新连接。<code>GET</code> 会通过 TX Notify 返回当前主要配置。</p>
+
+      <h2 id="pins">主要管脚</h2>
+      <p>管脚集中定义在 <code>src/app/driver/board_pins.h</code>。</p>
+      <table>
+        <thead><tr><th>功能</th><th>GPIO</th></tr></thead>
+        <tbody>
+          <tr><td>PTT 输出</td><td><code>8</code></td></tr>
+          <tr><td>SQL1 输入</td><td><code>17</code></td></tr>
+          <tr><td>SQL2 输入</td><td><code>18</code></td></tr>
+          <tr><td>网络/心跳状态灯</td><td><code>1</code></td></tr>
+          <tr><td>SQL 状态灯</td><td><code>2</code></td></tr>
+          <tr><td>PTT 红灯</td><td><code>42</code></td></tr>
+          <tr><td>频道 bit0</td><td><code>40</code></td></tr>
+          <tr><td>频道 bit1</td><td><code>39</code></td></tr>
+          <tr><td>频道 bit2</td><td><code>38</code></td></tr>
+          <tr><td>SCI RX</td><td><code>6</code></td></tr>
+          <tr><td>SCI TX</td><td><code>7</code></td></tr>
+          <tr><td>I2C SCL</td><td><code>14</code></td></tr>
+          <tr><td>I2C SDA</td><td><code>21</code></td></tr>
+          <tr><td>PA EN</td><td><code>46</code></td></tr>
+          <tr><td>I2S MCLK</td><td><code>9</code></td></tr>
+          <tr><td>I2S BCLK</td><td><code>10</code></td></tr>
+          <tr><td>I2S DOUT</td><td><code>13</code></td></tr>
+          <tr><td>I2S LRCLK</td><td><code>12</code></td></tr>
+          <tr><td>I2S DIN</td><td><code>11</code></td></tr>
+          <tr><td>BOOT 按键</td><td><code>0</code></td></tr>
+        </tbody>
+      </table>
+      <p>频道输出为三位二进制编码，例如频道 <code>0</code> 输出 <code>000</code>，频道 <code>7</code> 输出 <code>111</code>。</p>
+
+      <h2 id="display">屏幕显示（格子派）</h2>
+      <p>格子派板载一块 ST7789 240x240 SPI 彩屏，管脚与小智（xiaozhi）格子派板一致。屏幕驱动位于 <code>src/app/driver/display.cpp</code>，面板用 IDF 内置的 <code>esp_lcd</code> ST7789 驱动，界面用 LVGL 渲染。</p>
+      <table>
+        <thead><tr><th>功能</th><th>GPIO</th></tr></thead>
+        <tbody>
+          <tr><td>LCD SCLK</td><td><code>7</code></td></tr>
+          <tr><td>LCD MOSI</td><td><code>6</code></td></tr>
+          <tr><td>LCD DC</td><td><code>16</code></td></tr>
+          <tr><td>LCD CS</td><td><code>15</code></td></tr>
+          <tr><td>LCD RST</td><td><code>5</code></td></tr>
+          <tr><td>LCD 背光</td><td><code>4</code></td></tr>
+          <tr><td>电池电压 ADC</td><td><code>3</code>（ADC1 通道 2，1:2 分压）</td></tr>
+        </tbody>
+      </table>
+      <p>由于 LCD 占用 GPIO 4-7/15/16，格子派的 SCI 串口已从默认的 GPIO 4/5 移到 GPIO 9（RX）/ 8（TX），以避让 LCD 背光（4）与复位（5）。BH4TDV 板没有屏幕，SCI 仍为 GPIO 4/5。</p>
+      <h3>界面布局</h3>
+      <ul>
+        <li>顶部状态栏：左侧 WiFi 信号强度（dB），中间输出音量（百分比），右侧电池电压。</li>
+        <li>中间主区域：呼号上方的英文状态标题、呼号（大号字体）、SSID（小号）、当前时间。接收语音时显示呼叫方的呼号/SSID，待机或发送时显示本机配置的呼号/SSID（仅语音包参与判断，心跳包不影响）。</li>
+        <li>状态标题随收发实时变化：<code>STANDBY</code>（待机）、<code>RECEIVING</code>（接收中）、<code>TRANSMITTING</code>（发送中）、<code>FULL DUPLEX</code>（同时收发）。</li>
+        <li>底部：局域网 IP；进入配网（AP）状态时显示配置热点 IP（琥珀色）；<strong>发送或接收语音时改为显示 NRL 服务器 host —— 发送为红色、接收为青色，显示配置的 host 字符串而非解析后的 IP</strong>。</li>
+      </ul>
+      <p>LVGL（9.3.0）以<strong>本地组件</strong>形式内置在 <code>components/lvgl</code>，不经 ESP-IDF 组件管理器联网下载，因此本机和 CI 离线即可编译。LVGL 与 esp_lcd 的对接（缓冲区、刷新、tick）直接写在 <code>display.cpp</code> 里，未使用 <code>esp_lvgl_port</code>。LVGL 字体、颜色深度等通过 Kconfig 配置在 <code>sdkconfig.defaults</code>。</p>
+
+      <h2 id="boot">启动流程</h2>
+      <p>固件入口在 <code>src/app/main.cpp</code>：</p>
+      <ol>
+        <li>初始化串口日志。</li>
+        <li>初始化外部电台配置和频道选择 IO。</li>
+        <li>应用已保存的音频配置。</li>
+        <li>初始化 PTT、SQL 和状态灯 IO。</li>
+        <li>初始化屏幕（仅格子派：ST7789 LCD + LVGL 界面）。</li>
+        <li>启动 WiFi 配置门户。</li>
+        <li>初始化 ES8311 音频编解码器并进入接收模式。</li>
+        <li>启动 NRL 音频桥接任务。</li>
+      </ol>
+      <p>收到网络下行语音时，固件会拉高 PTT 并开始向电台输出音频；语音包超时后释放 PTT。</p>
+
+      <h2 id="build">构建和烧录</h2>
+      <p>工程使用 PlatformIO，有两个板级环境：<code>gezipai</code>（格子派）和 <code>bh4tdv</code>（BH4TDV 3188），通过 <code>-DNRL_BOARD</code> 区分。</p>
+      <pre><code>platformio run                        # 两块板都编译
+platformio run -e gezipai             # 只编译格子派
+platformio run -e gezipai -t upload   # 编译并烧录格子派</code></pre>
+      <p>串口监视：</p>
+      <pre><code>platformio device monitor -b 115200</code></pre>
+      <p>分区表使用 <code>part.csv</code>，当前应用分区为 <code>app0</code>。构建时 <code>scripts/fix_size_per_env.py</code> 会把 PlatformIO 的固件大小限制调整为 <code>part.csv</code> 中 <code>app0</code> 的实际大小。</p>
+      <p>GitHub Actions 会在每次 push、pull request 或手动触发时自动构建固件，并上传 <code>firmware.bin</code>、分区表、bootloader 和 USB 网页刷机文件作为构建产物。</p>
+
+      <h2 id="flash">固件刷机</h2>
+      <h3>USB 网页刷机</h3>
+      <p>工程提供 <code>web-flasher/</code> 页面，适合首次烧录或恢复设备。它会写入 bootloader、分区表、OTA data 和 <code>app0</code> 固件。</p>
+      <pre><code>platformio run
+python scripts/stage_web_flasher.py
+python -m http.server 8000 -d web-flasher</code></pre>
+      <p>然后用 Chrome 或 Edge 打开 <code>http://localhost:8000</code>，通过 USB 串口安装固件。</p>
+      <h3>WiFi 网页刷机</h3>
+      <p>设备已经运行双 OTA 分区表后，可通过配置门户刷机：</p>
+      <ol>
+        <li>连接设备配置 AP，或访问设备在局域网中的 IP。</li>
+        <li>打开 <code>http://192.168.4.1/update</code>，或从配置首页点击 <code>Firmware update</code>。</li>
+        <li>上传 <code>.pio/build/gezipai/firmware.bin</code>（BH4TDV 板用 <code>.pio/build/bh4tdv/firmware.bin</code>）。</li>
+        <li>上传完成后设备会自动重启到新固件。</li>
+      </ol>
+      <p>注意：WiFi OTA 需要 <code>part.csv</code> 中的 <code>app0/app1</code> 双 OTA 分区布局。旧分区布局设备应先用 USB 网页刷机或串口刷机更新分区表。</p>
+
+      <h2 id="tree">目录结构</h2>
+      <pre><code>src/app/main.cpp                  固件入口
+src/app/driver/board_pins.h       板级管脚定义
+src/app/driver/external_radio.*   电台配置、频道和持久化
+src/app/driver/status_io.*        PTT、SQL、状态灯
+src/app/driver/es8311.*           ES8311/I2S 音频驱动
+src/app/driver/display.*          ST7789 LCD + LVGL 界面（仅格子派）
+src/app/driver/sci_serial.*       SCI 串口
+src/lib/nrl_audio_bridge.*        NRL UDP 音频桥接
+src/lib/nrl_at_commands.*         远程 AT 命令
+src/lib/ble_config.*              BLE 蓝牙配置
+src/lib/wifi_config_portal.*      Web 配置门户
+src/lib/nrl_audio_config.h        默认网络和音频参数
+web-flasher/                      USB 网页刷机页面
+scripts/                          构建辅助脚本</code></pre>
+
+      <h2 id="license">许可证</h2>
+      <p>本项目使用 MIT License，详见 <code>LICENSE</code>。</p>
+
+      <footer>NRL ESP32 Radio Bridge · 固件版本 v0.1.6 · 本文档由 README.md 生成</footer>
+    </div>
+  </main>
+</div>
+</body>
+</html>

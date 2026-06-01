@@ -201,6 +201,7 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendUnsignedLine(payload, capacity, used, "SSID", (config != nullptr) ? config->callsign_ssid : 0u) &&
            appendUnsignedLine(payload, capacity, used, "PTT_TIMEOUT", (config != nullptr) ? config->ptt_timeout_s : 0u) &&
            appendUnsignedLine(payload, capacity, used, "VOICE_BYTES", (config != nullptr) ? config->voice_payload_bytes : 0u) &&
+           appendUnsignedLine(payload, capacity, used, "TAIL_SUPPRESS", (config != nullptr) ? config->tail_suppress_ms : 0u) &&
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
            appendUnsignedLine(payload, capacity, used, "BATT", static_cast<unsigned>(Display_GetBatteryCalibratedMv())) &&
            appendUnsignedLine(payload, capacity, used, "BATT_RAW", static_cast<unsigned>(Display_GetBatteryRawMv())) &&
@@ -407,6 +408,7 @@ static bool appendAllConfigLines(NrlAtCommandResult *result)
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "SSID", config->callsign_ssid) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "PTT_TIMEOUT", config->ptt_timeout_s) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOICE_BYTES", config->voice_payload_bytes) &&
+           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "TAIL_SUPPRESS", config->tail_suppress_ms) &&
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT", static_cast<unsigned>(Display_GetBatteryCalibratedMv())) &&
            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT_RAW", static_cast<unsigned>(Display_GetBatteryRawMv())) &&
@@ -738,6 +740,23 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOICE_BYTES", EXTERNAL_RADIO_GetConfig()->voice_payload_bytes);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "TAIL_SUPPRESS")) {
+        if (is_query) {
+            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "TAIL_SUPPRESS", config->tail_suppress_ms);
+            return;
+        }
+        unsigned long value = 0u;
+        // 0..5000 ms; 0 disables. The explicit bound also stops a >65535 value
+        // from wrapping when narrowed to uint16_t inside the setter.
+        if (!parseUnsignedValue(command.value, &value) || value > 5000u ||
+            !EXTERNAL_RADIO_SetTailSuppressMs(static_cast<uint16_t>(value), true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "TAIL_SUPPRESS");
+            return;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "TAIL_SUPPRESS", EXTERNAL_RADIO_GetConfig()->tail_suppress_ms);
         return;
     }
 
