@@ -35,11 +35,11 @@
     </form>
     <form class="item-form span-2" method="post" action="/save_wifi">
       <div class="subgrid">
-        <div class="span-2"><label>DHCP</label><input type="hidden" name="wifi_dhcp_present" value="1"><label class="hint"><input id="wifi-dhcp-enabled" type="checkbox" name="wifi_dhcp_enabled" value="1" onchange="syncDhcpFields()" {{DHCP_CHECKED}}><span>Use DHCP for station IP</span></label></div>
-        <div><label>WiFi IP</label><input class="wifi-static-field" name="wifi_ip" value="{{WIFI_IP}}"></div>
-        <div><label>WiFi Mask</label><input class="wifi-static-field" name="wifi_mask" value="{{WIFI_MASK}}"></div>
-        <div><label>WiFi Gateway</label><input class="wifi-static-field" name="wifi_gateway" value="{{WIFI_GATEWAY}}"></div>
-        <div><label>WiFi DNS</label><input class="wifi-static-field" name="wifi_dns" value="{{WIFI_DNS}}"></div>
+        <div class="span-2"><label data-i18n="dhcp">DHCP</label><input type="hidden" name="wifi_dhcp_present" value="1"><label class="hint"><input id="wifi-dhcp-enabled" type="checkbox" name="wifi_dhcp_enabled" value="1" onchange="syncDhcpFields()" {{DHCP_CHECKED}}><span data-i18n="useDhcp">Use DHCP for station IP</span></label></div>
+        <div><label data-i18n="wifiIp">WiFi IP</label><input class="wifi-static-field" name="wifi_ip" value="{{WIFI_IP}}"></div>
+        <div><label data-i18n="wifiMask">WiFi Mask</label><input class="wifi-static-field" name="wifi_mask" value="{{WIFI_MASK}}"></div>
+        <div><label data-i18n="wifiGateway">WiFi Gateway</label><input class="wifi-static-field" name="wifi_gateway" value="{{WIFI_GATEWAY}}"></div>
+        <div><label data-i18n="wifiDns">WiFi DNS</label><input class="wifi-static-field" name="wifi_dns" value="{{WIFI_DNS}}"></div>
       </div>
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
     </form>
@@ -65,12 +65,12 @@
   <div class="grid">
     <form class="item-form span-2" method="post" action="/save_nrl">
       <div class="subgrid">
-        <div class="span-2"><label data-i18n="channel">Channel (0-7)</label><input name="channel" value="{{CHANNEL}}"></div>
+        <div><label data-i18n="channel">Channel (0-7)</label><input name="channel" value="{{CHANNEL}}"></div>
+        <div><label data-i18n="tailSuppressMs">Tail Suppression (ms, 0-5000, 0=off)</label><input name="tail_suppress_ms" value="{{TAIL_SUPPRESS_MS}}"></div>
         <div><label data-i18n="callsign">Callsign</label><input name="callsign" value="{{CALLSIGN}}"></div>
         <div><label data-i18n="callsignSsid">Callsign SSID</label><input name="callsign_ssid" value="{{CALLSIGN_SSID}}"></div>
         <div><label data-i18n="pttTimeout">PTT Timeout (seconds, 5-3600)</label><input name="ptt_timeout" value="{{PTT_TIMEOUT}}"></div>
         <div><label data-i18n="voicePayloadBytes">Voice Packet Size (bytes, 160-500)</label><input name="voice_payload_bytes" value="{{VOICE_PAYLOAD_BYTES}}"></div>
-        <div><label data-i18n="tailSuppressMs">Tail Suppression (ms, 0-5000, 0=off)</label><input name="tail_suppress_ms" value="{{TAIL_SUPPRESS_MS}}"></div>
       </div>
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
     </form>
