@@ -1,11 +1,9 @@
 """Restore src/idf_component.yml before every build.
 
-The pioarduino fork deletes src/idf_component.yml at the end of each build
-(its "*** pioarduino generated 'idf_component.yml' removed ***" message)
-because it treats the file as generated. We declare real IDF Component
-Manager dependencies there (esp-sr, esp-nimble-cpp), so it must exist when
-CMake configures. This script writes the canonical content before each
-build.
+PlatformIO may regenerate component-manager metadata during configuration.
+We declare real IDF Component Manager dependencies there (esp-sr,
+esp-nimble-cpp), so it must exist when CMake configures. This script writes
+the canonical content before each build.
 """
 import os
 from pathlib import Path
@@ -28,7 +26,7 @@ CONTENT = """dependencies:
   # registry and (b) prune the directory on reconfigure if its lock file
   # doesn't reference it.
   idf:
-    version: ">=5.4.0"
+    version: ">=6.0.1"
 """
 
 TARGET.parent.mkdir(parents=True, exist_ok=True)

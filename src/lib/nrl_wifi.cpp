@@ -67,8 +67,10 @@ namespace
             return "NO_AP_FOUND";
         case WIFI_REASON_CONNECTION_FAIL:
             return "CONNECTION_FAIL";
+#ifdef WIFI_REASON_ASSOC_EXPIRE
         case WIFI_REASON_ASSOC_EXPIRE:
             return "ASSOC_EXPIRE";
+#endif
         case WIFI_REASON_HANDSHAKE_TIMEOUT:
             return "HANDSHAKE_TIMEOUT";
         default:
@@ -224,7 +226,7 @@ namespace
         }
 
         // ⚠️ 必须在 esp_wifi_start() 成功调用之后执行
-        const esp_err_t ret = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+        const esp_err_t ret = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW20);
         if (ret != ESP_OK)
         {
             ESP_LOGW(TAG, "Failed to set HT20: %s", esp_err_to_name(ret));

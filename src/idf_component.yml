@@ -12,4 +12,4 @@ dependencies:
   # registry and (b) prune the directory on reconfigure if its lock file
   # doesn't reference it.
   idf:
-    version: ">=5.4.0"
+    version: ">=6.0.1"

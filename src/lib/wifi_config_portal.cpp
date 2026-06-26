@@ -1031,7 +1031,7 @@ static void sendChunkedHtml(const int code, const std::string &html)
     if (req == nullptr) {
         return;
     }
-    char status[16];
+    char status[32];
     const char *reason = (code == 200) ? "OK" : (code == 500) ? "Internal Server Error" : "OK";
     snprintf(status, sizeof(status), "%d %s", code, reason);
     httpd_resp_set_status(req, status);

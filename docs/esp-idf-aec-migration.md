@@ -35,7 +35,7 @@ Important files in the reference project:
 
 - `main/idf_component.yml`
   - Uses ESP-IDF component manager.
-  - Requires `idf >=5.4.0`.
+  - Requires `idf >=6.0.1`.
   - Uses `espressif/esp-sr` and `espressif/esp_codec_dev`.
 - `sdkconfig.defaults.esp32s3`
   - Enables PSRAM for ESP32-S3.
@@ -95,7 +95,7 @@ No ESP-SR AEC should be compiled or initialized for this board.
 Target ESP-IDF version:
 
 ```text
-ESP-IDF 5.4 or newer
+ESP-IDF 6.0.1 or newer
 ```
 
 Core dependencies:
@@ -105,36 +105,32 @@ dependencies:
   espressif/esp-sr: "~2.1.5"
   espressif/esp_codec_dev: "~1.4.0"
   idf:
-    version: ">=5.4.0"
+    version: ">=6.0.1"
 ```
 
 ## PlatformIO Status
 
-The project has been moved to the pioarduino `platform-espressif32` fork:
+The project uses the official PlatformIO `platform-espressif32` package:
 
 ```ini
-platform = https://github.com/pioarduino/platform-espressif32/releases/download/54.03.21/platform-espressif32.zip
+platform = espressif32 @ 7.0.1
 ```
 
-The local installed platform reports:
+This PlatformIO release provides:
 
 ```text
-platform-espressif32 54.03.21
-framework-arduinoespressif32 3.2.1
-framework-arduinoespressif32-libs 5.4.0
-framework-espidf package URL: esp-idf-v5.4.2.zip
+platform-espressif32 7.0.1
+framework-espidf 6.0.1
 ```
 
-This satisfies the ESP-IDF 5.4+ version requirement for the Xiaozhi 2.0.2 AEC
-reference path. The current project still builds as `framework = arduino`; the
-ESP-IDF framework package is not installed until an `espidf` or mixed
-`arduino, espidf` environment is added and built.
+This satisfies the project's ESP-IDF 6.0.1+ requirement for the migrated
+ESP-IDF path.
 
 Recommended migration route:
 
 ```text
 Keep the existing Arduino gezipai/bh4tdv environments intact.
-Add a new Gezipai-only AEC migration environment using ESP-IDF 5.4.2.
+Add a new Gezipai-only AEC migration environment using ESP-IDF 6.0.1 or newer.
 Do not add AEC code to the BH4TDV build.
 ```
 

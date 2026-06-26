@@ -154,8 +154,8 @@ bool initPanel()
     }
 
     esp_lcd_panel_io_spi_config_t io_cfg = {};
-    io_cfg.cs_gpio_num = NRL_PIN_DISPLAY_CS;
-    io_cfg.dc_gpio_num = NRL_PIN_DISPLAY_DC;
+    io_cfg.cs_gpio_num = static_cast<gpio_num_t>(NRL_PIN_DISPLAY_CS);
+    io_cfg.dc_gpio_num = static_cast<gpio_num_t>(NRL_PIN_DISPLAY_DC);
     io_cfg.spi_mode = 3;
     io_cfg.pclk_hz = 80 * 1000 * 1000;
     io_cfg.trans_queue_depth = 10;
@@ -167,7 +167,7 @@ bool initPanel()
     }
 
     esp_lcd_panel_dev_config_t panel_cfg = {};
-    panel_cfg.reset_gpio_num = NRL_PIN_DISPLAY_RST;
+    panel_cfg.reset_gpio_num = static_cast<gpio_num_t>(NRL_PIN_DISPLAY_RST);
     panel_cfg.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
     panel_cfg.bits_per_pixel = 16;
     if (esp_lcd_new_panel_st7789(s_panel_io, &panel_cfg, &s_panel) != ESP_OK) {

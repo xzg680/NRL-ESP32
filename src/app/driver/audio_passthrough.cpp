@@ -34,7 +34,7 @@ static const char *TAG = "AUDIO";
 
 namespace {
 
-constexpr i2s_port_t kI2sPort = I2S_NUM_0;
+constexpr int kI2sPort = I2S_NUM_0;
 constexpr int kSampleRate = 16000;
 constexpr int kMclkRate = kSampleRate * 256;
 constexpr size_t kFrameSamples = 160;
