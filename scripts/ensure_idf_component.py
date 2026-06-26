@@ -26,7 +26,7 @@ CONTENT = """dependencies:
   # registry and (b) prune the directory on reconfigure if its lock file
   # doesn't reference it.
   idf:
-    version: ">=6.0.1"
+    version: ">=6.1.0"
 """
 
 TARGET.parent.mkdir(parents=True, exist_ok=True)

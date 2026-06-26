@@ -17,6 +17,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <driver/i2s_types.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -37,6 +39,7 @@ bool AUDIO_SetupI2S(void);
 bool AUDIO_StartPassthrough(void);
 void AUDIO_StopPassthrough(void);
 bool AUDIO_IsPassthroughRunning(void);
+bool AUDIO_GetI2SHandles(i2s_chan_handle_t *tx_handle, i2s_chan_handle_t *rx_handle);
 
 // The codec driver tracks the active audio mode by calling AUDIO_SetMode()
 // whenever it switches the DAC power path; the passthrough task reads it

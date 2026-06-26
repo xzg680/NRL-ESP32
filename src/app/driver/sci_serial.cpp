@@ -62,6 +62,10 @@ static bool buildUartConfig(uint32_t baud, uint8_t data_bits, char parity,
 
 extern "C" bool SCI_SERIAL_Init(void)
 {
+#if defined(NRL_HAS_SCI_SERIAL) && !NRL_HAS_SCI_SERIAL
+    return true;
+#endif
+
     if (s_sci_ready) {
         return true;
     }
@@ -81,6 +85,14 @@ extern "C" bool SCI_SERIAL_ApplyConfig(const uint32_t baud,
                                        const char parity,
                                        const uint8_t stop_bits)
 {
+#if defined(NRL_HAS_SCI_SERIAL) && !NRL_HAS_SCI_SERIAL
+    (void)baud;
+    (void)data_bits;
+    (void)parity;
+    (void)stop_bits;
+    return true;
+#endif
+
     if (baud == 0u || data_bits < 5u || data_bits > 8u ||
         (parity != 'N' && parity != 'E' && parity != 'O') ||
         (stop_bits != 1u && stop_bits != 2u)) {
@@ -146,6 +158,10 @@ extern "C" bool SCI_SERIAL_ApplyConfig(const uint32_t baud,
 
 extern "C" int SCI_SERIAL_Available(void)
 {
+#if defined(NRL_HAS_SCI_SERIAL) && !NRL_HAS_SCI_SERIAL
+    return 0;
+#endif
+
     if (!SCI_SERIAL_Init()) {
         return 0;
     }
@@ -158,6 +174,12 @@ extern "C" int SCI_SERIAL_Available(void)
 
 extern "C" size_t SCI_SERIAL_Read(uint8_t *buffer, const size_t buffer_size)
 {
+#if defined(NRL_HAS_SCI_SERIAL) && !NRL_HAS_SCI_SERIAL
+    (void)buffer;
+    (void)buffer_size;
+    return 0u;
+#endif
+
     if (buffer == nullptr || buffer_size == 0u || !SCI_SERIAL_Init()) {
         return 0u;
     }
@@ -170,6 +192,12 @@ extern "C" size_t SCI_SERIAL_Read(uint8_t *buffer, const size_t buffer_size)
 
 extern "C" size_t SCI_SERIAL_Write(const uint8_t *data, const size_t data_size)
 {
+#if defined(NRL_HAS_SCI_SERIAL) && !NRL_HAS_SCI_SERIAL
+    (void)data;
+    (void)data_size;
+    return 0u;
+#endif
+
     if (data == nullptr || data_size == 0u || !SCI_SERIAL_Init()) {
         return 0u;
     }

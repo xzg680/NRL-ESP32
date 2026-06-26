@@ -426,8 +426,11 @@ static bool appendAllConfigLines(NrlAtCommandResult *result)
 static bool applyCurrentAudioConfig(void)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
-    return config != nullptr &&
-           ES8311_ApplyAudioConfig(config->mic_volume,
+    if (config == nullptr) {
+        return false;
+    }
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
+    return ES8311_ApplyAudioConfig(config->mic_volume,
                                    config->line_out_volume,
                                    config->hp_drive_enabled,
                                    config->drc_enabled,
@@ -465,6 +468,9 @@ static bool applyCurrentAudioConfig(void)
                                    config->adceq_a2,
                                    config->adceq_b1,
                                    config->adceq_b2);
+#else
+    return true;
+#endif
 }
 
 } // namespace
@@ -477,7 +483,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     if (result == nullptr) {
         return;
     }
-    memset(result, 0, sizeof(*result));
+    *result = NrlAtCommandResult{};
 
     AtCommand command = {};
     if (!startAtReply(result)) {

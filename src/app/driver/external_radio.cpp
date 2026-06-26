@@ -3,6 +3,7 @@
 #include "board_pins.h"
 #include "eeprom.h"
 #include "es8311.h"
+#include "es8389.h"
 #include "../../lib/nrl_audio_config.h"
 #if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
 #include "aec/aec_processor.h"
@@ -396,6 +397,7 @@ static void loadAdcRegisters(const uint8_t reg14,
 
 static void applyAudioConfigToCodec(void)
 {
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     ES8311_ApplyAudioConfig(s_config.mic_volume,
                             s_config.line_out_volume,
                             s_config.hp_drive_enabled,
@@ -434,6 +436,10 @@ static void applyAudioConfigToCodec(void)
                             s_config.adceq_a2,
                             s_config.adceq_b1,
                             s_config.adceq_b2);
+#endif
+#if defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
+    ES8389_SetOutputVolume(s_config.line_out_volume);
+#endif
     // The mic HPF is a pure-software filter (no I2C registers involved), so
     // it is pushed to the codec driver separately from ES8311_ApplyAudioConfig.
     AUDIO_SetMicHpfEnabled(s_config.mic_hpf_enabled);

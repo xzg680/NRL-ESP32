@@ -5,10 +5,13 @@ set(app_sources
     app/driver/audio_passthrough.cpp
     app/driver/eeprom.cpp
     app/driver/display.cpp
+    app/driver/display_s31.cpp
     app/driver/es7210.cpp
     app/driver/es8311.cpp
+    app/driver/es8389.cpp
     app/driver/external_radio.cpp
     app/driver/i2c.cpp
+    app/driver/s31_i2c.cpp
     app/driver/sci_serial.cpp
     app/driver/status_io.cpp
     lib/ble_config.cpp
@@ -33,6 +36,7 @@ set(app_priv_requires
     esp_driver_usb_serial_jtag
     esp_event
     esp_http_server
+    esp_lcd
     esp_netif
     esp_partition
     esp_psram
@@ -45,6 +49,9 @@ set(app_priv_requires
 )
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../components/lvgl/lvgl.h")
     list(APPEND app_priv_requires lvgl)
+endif()
+if(IDF_TARGET STREQUAL "esp32s31" AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../vendor/esp32_s31_korvo/CMakeLists.txt")
+    list(APPEND app_priv_requires esp32_s31_korvo)
 endif()
 
 idf_component_register(

@@ -9,6 +9,7 @@
 #include "wifi_config_portal.h"
 
 #include "driver/audio_passthrough.h"
+#include "driver/board_pins.h"
 #include "driver/es8311.h"
 #include "driver/external_radio.h"
 #include "driver/sci_serial.h"
@@ -589,11 +590,13 @@ static void startDownlinkPlayback(void)
     AUDIO_ClearOutputQueue();
     STATUS_IO_SetPttActive(true);
 
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (!ES8311_SetReceiveMode()) {
         ESP_LOGI(TAG,"[NRL] failed to keep ES8311 in receive/speaker mode");
         STATUS_IO_SetPttActive(false);
         return;
     }
+#endif
 
     s_downlink_playback_active = true;
 }
@@ -650,9 +653,11 @@ static void stopDownlinkPlayback(void)
 
     AUDIO_ClearOutputQueue();
 
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (!ES8311_SetReceiveMode()) {
         ESP_LOGI(TAG,"[NRL] failed to keep ES8311 in receive/speaker mode");
     }
+#endif
 
     s_downlink_playback_active = false;
     s_voice_stream_logged = false;

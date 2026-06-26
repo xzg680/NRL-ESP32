@@ -2,7 +2,7 @@
 
 #include "board_pins.h"
 
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO
 #include "external_radio.h"
 #include "es8311.h"
 #endif
@@ -12,11 +12,14 @@
 #endif
 
 #include <driver/gpio.h>
+#include <esp_adc/adc_cali.h>
+#include <esp_adc/adc_cali_scheme.h>
+#include <esp_adc/adc_oneshot.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO
 #include <freertos/semphr.h>
 #endif
 
@@ -33,6 +36,9 @@ inline unsigned long nrl_millis_now() { return (unsigned long)(esp_timer_get_tim
 // LOW lights the LED, HIGH turns it off.
 static void writeLed(const int pin, const bool on)
 {
+    if (pin < 0) {
+        return;
+    }
     gpio_set_level((gpio_num_t)pin, on ? 0 : 1);
 }
 
@@ -43,7 +49,7 @@ static bool blinkPhase(const unsigned long now_ms, const unsigned long period_ms
 
 } // namespace
 
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO
 
 // ============================================================
 // 格子派: 3 push buttons (volume +/-, physical PTT) + 3 LEDs.
@@ -106,10 +112,108 @@ unsigned long s_tx_since_ms = 0UL;   // when transmit last switched on
 // mutex keeps the two from racing inside the button / PTT state machine.
 SemaphoreHandle_t s_poll_mutex = nullptr;
 
+#if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
+adc_oneshot_unit_handle_t s_button_adc = nullptr;
+adc_cali_handle_t s_button_adc_cali = nullptr;
+bool s_button_adc_ready = false;
+bool s_button_adc_cali_ready = false;
+
+static bool adcInRange(const int value, const int low, const int high)
+{
+    return value >= low && value <= high;
+}
+
+static int readAdcButtonLevel(const int pin)
+{
+    if (!s_button_adc_ready || s_button_adc == nullptr) {
+        return 1;
+    }
+    int raw_sum = 0;
+    int samples = 0;
+    for (int i = 0; i < 4; ++i) {
+        int raw = 0;
+        if (adc_oneshot_read(s_button_adc, NRL_ADC_BUTTON_CHANNEL, &raw) == ESP_OK) {
+            raw_sum += raw;
+            ++samples;
+        }
+    }
+    if (samples == 0) {
+        return 1;
+    }
+    int value = raw_sum / samples;
+    if (s_button_adc_cali_ready && s_button_adc_cali != nullptr) {
+        int voltage_mv = 0;
+        if (adc_cali_raw_to_voltage(s_button_adc_cali, value, &voltage_mv) == ESP_OK) {
+            value = voltage_mv;
+        }
+    }
+    bool pressed = false;
+    switch (pin) {
+        case NRL_PIN_BTN_VOL_UP:
+            pressed = adcInRange(value, NRL_ADC_BTN_VOL_UP_LOW, NRL_ADC_BTN_VOL_UP_HIGH);
+            break;
+        case NRL_PIN_BTN_VOL_DOWN:
+            pressed = adcInRange(value, NRL_ADC_BTN_VOL_DN_LOW, NRL_ADC_BTN_VOL_DN_HIGH);
+            break;
+        case NRL_PIN_BTN_PTT:
+            pressed = adcInRange(value, NRL_ADC_BTN_SET_LOW, NRL_ADC_BTN_SET_HIGH);
+            break;
+        default:
+            break;
+    }
+    return pressed ? 0 : 1;
+}
+
+static void initAdcButtons()
+{
+    adc_oneshot_unit_init_cfg_t unit_cfg = {};
+    unit_cfg.unit_id = ADC_UNIT_1;
+    if (adc_oneshot_new_unit(&unit_cfg, &s_button_adc) != ESP_OK) {
+        ESP_LOGI(TAG, "ADC button unit init failed");
+        return;
+    }
+
+    adc_oneshot_chan_cfg_t chan_cfg = {};
+    chan_cfg.atten = ADC_ATTEN_DB_0;
+    chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_oneshot_config_channel(s_button_adc, NRL_ADC_BUTTON_CHANNEL, &chan_cfg) != ESP_OK) {
+        ESP_LOGI(TAG, "ADC button channel config failed");
+        return;
+    }
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_curve_fitting_config_t cali_cfg = {};
+    cali_cfg.unit_id = ADC_UNIT_1;
+    cali_cfg.chan = NRL_ADC_BUTTON_CHANNEL;
+    cali_cfg.atten = ADC_ATTEN_DB_0;
+    cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_button_adc_cali) == ESP_OK) {
+        s_button_adc_cali_ready = true;
+    }
+#endif
+#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    if (!s_button_adc_cali_ready) {
+        adc_cali_line_fitting_config_t cali_cfg = {};
+        cali_cfg.unit_id = ADC_UNIT_1;
+        cali_cfg.atten = ADC_ATTEN_DB_0;
+        cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+        if (adc_cali_create_scheme_line_fitting(&cali_cfg, &s_button_adc_cali) == ESP_OK) {
+            s_button_adc_cali_ready = true;
+        }
+    }
+#endif
+    s_button_adc_ready = true;
+}
+#endif
+
 // Updates one debounced button; returns true once on each release->press edge.
 static bool pollButtonPressEdge(DebouncedButton &btn, const unsigned long now)
 {
+#if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
+    const int level = readAdcButtonLevel(btn.pin);
+#else
     const int level = gpio_get_level((gpio_num_t)btn.pin);
+#endif
     if (level != btn.raw_level) {
         btn.raw_level = level;
         btn.changed_ms = now;
@@ -127,6 +231,7 @@ static bool pollButtonPressEdge(DebouncedButton &btn, const unsigned long now)
 // volume change made via the buttons takes effect immediately.
 static void reapplyEs8311Volume()
 {
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
     if (cfg == nullptr) {
         return;
@@ -169,6 +274,7 @@ static void reapplyEs8311Volume()
                             cfg->adceq_a2,
                             cfg->adceq_b1,
                             cfg->adceq_b2);
+#endif
 }
 
 // Adjust the ES8311 speaker volume by `pct_delta` percentage points. The
@@ -296,6 +402,9 @@ extern "C" void STATUS_IO_Init(void)
         s_poll_mutex = xSemaphoreCreateMutex();
     }
 
+#if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
+    initAdcButtons();
+#else
     gpio_reset_pin((gpio_num_t)NRL_PIN_BTN_VOL_UP);
     gpio_set_direction((gpio_num_t)NRL_PIN_BTN_VOL_UP, GPIO_MODE_INPUT);
     gpio_set_pull_mode((gpio_num_t)NRL_PIN_BTN_VOL_UP, GPIO_PULLUP_ONLY);
@@ -305,13 +414,20 @@ extern "C" void STATUS_IO_Init(void)
     gpio_reset_pin((gpio_num_t)NRL_PIN_BTN_PTT);
     gpio_set_direction((gpio_num_t)NRL_PIN_BTN_PTT, GPIO_MODE_INPUT);
     gpio_set_pull_mode((gpio_num_t)NRL_PIN_BTN_PTT, GPIO_PULLUP_ONLY);
+#endif
 
+    if (NRL_PIN_LED_PTT >= 0) {
     gpio_reset_pin((gpio_num_t)NRL_PIN_LED_PTT);
     gpio_set_direction((gpio_num_t)NRL_PIN_LED_PTT, GPIO_MODE_OUTPUT);
+    }
+    if (NRL_PIN_LED_AUDIO >= 0) {
     gpio_reset_pin((gpio_num_t)NRL_PIN_LED_AUDIO);
     gpio_set_direction((gpio_num_t)NRL_PIN_LED_AUDIO, GPIO_MODE_OUTPUT);
+    }
+    if (NRL_PIN_LED_NET >= 0) {
     gpio_reset_pin((gpio_num_t)NRL_PIN_LED_NET);
     gpio_set_direction((gpio_num_t)NRL_PIN_LED_NET, GPIO_MODE_OUTPUT);
+    }
     writeLed(NRL_PIN_LED_PTT,   false);
     writeLed(NRL_PIN_LED_AUDIO, false);
     writeLed(NRL_PIN_LED_NET,   false);
