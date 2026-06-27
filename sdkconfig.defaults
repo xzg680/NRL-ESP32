@@ -1,8 +1,10 @@
 # --- RGB LCD notes (S31) ---
-# Do NOT enable CONFIG_LCD_RGB_RESTART_IN_VSYNC or CONFIG_LCD_RGB_ISR_IRAM_SAFE
-# here: with this board's bounce-buffer config both corrupt/flicker the panel.
-# The drift seen on a config-save is handled elsewhere (see display_s31.cpp /
-# the codec write path).
+# The S31 RGB panel streams two full framebuffers straight from PSRAM via GDMA
+# (no bounce buffer; display_s31.cpp) and needs PSRAM at 250 MHz for the bandwidth
+# (set in sdkconfig.defaults.esp32s31). Do NOT enable CONFIG_LCD_RGB_RESTART_IN_VSYNC
+# or CONFIG_LCD_RGB_ISR_IRAM_SAFE: both corrupt/flicker this board. Because GDMA
+# reads PSRAM directly (bypassing the CPU cache), flash/codec writes that disable
+# the cache no longer disturb the panel, so there is no volume-change drift.
 
 # --- Linker: orphan section handling ---
 # PlatformIO's toolchain-riscv32-esp (and the xtensa one) link against picolibc,

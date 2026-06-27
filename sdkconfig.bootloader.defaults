@@ -11,3 +11,9 @@
 #     entry (boot loop). Keeping this file free of PSRAM keys leaves the
 #     bootloader on safe Kconfig defaults.
 # CONFIG_ESP_ERR_TO_NAME_LOOKUP is not set
+
+# Console on UART0 (the CP210x bridge), matching the app. Without this the
+# bootloader defaults to USB-Serial-JTAG and prints nothing on the CP210x, so
+# everything after the ROM's "entry" line is invisible on COM.
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is not set
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

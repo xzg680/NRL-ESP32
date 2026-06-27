@@ -1,10 +1,31 @@
 # ESP32-S31-only overrides (auto-appended after sdkconfig.defaults by IDF).
+# These reach the app build only; the 2nd-stage bootloader uses
+# sdkconfig.bootloader.defaults, so none of this can boot-loop it.
 #
-# --- RGB LCD drift on flash writes ---
-# Saving config writes the internal flash. By default a flash program/erase
-# disables the MMU cache for its whole duration, and since PSRAM is reached
-# through that cache, the RGB panel's bounce-buffer refill stalls -> the line
-# FIFO underflows -> the image drifts. Auto-suspend lets the flash operation be
-# suspended so cache (and thus PSRAM / the RGB DMA feed) keeps working during the
-# write. The S31 SoC supports this (SOC_SPI_MEM_SUPPORT_AUTO_SUSPEND).
+# --- PSRAM speed: 250 MHz (matches the official esp32-s31-korvo example) ---
+# The RGB panel streams its framebuffer straight from PSRAM via GDMA with NO
+# bounce buffer (display_s31.cpp). At the 200 MHz default the PSRAM can't feed the
+# line FIFO fast enough and the image drifts from boot. 250 MHz provides the
+# bandwidth headroom the panel needs. (The S31 PSRAM speed choice is 250/200/100/
+# 40M; there is no 80M, so the shared sdkconfig.defaults' SPIRAM_SPEED_80M is
+# ignored here.) NOTE: do NOT add CONFIG_SPIRAM_XIP_FROM_PSRAM -- XIP needs the
+# bootloader to load flash into PSRAM and boot-loops on this board; 250 MHz alone
+# does not. Because GDMA reads PSRAM directly (bypassing the CPU cache), this also
+# makes the panel immune to the cache-disable during flash/codec writes, so the
+# volume-change drift goes away too.
+CONFIG_SPIRAM_SPEED_250M=y
+
+# Flash auto-suspend: keep the cache alive during config-save flash writes so
+# other CPU code (and any cached PSRAM access) isn't stalled. Harmless alongside
+# the direct-GDBA panel path.
 CONFIG_SPI_FLASH_AUTO_SUSPEND=y
+
+# --- Console on UART0 (not USB-Serial-JTAG) ---
+# The S31-Korvo's USB port is a Silicon Labs CP210x UART bridge wired to UART0,
+# NOT the chip's native USB. The shared sdkconfig.defaults picks
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG (correct for the S3 boards' native USB), but
+# on this board that sends logs/AT to the unconnected USB-JTAG pins, so nothing
+# shows up on COM. Route the console to UART0 so ESP_LOG + the AT console reach
+# the CP210x (the same UART the ROM/bootloader already print on).
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is not set
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

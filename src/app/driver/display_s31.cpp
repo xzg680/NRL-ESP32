@@ -38,8 +38,6 @@ namespace {
 
 constexpr int kWidth = NRL_DISPLAY_WIDTH;
 constexpr int kHeight = NRL_DISPLAY_HEIGHT;
-constexpr int kBufLines = 80;
-constexpr int kBounceLines = 10;
 constexpr uint32_t kRefreshIntervalMs = 500u;
 constexpr uint32_t kVolumeSaveDelayMs = 2000u;
 constexpr uint16_t kVolumeLongPressRepeatMs = 80u;
@@ -60,7 +58,7 @@ constexpr uint32_t kColorTx = 0xFF6B6B;
 constexpr uint32_t kColorDuplex = 0xA78BFA;
 constexpr const char *kCallsignPlaceholder = "----------";
 constexpr size_t kStationFieldChars = 10u;
-constexpr size_t kWifiOptionCount = 4u;
+constexpr size_t kWifiOptionCount = 12u;  // max scanned SSIDs listed in the dropdown
 
 enum class Page : uint8_t {
     Home,
@@ -109,7 +107,6 @@ TaskHandle_t s_wifi_scan_task = nullptr;
 
 esp_lcd_panel_handle_t s_panel = nullptr;
 lv_display_t *s_disp = nullptr;
-uint8_t *s_draw_buf = nullptr;
 esp_lcd_touch_handle_t s_touch = nullptr;
 esp_lcd_panel_io_handle_t s_touch_io = nullptr;
 lv_indev_t *s_touch_indev = nullptr;
@@ -126,8 +123,7 @@ lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_server = nullptr;
 lv_obj_t *s_lbl_detail = nullptr;
 lv_obj_t *s_lbl_form_status = nullptr;
-lv_obj_t *s_btn_wifi_options[kWifiOptionCount] = {};
-lv_obj_t *s_lbl_wifi_options[kWifiOptionCount] = {};
+lv_obj_t *s_dd_wifi = nullptr;
 lv_obj_t *s_ta_wifi_ssid = nullptr;
 lv_obj_t *s_ta_wifi_pass = nullptr;
 lv_obj_t *s_ta_callsign = nullptr;
@@ -177,23 +173,14 @@ bool initPanel()
     panel_cfg.data_width = 16;
     panel_cfg.in_color_format = LCD_COLOR_FMT_RGB565;
     panel_cfg.out_color_format = LCD_COLOR_FMT_RGB565;
-    // Single framebuffer: LVGL renders in PARTIAL mode and we copy each dirty
-    // area straight into the one framebuffer being scanned out. With num_fbs=2
-    // esp_lcd_panel_draw_bitmap copies the partial area into the back buffer and
-    // then swaps the *whole* frame, so untouched regions flash 2-frame-old
-    // content (the "ghosting/drifting" artefacts). For a UI that refreshes a few
-    // small labels twice a second, a single buffer is coherent and the only cost
-    // is negligible tearing inside the small area being written.
-    panel_cfg.num_fbs = 1;
+    // Two full framebuffers in PSRAM, double-buffered with LVGL FULL-refresh (see
+    // initLvgl). The GDMA always streams one complete framebuffer straight from
+    // PSRAM while LVGL renders the whole next frame into the other, so nothing
+    // writes the buffer being scanned and there is NO bounce buffer / CPU refill
+    // ISR for a codec I2C write to starve. This is the example's multi-framebuffer
+    // technique and is what finally stops the volume-change drift.
+    panel_cfg.num_fbs = 2;
     panel_cfg.dma_burst_size = 128;
-    // Bounce-buffer mode: the framebuffer lives in PSRAM, but the RGB DMA reads
-    // it one chunk at a time through this small internal-SRAM buffer. PSRAM
-    // bandwidth jitter (CPU, WiFi, and especially the AFE/AEC audio buffers that
-    // also sit in PSRAM) was starving the line FIFO, so the image rolled/drifted
-    // and looked oversized. Pulling each line through internal SRAM keeps the DMA
-    // fed in time and stops the drift, without touching PSRAM speed/XIP (which
-    // boot-loops on this board). ~10 lines = 800*10*2 = 16 KB of internal RAM.
-    panel_cfg.bounce_buffer_size_px = static_cast<size_t>(kWidth) * kBounceLines;
     panel_cfg.hsync_gpio_num = static_cast<gpio_num_t>(NRL_PIN_LCD_HSYNC);
     panel_cfg.vsync_gpio_num = static_cast<gpio_num_t>(NRL_PIN_LCD_VSYNC);
     panel_cfg.de_gpio_num = static_cast<gpio_num_t>(NRL_PIN_LCD_DE);
@@ -246,10 +233,17 @@ void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 bool initLvgl()
 {
     lv_init();
-    const size_t buf_bytes = static_cast<size_t>(kWidth) * kBufLines * 2u;
-    s_draw_buf = static_cast<uint8_t *>(heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (s_draw_buf == nullptr) {
-        ESP_LOGE(TAG, "draw buffer alloc failed");
+
+    // Use the RGB panel's own two framebuffers and let LVGL double-buffer in
+    // FULL-refresh mode: LVGL renders the whole frame into the off-screen buffer,
+    // the flush hands that buffer to the panel (which swaps it in at VSYNC), and
+    // the GDMA scans it straight from PSRAM. No bounce buffer and no partial
+    // writes into the live framebuffer, so a codec I2C write can no longer starve
+    // a refill and drift the image.
+    void *fb0 = nullptr;
+    void *fb1 = nullptr;
+    if (esp_lcd_rgb_panel_get_frame_buffer(s_panel, 2, &fb0, &fb1) != ESP_OK) {
+        ESP_LOGE(TAG, "get frame buffers failed");
         return false;
     }
 
@@ -261,7 +255,8 @@ bool initLvgl()
     lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_user_data(s_disp, s_panel);
     lv_display_set_flush_cb(s_disp, lvglFlush);
-    lv_display_set_buffers(s_disp, s_draw_buf, nullptr, buf_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    const size_t fb_bytes = static_cast<size_t>(kWidth) * kHeight * 2u;
+    lv_display_set_buffers(s_disp, fb0, fb1, fb_bytes, LV_DISPLAY_RENDER_MODE_FULL);
     lv_tick_set_cb(lvglTick);
     return true;
 }
@@ -544,9 +539,8 @@ void clearScreen()
     s_lbl_server = nullptr;
     s_lbl_detail = nullptr;
     s_lbl_form_status = nullptr;
+    s_dd_wifi = nullptr;
     for (size_t i = 0; i < kWifiOptionCount; ++i) {
-        s_btn_wifi_options[i] = nullptr;
-        s_lbl_wifi_options[i] = nullptr;
         s_wifi_option_ssids[i][0] = '\0';
     }
     s_ta_wifi_ssid = nullptr;
@@ -737,21 +731,27 @@ void setWifiDropdownOptionsFromCache()
         ++used;
     }
 
-    for (size_t i = 0; i < kWifiOptionCount; ++i) {
-        if (s_lbl_wifi_options[i] == nullptr || s_btn_wifi_options[i] == nullptr) {
-            continue;
+    if (s_dd_wifi != nullptr) {
+        // Build a newline-separated option list for the dropdown (scrollable, so
+        // it can show every scanned network, not just the first few).
+        char options[kWifiOptionCount * 34] = {};
+        size_t pos = 0;
+        for (size_t i = 0; i < used; ++i) {
+            if (i > 0 && pos < sizeof(options) - 1) {
+                options[pos++] = '\n';
+            }
+            const int n = snprintf(options + pos, sizeof(options) - pos, "%s",
+                                   s_wifi_option_ssids[i]);
+            if (n > 0) {
+                pos += static_cast<size_t>(n);
+            }
         }
-        const bool has_ssid = s_wifi_option_ssids[i][0] != '\0';
-        lv_label_set_text(s_lbl_wifi_options[i], has_ssid ? s_wifi_option_ssids[i] : "--");
-        lv_obj_set_style_text_color(s_lbl_wifi_options[i],
-                                    lv_color_hex(has_ssid ? kColorText : kColorDim), 0);
-        if (has_ssid) {
-            lv_obj_clear_state(s_btn_wifi_options[i], LV_STATE_DISABLED);
-        } else {
-            lv_obj_add_state(s_btn_wifi_options[i], LV_STATE_DISABLED);
+        if (used == 0) {
+            snprintf(options, sizeof(options), "%s", "(no networks)");
         }
+        lv_dropdown_set_options(s_dd_wifi, options);
     }
-    ESP_LOGI(TAG, "WiFi inline options updated: scanned=%u shown=%u",
+    ESP_LOGI(TAG, "WiFi dropdown updated: scanned=%u shown=%u",
              static_cast<unsigned>(got), static_cast<unsigned>(used));
 }
 
@@ -765,27 +765,26 @@ void buildWifi()
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
 
     fieldLabel(box, 0, 0, "Nearby WiFi");
-    for (size_t i = 0; i < kWifiOptionCount; ++i) {
-        lv_obj_t *btn = lv_button_create(box);
-        lv_obj_set_pos(btn, static_cast<int>(i) * 176, 24);
-        lv_obj_set_size(btn, (i == kWifiOptionCount - 1u) ? 182 : 164, 42);
-        lv_obj_set_style_radius(btn, 6, 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel2), 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x1D4E63), LV_STATE_PRESSED);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel), LV_STATE_DISABLED);
-        lv_obj_set_style_border_color(btn, lv_color_hex(kColorBorder), 0);
-        lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_add_event_cb(btn, wifiOptionEvent, LV_EVENT_CLICKED,
-                            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
-        s_btn_wifi_options[i] = btn;
-
-        lv_obj_t *txt = label(btn, &lv_font_montserrat_16, kColorText);
-        lv_obj_set_width(txt, (i == kWifiOptionCount - 1u) ? 162 : 144);
-        lv_obj_center(txt);
-        lv_obj_set_style_text_align(txt, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_long_mode(txt, LV_LABEL_LONG_DOT);
-        lv_label_set_text(txt, "--");
-        s_lbl_wifi_options[i] = txt;
+    // Scrollable dropdown lists every scanned network; picking one fills the SSID
+    // field below.
+    s_dd_wifi = lv_dropdown_create(box);
+    lv_obj_set_pos(s_dd_wifi, 0, 24);
+    lv_obj_set_size(s_dd_wifi, 710, 42);
+    lv_obj_set_style_radius(s_dd_wifi, 6, 0);
+    lv_obj_set_style_bg_color(s_dd_wifi, lv_color_hex(kColorPanel2), 0);
+    lv_obj_set_style_border_color(s_dd_wifi, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(s_dd_wifi, 1, 0);
+    lv_obj_set_style_text_color(s_dd_wifi, lv_color_hex(kColorText), 0);
+    lv_dropdown_set_text(s_dd_wifi, "Select WiFi...");
+    lv_dropdown_set_options(s_dd_wifi, "(scanning)");
+    lv_obj_add_event_cb(s_dd_wifi, wifiOptionEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+    // Style the popped-up option list so it is readable on the dark theme.
+    lv_obj_t *dd_list = lv_dropdown_get_list(s_dd_wifi);
+    if (dd_list != nullptr) {
+        lv_obj_set_style_bg_color(dd_list, lv_color_hex(kColorPanel), 0);
+        lv_obj_set_style_text_color(dd_list, lv_color_hex(kColorText), 0);
+        lv_obj_set_style_border_color(dd_list, lv_color_hex(kColorBorder), 0);
+        lv_obj_set_style_max_height(dd_list, 220, 0);
     }
     setWifiDropdownOptionsFromCache();
 
@@ -1127,7 +1126,8 @@ void wifiOptionEvent(lv_event_t *event)
     if (s_ta_wifi_ssid == nullptr) {
         return;
     }
-    const size_t index = static_cast<size_t>(reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
+    lv_obj_t *dd = lv_event_get_target_obj(event);
+    const uint16_t index = lv_dropdown_get_selected(dd);
     if (index < kWifiOptionCount && s_wifi_option_ssids[index][0] != '\0') {
         lv_textarea_set_text(s_ta_wifi_ssid, s_wifi_option_ssids[index]);
     }
@@ -1407,6 +1407,11 @@ extern "C" void Display_Poll(void)
     }
     const uint32_t now = millis();
     pollWifiScan();
+    // Update the top-bar volume every poll (~20 ms) so a physical volume key held
+    // down shows each 1% step live, matching the soft buttons. setLabel no-ops
+    // when the value is unchanged, so this is cheap. The full refresh below stays
+    // on the slower cadence.
+    refreshVolume();
     if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
         s_last_refresh_ms = now;
         refresh();
