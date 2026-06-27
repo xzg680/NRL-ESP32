@@ -23,7 +23,14 @@
 // ---- Common pins (same on both boards) ----
 
 // Bootloader UI
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+// On the ESP32-S31-Korvo, GPIO0 is the shared I2C SDA line (touch panel + audio
+// codec), NOT a free boot button. Disable the boot-button WiFi-reset feature so
+// nothing reconfigures GPIO0 as a plain GPIO and tears down the I2C bus.
+#define NRL_PIN_BOOT_BUTTON     -1
+#else
 #define NRL_PIN_BOOT_BUTTON     0
+#endif
 
 // SCI radio-control serial pins are board-specific: see each [NRL_BOARD] block.
 // 格子派 routes its LCD over GPIO 4-7/15/16, so SCI cannot stay on GPIO 4/5

@@ -7,6 +7,10 @@
 #include "es8311.h"
 #endif
 
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+#include "bsp/led.h"  // vendored ESP32-S31-Korvo BSP: WS2812 status LED (GPIO37)
+#endif
+
 #ifdef ENABLE_OPENCV
 #include "../opencv/Arduino.hpp"
 #endif
@@ -99,6 +103,9 @@ AutoRepeat s_btn_vol_down_repeat = {false, 0UL};
 
 bool s_net_audio_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+bool s_ws2812_ready = false;
+#endif
 bool s_volume_dirty = false;
 unsigned long s_volume_change_ms = 0UL;
 
@@ -106,6 +113,7 @@ unsigned long s_volume_change_ms = 0UL;
 bool s_tx_active = false;            // effective transmit gate (IsSqlActive)
 bool s_tx_latched = false;           // latched on by a short press
 bool s_tx_suppressed = false;        // timeout fired during the current hold
+bool s_soft_ptt_held = false;        // on-screen "network" area pressed (hold-to-talk)
 unsigned long s_ptt_press_ms = 0UL;  // press-down time of the current press
 unsigned long s_tx_since_ms = 0UL;   // when transmit last switched on
 // STATUS_IO_Poll() runs from both the main loop and the bridge task; this
@@ -117,6 +125,19 @@ adc_oneshot_unit_handle_t s_button_adc = nullptr;
 adc_cali_handle_t s_button_adc_cali = nullptr;
 bool s_button_adc_ready = false;
 bool s_button_adc_cali_ready = false;
+
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+// The S31 has no IDF-supported adc_cali scheme (curve/line fitting are both
+// disabled in esp_adc/esp32s31). Use the vendored BSP's per-bit-weight
+// calibration (vendor/esp32_s31_korvo/esp32_s31_adc_calibration.c) so raw ADC
+// counts become true millivolts that match the resistor-ladder thresholds in
+// board_pins.h. Without it the code compared raw counts against mV thresholds,
+// so the buttons were mismapped (VOL+ acted as PTT, SET did nothing).
+extern "C" esp_err_t bsp_s31_adc_calibration_init(adc_oneshot_unit_handle_t handle,
+                                                  adc_unit_t unit, adc_channel_t channel);
+extern "C" esp_err_t bsp_s31_adc_calibration_raw_to_mv(adc_unit_t unit, int raw,
+                                                       int *voltage_mv);
+#endif
 
 static bool adcInRange(const int value, const int low, const int high)
 {
@@ -141,12 +162,21 @@ static int readAdcButtonLevel(const int pin)
         return 1;
     }
     int value = raw_sum / samples;
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+    if (s_button_adc_cali_ready) {
+        int voltage_mv = 0;
+        if (bsp_s31_adc_calibration_raw_to_mv(ADC_UNIT_1, value, &voltage_mv) == ESP_OK) {
+            value = voltage_mv;
+        }
+    }
+#else
     if (s_button_adc_cali_ready && s_button_adc_cali != nullptr) {
         int voltage_mv = 0;
         if (adc_cali_raw_to_voltage(s_button_adc_cali, value, &voltage_mv) == ESP_OK) {
             value = voltage_mv;
         }
     }
+#endif
     bool pressed = false;
     switch (pin) {
         case NRL_PIN_BTN_VOL_UP:
@@ -181,6 +211,15 @@ static void initAdcButtons()
         return;
     }
 
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+    // S31: use the vendored BSP's software calibration (the only correct raw->mV
+    // path on this chip). The standard adc_cali schemes below are unsupported.
+    if (bsp_s31_adc_calibration_init(s_button_adc, ADC_UNIT_1, NRL_ADC_BUTTON_CHANNEL) == ESP_OK) {
+        s_button_adc_cali_ready = true;
+    } else {
+        ESP_LOGW(TAG, "S31 ADC button calibration failed");
+    }
+#endif
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
     adc_cali_curve_fitting_config_t cali_cfg = {};
     cali_cfg.unit_id = ADC_UNIT_1;
@@ -359,9 +398,9 @@ static void updatePtt(const unsigned long now)
         s_tx_suppressed = false;
     }
 
-    // Effective transmit: the held button (unless the timeout suppressed it)
-    // or the latch left on by a short press.
-    bool tx = (is_pressed && !s_tx_suppressed) || s_tx_latched;
+    // Effective transmit: the held PTT button or the on-screen soft-PTT hold
+    // (unless the timeout suppressed it) or the latch left on by a short press.
+    bool tx = ((is_pressed || s_soft_ptt_held) && !s_tx_suppressed) || s_tx_latched;
 
     if (tx && !s_tx_active) {
         s_tx_since_ms = now;  // transmit just switched on -> start the timer
@@ -431,6 +470,17 @@ extern "C" void STATUS_IO_Init(void)
     writeLed(NRL_PIN_LED_PTT,   false);
     writeLed(NRL_PIN_LED_AUDIO, false);
     writeLed(NRL_PIN_LED_NET,   false);
+
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+    // The S31 has a single addressable WS2812 on GPIO37 instead of the three
+    // discrete LEDs above. Drive it via the vendored BSP and clear it.
+    if (bsp_led_init() == ESP_OK) {
+        s_ws2812_ready = true;
+        bsp_led_clear();
+    } else {
+        ESP_LOGW(TAG, "WS2812 status LED init failed");
+    }
+#endif
 }
 
 extern "C" void STATUS_IO_SetPttActive(const bool active)
@@ -443,6 +493,17 @@ extern "C" void STATUS_IO_SetPttActive(const bool active)
 extern "C" void STATUS_IO_NotifyHeartbeatReceived(void)
 {
     s_last_heartbeat_rx_ms = nrl_millis_now();
+}
+
+// Hold-to-talk from the LCD "network" panel: press = transmit, release = stop.
+// The PTT timeout still applies; releasing clears any timeout suppression so the
+// next hold can key up again.
+extern "C" void STATUS_IO_SetSoftPtt(const bool held)
+{
+    s_soft_ptt_held = held;
+    if (!held) {
+        s_tx_suppressed = false;
+    }
 }
 
 extern "C" void STATUS_IO_Poll(void)
@@ -469,6 +530,19 @@ extern "C" void STATUS_IO_Poll(void)
     const bool heartbeat_ok =
         s_last_heartbeat_rx_ms != 0UL && (now - s_last_heartbeat_rx_ms) <= kHeartbeatMissedBlinkMs;
     writeLed(NRL_PIN_LED_NET, heartbeat_ok ? true : blinkPhase(now, kSlowBlinkMs));
+
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+    // Fold the three discrete-LED meanings into the single RGB pixel:
+    //   R = transmitting (mic uplink), G = inbound network audio playing,
+    //   B = server link (solid when the heartbeat is alive, slow blink while it
+    //   is missing). Kept dim so it is a soft indicator, not a flashlight.
+    if (s_ws2812_ready) {
+        const uint8_t r = s_tx_active ? 60 : 0;
+        const uint8_t g = s_net_audio_active ? 60 : 0;
+        const uint8_t b = heartbeat_ok ? 30 : (blinkPhase(now, kSlowBlinkMs) ? 30 : 0);
+        bsp_led_set_rgb(BSP_LED_STATUS, r, g, b);
+    }
+#endif
 
     // Persist the volume only after the user stops adjusting, so a burst of
     // button taps does not hammer the EEPROM.

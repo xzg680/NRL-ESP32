@@ -503,6 +503,9 @@ static void manageApLifecycle()
 
 static void pollBootResetGesture()
 {
+    if (NRL_PIN_BOOT_BUTTON < 0) {
+        return;  // no boot button on this board (pin reused for I2C, etc.)
+    }
     const bool pressed = gpio_get_level((gpio_num_t)NRL_PIN_BOOT_BUTTON) == 0;
     const unsigned long now = nowMsCfg();
 
@@ -1967,9 +1970,11 @@ static void ensureServerRunning()
 bool WifiConfigPortal_Init(void)
 {
     EXTERNAL_RADIO_Init();
-    gpio_reset_pin((gpio_num_t)NRL_PIN_BOOT_BUTTON);
-    gpio_set_direction((gpio_num_t)NRL_PIN_BOOT_BUTTON, GPIO_MODE_INPUT);
-    gpio_set_pull_mode((gpio_num_t)NRL_PIN_BOOT_BUTTON, GPIO_PULLUP_ONLY);
+    if (NRL_PIN_BOOT_BUTTON >= 0) {
+        gpio_reset_pin((gpio_num_t)NRL_PIN_BOOT_BUTTON);
+        gpio_set_direction((gpio_num_t)NRL_PIN_BOOT_BUTTON, GPIO_MODE_INPUT);
+        gpio_set_pull_mode((gpio_num_t)NRL_PIN_BOOT_BUTTON, GPIO_PULLUP_ONLY);
+    }
     s_ap_should_run = true;
     ensureApRunning();
     ensureDnsRunning();

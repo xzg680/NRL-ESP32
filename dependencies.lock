@@ -416,7 +416,7 @@ dependencies:
   h2zero/esp-nimble-cpp:
     dependencies: []
     source:
-      path: D:\work\ham\NRL-ESP32\vendor\h2zero__esp-nimble-cpp
+      path: vendor/h2zero__esp-nimble-cpp
       type: local
     version: 2.5.0
   idf:
@@ -443,4 +443,4 @@ direct_dependencies:
 - idf
 manifest_hash: 7beb6da54907921e3c85b463c9679a0bf73ca1a334fa6628f9ea086fbc342c77
 target: esp32s31
-version: 2.0.0
+version: 3.0.0

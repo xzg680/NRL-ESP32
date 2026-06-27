@@ -1,6 +1,7 @@
 #include "nrl_usb_console.h"
 
 #include <driver/usb_serial_jtag.h>
+#include <driver/usb_serial_jtag_vfs.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -38,6 +39,12 @@ extern "C" bool NRL_USB_Console_Init(void)
         ESP_LOGE(TAG, "usb_serial_jtag_driver_install failed: %d", err);
         return false;
     }
+    // Route stdout/stderr (and therefore ESP_LOG) through the just-installed
+    // driver. With CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG the console otherwise keeps
+    // writing straight to the USB-JTAG FIFO, which collides with this driver once
+    // it is installed and silences all further log output. Switching the VFS to
+    // the driver lets logging and the AT-command reads share the port.
+    usb_serial_jtag_vfs_use_driver();
     s_installed = true;
     ESP_LOGI(TAG, "USB-Serial-JTAG console ready");
     return true;

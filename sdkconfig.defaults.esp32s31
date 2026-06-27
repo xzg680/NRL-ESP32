@@ -1,0 +1,10 @@
+# ESP32-S31-only overrides (auto-appended after sdkconfig.defaults by IDF).
+#
+# --- RGB LCD drift on flash writes ---
+# Saving config writes the internal flash. By default a flash program/erase
+# disables the MMU cache for its whole duration, and since PSRAM is reached
+# through that cache, the RGB panel's bounce-buffer refill stalls -> the line
+# FIFO underflows -> the image drifts. Auto-suspend lets the flash operation be
+# suspended so cache (and thus PSRAM / the RGB DMA feed) keeps working during the
+# write. The S31 SoC supports this (SOC_SPI_MEM_SUPPORT_AUTO_SUSPEND).
+CONFIG_SPI_FLASH_AUTO_SUSPEND=y

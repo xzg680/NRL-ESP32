@@ -1,0 +1,13 @@
+# Minimal defaults for the 2nd-stage bootloader sub-project ONLY.
+#
+# The bootloader is built as a separate IDF project. PlatformIO points its
+# -DSDKCONFIG_DEFAULTS at this file so that:
+#   * it inherits the esp_err_to_name lookup being disabled (otherwise IDF 6.2's
+#     idf_define_esp_err_codes() generates a *_esp_err_codes.c that PlatformIO
+#     never produces -> "bootloader_support_esp_err_codes.c not found"), but
+#   * it does NOT inherit the app's PSRAM tuning (sdkconfig.defaults.esp32s31's
+#     SPIRAM_SPEED_250M / SPIRAM_XIP_FROM_PSRAM). The bootloader does not use
+#     PSRAM, and pulling XIP/250M into it makes the 2nd-stage bootloader crash on
+#     entry (boot loop). Keeping this file free of PSRAM keys leaves the
+#     bootloader on safe Kconfig defaults.
+# CONFIG_ESP_ERR_TO_NAME_LOOKUP is not set
