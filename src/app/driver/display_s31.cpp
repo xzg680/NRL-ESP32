@@ -567,11 +567,13 @@ void topBar(lv_obj_t *scr)
     constexpr int kTopStationW = 150;
     constexpr int kTopVolW = 94;
     constexpr int kTopWifiW = 150;
-    constexpr int kTopTimeX = kTopLeft;
-    constexpr int kTopLocalX = kTopTimeX + kTopTimeW + kTopGap;
-    constexpr int kTopVolX = kTopLocalX + kTopStationW + kTopGap;
-    constexpr int kTopRemoteX = kTopVolX + kTopVolW + kTopGap;
-    constexpr int kTopWifiX = kTopRemoteX + kTopStationW + kTopGap;
+    // Order, left to right: local callsign-SSID, time, incoming caller, volume,
+    // WiFi signal.
+    constexpr int kTopLocalX = kTopLeft;
+    constexpr int kTopTimeX = kTopLocalX + kTopStationW + kTopGap;
+    constexpr int kTopRemoteX = kTopTimeX + kTopTimeW + kTopGap;
+    constexpr int kTopVolX = kTopRemoteX + kTopStationW + kTopGap;
+    constexpr int kTopWifiX = kTopVolX + kTopVolW + kTopGap;
 
     lv_obj_t *bar = panel(scr, 0, 0, kWidth, 56);
     lv_obj_set_style_radius(bar, 0, 0);
@@ -624,21 +626,24 @@ void buildHome()
     lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_label_set_text(s_lbl_caption, "STANDBY");
 
-    // Callsign with the SSID appended as "CALL-SSID" (no separate SSID line).
+    // Incoming caller's callsign-SSID at the largest crisp built-in font (48px),
+    // centred in the freed space so it reads as the focal element.
     s_lbl_callsign = label(left, &lv_font_montserrat_48, kColorText);
     lv_obj_set_width(s_lbl_callsign, 430);
-    lv_obj_align(s_lbl_callsign, LV_ALIGN_TOP_LEFT, 0, 50);
-    lv_label_set_text(s_lbl_callsign, "----");
+    lv_obj_align(s_lbl_callsign, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_label_set_text(s_lbl_callsign, kCallsignPlaceholder);
 
+    // Bottom row of the main panel: local IP on the left, server IP on the right.
     s_lbl_ip = label(left, &lv_font_montserrat_20, kColorAccent);
-    lv_obj_set_width(s_lbl_ip, 430);
-    lv_obj_align(s_lbl_ip, LV_ALIGN_TOP_LEFT, 0, 138);
+    lv_obj_set_width(s_lbl_ip, 215);
+    lv_obj_align(s_lbl_ip, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_label_set_long_mode(s_lbl_ip, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_ip, LV_SYMBOL_WIFI " ---");
 
     s_lbl_server = label(left, &lv_font_montserrat_20, kColorSub);
-    lv_obj_set_width(s_lbl_server, 430);
-    lv_obj_align(s_lbl_server, LV_ALIGN_TOP_LEFT, 0, 176);
+    lv_obj_set_width(s_lbl_server, 215);
+    lv_obj_align(s_lbl_server, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_set_style_text_align(s_lbl_server, LV_TEXT_ALIGN_RIGHT, 0);
     lv_label_set_long_mode(s_lbl_server, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_server, "---");
 
@@ -1262,10 +1267,15 @@ void refreshHome()
 
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
     // Main panel shows only the remote caller. Local station lives in the top bar.
+    const bool has_caller = (rx && voice_call[0] != '\0');
     char call[24] = {};
-    formatStationBadge(call, sizeof(call), (rx && voice_call[0] != '\0') ? voice_call : nullptr,
-                       voice_ssid);
+    formatStationBadge(call, sizeof(call), has_caller ? voice_call : nullptr, voice_ssid);
     setLabel(s_lbl_callsign, s_shown_callsign, sizeof(s_shown_callsign), call);
+    if (s_lbl_callsign != nullptr) {
+        // Spread only the placeholder dashes so they read bigger; keep a real
+        // callsign at normal spacing.
+        lv_obj_set_style_text_letter_space(s_lbl_callsign, has_caller ? 0 : 12, 0);
+    }
 
     const char *caption = "STANDBY";
     uint32_t color = kColorDim;
