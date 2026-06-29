@@ -1,5 +1,13 @@
 #include "ble_config.h"
 
+#include "sdkconfig.h"
+
+// BLE Wi-Fi provisioning runs on the NimBLE host. S31 builds the Bluedroid host
+// instead (Classic BT + HFP for a BT headset) and the two are mutually
+// exclusive, so this whole module compiles to stubs there; S31 provisions via
+// the touchscreen config UI + SoftAP portal.
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
+
 #include "nrl_audio_bridge.h"
 #include "nrl_net_compat.h"
 #include "nrl_version.h"
@@ -590,3 +598,11 @@ void BLEConfig_Poll(void)
         esp_restart();
     }
 }
+
+#else // !CONFIG_BT_NIMBLE_ENABLED -- Bluedroid host (S31): no BLE provisioning.
+
+bool BLEConfig_Init(void) { return false; }
+void BLEConfig_Poll(void) {}
+void BLEConfig_Stop(void) {}
+
+#endif // CONFIG_BT_NIMBLE_ENABLED

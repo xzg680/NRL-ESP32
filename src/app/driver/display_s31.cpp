@@ -5,6 +5,7 @@
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD == NRL_BOARD_S31_KORVO
 
 #include "../../lib/nrl_audio_bridge.h"
+#include "../../lib/nrl_bt_hfp.h"
 #include "../../lib/nrl_net_compat.h"
 #include "../../lib/nrl_wifi.h"
 #include "external_radio.h"
@@ -66,6 +67,7 @@ enum class Page : uint8_t {
     Wifi,
     Station,
     Audio,
+    Bt,
 };
 
 enum class Action : intptr_t {
@@ -74,6 +76,8 @@ enum class Action : intptr_t {
     Wifi,
     Station,
     Audio,
+    Bt,
+    ScanBt,
     VolumeDown,
     VolumeUp,
     CallsignSsidDown,
@@ -117,6 +121,8 @@ lv_obj_t *s_lbl_ssid = nullptr;
 lv_obj_t *s_lbl_time = nullptr;
 lv_obj_t *s_lbl_local_station = nullptr;
 lv_obj_t *s_lbl_wifi = nullptr;
+lv_obj_t *s_lbl_bt_top = nullptr;
+lv_obj_t *s_list_bt = nullptr;
 lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_remote_station = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
@@ -137,6 +143,8 @@ lv_obj_t *s_lbl_mic_value = nullptr;
 lv_obj_t *s_sw_aec = nullptr;
 lv_obj_t *s_sw_noise = nullptr;
 lv_obj_t *s_sw_mic_hpf = nullptr;
+lv_obj_t *s_sw_bt = nullptr;
+lv_obj_t *s_lbl_bt_status = nullptr;
 lv_obj_t *s_keyboard = nullptr;
 
 char s_shown_caption[24] = {};
@@ -533,6 +541,8 @@ void clearScreen()
     s_lbl_time = nullptr;
     s_lbl_local_station = nullptr;
     s_lbl_wifi = nullptr;
+    s_lbl_bt_top = nullptr;
+    s_list_bt = nullptr;
     s_lbl_vol = nullptr;
     s_lbl_remote_station = nullptr;
     s_lbl_ip = nullptr;
@@ -556,6 +566,8 @@ void clearScreen()
     s_sw_aec = nullptr;
     s_sw_noise = nullptr;
     s_sw_mic_hpf = nullptr;
+    s_sw_bt = nullptr;
+    s_lbl_bt_status = nullptr;
     s_keyboard = nullptr;
 }
 
@@ -566,14 +578,16 @@ void topBar(lv_obj_t *scr)
     constexpr int kTopTimeW = 128;
     constexpr int kTopStationW = 150;
     constexpr int kTopVolW = 94;
-    constexpr int kTopWifiW = 150;
+    constexpr int kTopWifiW = 104;
+    constexpr int kTopBtW = 52;
     // Order, left to right: local callsign-SSID, time, incoming caller, volume,
-    // WiFi signal.
+    // WiFi signal, Bluetooth.
     constexpr int kTopLocalX = kTopLeft;
     constexpr int kTopTimeX = kTopLocalX + kTopStationW + kTopGap;
     constexpr int kTopRemoteX = kTopTimeX + kTopTimeW + kTopGap;
     constexpr int kTopVolX = kTopRemoteX + kTopStationW + kTopGap;
     constexpr int kTopWifiX = kTopVolX + kTopVolW + kTopGap;
+    constexpr int kTopBtX = kTopWifiX + kTopWifiW + 8;
 
     lv_obj_t *bar = panel(scr, 0, 0, kWidth, 56);
     lv_obj_set_style_radius(bar, 0, 0);
@@ -611,6 +625,14 @@ void topBar(lv_obj_t *scr)
     lv_obj_align(s_lbl_wifi, LV_ALIGN_LEFT_MID, kTopWifiX, 0);
     lv_obj_set_style_text_align(s_lbl_wifi, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI " --");
+
+    // Bluetooth state lives next to WiFi: dim when off, accent when on, bright +
+    // checkmark when a headset is linked. Updated in refresh().
+    s_lbl_bt_top = label(bar, &lv_font_montserrat_16, kColorDim);
+    lv_obj_set_width(s_lbl_bt_top, kTopBtW);
+    lv_obj_align(s_lbl_bt_top, LV_ALIGN_LEFT_MID, kTopBtX, 0);
+    lv_obj_set_style_text_align(s_lbl_bt_top, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_lbl_bt_top, LV_SYMBOL_BLUETOOTH);
 }
 
 void buildHome()
@@ -674,9 +696,10 @@ void buildConfig()
     s_page = Page::Config;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    button(scr, 24, 84, 230, 132, "WiFi", Action::Wifi);
-    button(scr, 284, 84, 230, 132, "Station", Action::Station);
-    button(scr, 544, 84, 230, 132, "Audio", Action::Audio);
+    button(scr, 24, 84, 172, 132, "WiFi", Action::Wifi);
+    button(scr, 214, 84, 172, 132, "Station", Action::Station);
+    button(scr, 404, 84, 172, 132, "Audio", Action::Audio);
+    button(scr, 594, 84, 172, 132, "Bluetooth", Action::Bt);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
 
     lv_obj_t *info = label(scr, &lv_font_montserrat_20, kColorSub);
@@ -1078,6 +1101,230 @@ void resetAudioForm()
     }
 }
 
+// ---- Bluetooth headset page ------------------------------------------------
+
+void btEnableEvent(lv_event_t *event)
+{
+    lv_obj_t *obj = lv_event_get_target_obj(event);
+    const bool checked = lv_obj_has_state(obj, LV_STATE_CHECKED);
+    // Apply + persist immediately: starts/stops the BT stack right away.
+    EXTERNAL_RADIO_SetBtEnabled(checked, true);
+    s_last_refresh_ms = 0;
+}
+
+// Row user-data encodes which list a row belongs to: saved rows are offset by
+// kBtSavedTag, scanned rows carry their raw index.
+constexpr intptr_t kBtSavedTag = 0x10000;
+
+void btRowConnect(lv_event_t *event)
+{
+    const intptr_t v = reinterpret_cast<intptr_t>(lv_event_get_user_data(event));
+    if (v >= kBtSavedTag) {
+        NRL_BtHfp_ConnectSaved(static_cast<size_t>(v - kBtSavedTag));
+    } else {
+        NRL_BtHfp_ConnectIndex(static_cast<size_t>(v));
+    }
+    if (s_lbl_bt_status != nullptr) {
+        lv_label_set_text(s_lbl_bt_status, "Connecting...");
+        lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorWarn), 0);
+    }
+    s_last_refresh_ms = 0;
+}
+
+void btRowForget(lv_event_t *event)
+{
+    const intptr_t v = reinterpret_cast<intptr_t>(lv_event_get_user_data(event));
+    if (v < kBtSavedTag) {
+        return;  // only saved devices can be forgotten
+    }
+    NRL_BtHfp_RemoveSaved(static_cast<size_t>(v - kBtSavedTag));
+    if (s_lbl_bt_status != nullptr) {
+        lv_label_set_text(s_lbl_bt_status, "Removed saved headset.");
+        lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorSub), 0);
+    }
+    // Don't rebuild the list from inside this row's own event; let refreshBtPage
+    // pick up the count change on the next tick.
+    s_last_refresh_ms = 0;
+}
+
+lv_obj_t *addBtRow(const char *icon, const char *text, intptr_t tag, bool saved)
+{
+    lv_obj_t *row = lv_list_add_button(s_list_bt, icon, text);
+    lv_obj_set_style_bg_color(row, lv_color_hex(kColorPanel2), 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x274060), LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(row, lv_color_hex(kColorText), 0);
+    // Short click connects; long-press forgets (saved rows only).
+    lv_obj_add_event_cb(row, btRowConnect, LV_EVENT_SHORT_CLICKED,
+                        reinterpret_cast<void *>(tag));
+    if (saved) {
+        lv_obj_add_event_cb(row, btRowForget, LV_EVENT_LONG_PRESSED,
+                            reinterpret_cast<void *>(tag));
+    }
+    return row;
+}
+
+// Rebuild the BT list: saved headsets first (tap = connect, long-press =
+// forget), then freshly scanned devices not already saved. Tapping connects.
+// (Dropdowns proved unreliable on this touch panel.)
+void setBtDeviceList()
+{
+    if (s_list_bt == nullptr) {
+        return;
+    }
+    lv_obj_clean(s_list_bt);
+    const size_t saved = NRL_BtHfp_GetSavedCount();
+    for (size_t i = 0; i < saved; ++i) {
+        char name[32] = {};
+        NRL_BtHfp_GetSavedName(i, name, sizeof(name));
+        char row_txt[56];
+        snprintf(row_txt, sizeof(row_txt), "%s  (saved)", name);
+        addBtRow(LV_SYMBOL_BLUETOOTH, row_txt, kBtSavedTag + static_cast<intptr_t>(i), true);
+    }
+    const size_t n = NRL_BtHfp_GetDeviceCount();
+    size_t scanned_shown = 0;
+    for (size_t i = 0; i < n; ++i) {
+        char name[32] = {};
+        NRL_BtHfp_GetDeviceName(i, name, sizeof(name));
+        // Skip ones already in the saved section (best-effort, by name).
+        bool dup = false;
+        for (size_t s = 0; s < saved; ++s) {
+            char sname[32] = {};
+            NRL_BtHfp_GetSavedName(s, sname, sizeof(sname));
+            if (strcmp(sname, name) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        addBtRow(LV_SYMBOL_BLUETOOTH, name, static_cast<intptr_t>(i), false);
+        ++scanned_shown;
+    }
+    if (saved == 0u && scanned_shown == 0u) {
+        lv_obj_t *row = lv_list_add_button(s_list_bt, nullptr,
+                                           NRL_BtHfp_IsScanning() ? "Scanning..."
+                                                                  : "No headsets -- tap Scan");
+        lv_obj_set_style_bg_color(row, lv_color_hex(kColorPanel2), 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(kColorSub), 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    }
+}
+
+void buildBt()
+{
+    clearScreen();
+    s_page = Page::Bt;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 86, 750, 250);
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+
+    fieldLabel(box, 0, 6, "Bluetooth headset");
+    s_sw_bt = lv_switch_create(box);
+    lv_obj_set_pos(s_sw_bt, 280, 0);
+    lv_obj_set_size(s_sw_bt, 64, 34);
+    if (cfg != nullptr && cfg->bt_enabled) {
+        lv_obj_add_state(s_sw_bt, LV_STATE_CHECKED);
+    }
+    lv_obj_set_style_bg_color(s_sw_bt, lv_color_hex(kColorDim), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_sw_bt, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_sw_bt, lv_color_hex(kColorText), LV_PART_KNOB);
+    lv_obj_add_event_cb(s_sw_bt, btEnableEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    fieldLabel(box, 0, 58, "Headsets: tap to connect, long-press a saved one to delete");
+    s_list_bt = lv_list_create(box);
+    lv_obj_set_pos(s_list_bt, 0, 82);
+    lv_obj_set_size(s_list_bt, 710, 132);
+    lv_obj_set_style_radius(s_list_bt, 6, 0);
+    lv_obj_set_style_bg_color(s_list_bt, lv_color_hex(kColorPanel2), 0);
+    lv_obj_set_style_border_color(s_list_bt, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(s_list_bt, 1, 0);
+    setBtDeviceList();
+
+    s_lbl_bt_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_bt_status, 710);
+    lv_obj_set_pos(s_lbl_bt_status, 0, 222);
+    lv_label_set_text(s_lbl_bt_status, "Turn on, Scan, then tap a headset. Saved ones reconnect automatically.");
+
+    button(scr, 24, 372, 360, 76, "Back", Action::Config);
+    button(scr, 414, 372, 360, 76, "Scan", Action::ScanBt);
+}
+
+void scanBtForDropdown()
+{
+    if (!NRL_BtHfp_IsEnabled()) {
+        if (s_lbl_bt_status != nullptr) {
+            lv_label_set_text(s_lbl_bt_status, "Turn Bluetooth on first.");
+            lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorWarn), 0);
+        }
+        return;
+    }
+    NRL_BtHfp_StartScan();
+    if (s_lbl_bt_status != nullptr) {
+        lv_label_set_text(s_lbl_bt_status, "Scanning for headsets...");
+        lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorWarn), 0);
+    }
+}
+
+// Top-bar Bluetooth indicator: dim when off, accent when on (searching), bright
+// green with a check when a headset is linked.
+void refreshBtTop()
+{
+    if (s_lbl_bt_top == nullptr) {
+        return;
+    }
+    uint32_t color = kColorDim;
+    const char *txt = LV_SYMBOL_BLUETOOTH;
+    if (NRL_BtHfp_IsConnected()) {
+        color = kColorGood;
+        txt = LV_SYMBOL_BLUETOOTH " " LV_SYMBOL_OK;
+    } else if (NRL_BtHfp_IsEnabled()) {
+        color = kColorAccent;
+    }
+    lv_label_set_text(s_lbl_bt_top, txt);
+    lv_obj_set_style_text_color(s_lbl_bt_top, lv_color_hex(color), 0);
+}
+
+void refreshBtPage()
+{
+    // Rebuild the row list when the saved/scanned counts or the scanning state
+    // change (not every tick, so taps aren't disrupted mid-press).
+    static size_t s_bt_last_key = SIZE_MAX;
+    static bool s_bt_was_scanning = false;
+    const size_t key = NRL_BtHfp_GetSavedCount() * 1000u + NRL_BtHfp_GetDeviceCount();
+    const bool scanning = NRL_BtHfp_IsScanning();
+    if (key != s_bt_last_key || scanning != s_bt_was_scanning) {
+        s_bt_last_key = key;
+        s_bt_was_scanning = scanning;
+        setBtDeviceList();
+    }
+    if (s_lbl_bt_status == nullptr) {
+        return;
+    }
+    char bt[96];
+    uint32_t color = kColorSub;
+    char peer[32] = {};
+    if (!NRL_BtHfp_IsEnabled()) {
+        snprintf(bt, sizeof(bt), "Bluetooth off.");
+    } else if (NRL_BtHfp_IsAudioActive()) {
+        NRL_BtHfp_GetPeerName(peer, sizeof(peer));
+        snprintf(bt, sizeof(bt), "Voice on headset%s%s.", peer[0] ? ": " : "", peer);
+        color = kColorGood;
+    } else if (NRL_BtHfp_IsConnected()) {
+        NRL_BtHfp_GetPeerName(peer, sizeof(peer));
+        snprintf(bt, sizeof(bt), "Connected%s%s (opening audio)...", peer[0] ? ": " : "", peer);
+        color = kColorGood;
+    } else if (NRL_BtHfp_IsScanning()) {
+        snprintf(bt, sizeof(bt), "Scanning for headsets...");
+        color = kColorWarn;
+    } else {
+        snprintf(bt, sizeof(bt), "Scan, pick a headset, then Connect.");
+    }
+    lv_label_set_text(s_lbl_bt_status, bt);
+    lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(color), 0);
+}
+
 void action(lv_event_t *event)
 {
     const Action id = static_cast<Action>(reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
@@ -1087,6 +1334,8 @@ void action(lv_event_t *event)
         case Action::Wifi: buildWifi(); break;
         case Action::Station: buildStation(); break;
         case Action::Audio: buildAudio(); break;
+        case Action::Bt: buildBt(); break;
+        case Action::ScanBt: scanBtForDropdown(); break;
         case Action::VolumeDown: setVolumePercentDelta(-1); break;
         case Action::VolumeUp: setVolumePercentDelta(1); break;
         case Action::CallsignSsidDown: setSsidDelta(-1); break;
@@ -1389,6 +1638,10 @@ void refresh()
         refreshHome();
     } else {
         refreshDetailPage();
+    }
+    refreshBtTop();
+    if (s_page == Page::Bt) {
+        refreshBtPage();
     }
 }
 

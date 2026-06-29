@@ -1,5 +1,6 @@
 #include "nrl_wifi.h"
 
+#include "nrl_bt_hfp.h"
 #include "nrl_net_compat.h"
 
 #include "../app/driver/external_radio.h"
@@ -219,10 +220,21 @@ namespace
         // radio sleep between DTIM intervals, which makes the MAC batch UDP voice
         // packets into 30-70 ms bursts on both TX and RX -- audible as jitter on
         // the 20 ms G.711 stream. Voice latency wins over the modest power saving.
-        const esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+        //
+        // EXCEPTION: when the Bluetooth headset (HFP) is enabled, WIFI_PS_NONE
+        // makes WiFi hog the single radio and starves the BT controller's coex
+        // scheduler, dropping the SCO link on a 16 s supervision timeout. BT then
+        // needs WiFi to yield slots (MIN_MODEM). This is a hard single-radio
+        // tradeoff: with BT on, WiFi voice may gain some jitter.
+        // MAX_MODEM: WiFi sleeps between beacons so the radio is free for the
+        // isochronous SCO slots most of the time (MIN_MODEM still let WiFi grab
+        // the radio mid-SCO-slot -> warble). Downlink UDP batches at the AP and
+        // is absorbed by the 100 ms playback buffer.
+        const wifi_ps_type_t ps = NRL_BtHfp_IsEnabled() ? WIFI_PS_MAX_MODEM : WIFI_PS_NONE;
+        const esp_err_t ps_err = esp_wifi_set_ps(ps);
         if (ps_err != ESP_OK)
         {
-            ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) failed: %d", ps_err);
+            ESP_LOGW(TAG, "esp_wifi_set_ps failed: %d", ps_err);
         }
 
         // ⚠️ 必须在 esp_wifi_start() 成功调用之后执行

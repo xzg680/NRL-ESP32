@@ -2,6 +2,18 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.5)
 
+# S31 uses the Bluedroid host (Classic BT + HFP for a Bluetooth headset), which
+# is mutually exclusive with the NimBLE host this C++ wrapper compiles against.
+# The IDF component manager still pulls esp-nimble-cpp (it's a managed dependency
+# of the app), and its registry copy doesn't even list esp32s31 as a supported
+# target. This vendored copy overrides that registry copy; for esp32s31 we
+# register an EMPTY component -- it satisfies the dependency without compiling any
+# NimBLE sources (which would fail: no NimBLE host headers like syscfg.h exist).
+if(IDF_TARGET STREQUAL "esp32s31")
+    idf_component_register()
+    return()
+endif()
+
 if(__COMPONENT_TARGETS MATCHES "___idf_esp-nimble-component")
     list(APPEND ESP_NIMBLE_PRIV_REQUIRES
         esp-nimble-component

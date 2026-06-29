@@ -10,6 +10,7 @@
 
 #include "../lib/ble_config.h"
 #include "../lib/nrl_audio_bridge.h"
+#include "../lib/nrl_bt_hfp.h"
 #include "../lib/nrl_usb_console.h"
 #include "../lib/nrl_version.h"
 #include "../lib/wifi_config_portal.h"
@@ -134,6 +135,13 @@ static void initApp()
         ESP_LOGE(TAG, "NRL audio bridge init failed.");
     }
 
+    // Bluetooth headset (HFP) voice link. Brought up only if enabled in config;
+    // on non-S31 boards these are no-ops.
+    NRL_BtHfp_Init();
+    if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
+        NRL_BtHfp_SetEnabled(config->bt_enabled);
+    }
+
 #if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (ES8311_Init()) {
         ESP_LOGI(TAG, "ES8311 ready.");
@@ -177,6 +185,7 @@ static void mainLoopTask(void *)
         STATUS_IO_Poll();
         WifiConfigPortal_Poll();
         BLEConfig_Poll();
+        NRL_BtHfp_Poll();
         NRLAudioBridge_PollSerialConsole();
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
         Display_Poll();

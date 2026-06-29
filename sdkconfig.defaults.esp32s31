@@ -29,3 +29,49 @@ CONFIG_SPI_FLASH_AUTO_SUSPEND=y
 # the CP210x (the same UART the ROM/bootloader already print on).
 # CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is not set
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# --- Bluetooth: Classic BT + HFP Audio Gateway (for a BT headset) ---
+# S31 has Classic BT in silicon (SOC_BT_CLASSIC_SUPPORTED). The shared
+# sdkconfig.defaults selects the NimBLE host (BLE-only) for ble_config.cpp's BLE
+# Wi-Fi provisioning, but HFP needs the Bluedroid host + Classic BT, and the two
+# hosts are mutually exclusive. So S31 swaps to Bluedroid and drops BLE
+# provisioning (it has the touchscreen config UI + SoftAP portal instead).
+# ble_config.cpp and the esp-nimble-cpp component are compiled out for S31 (see
+# src/lib/ble_config.cpp guard and src/CMakeLists.txt).
+# CONFIG_BT_NIMBLE_ENABLED is not set
+CONFIG_BT_BLUEDROID_ENABLED=y
+# Controller in BR/EDR-only mode (Classic). Auto-enables BT_CTRL_BREDR_ENABLE.
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+# Allow one (e)SCO link for HFP voice -- the controller default is 0 (no audio).
+CONFIG_BT_CTRL_BR_EDR_MAX_SYNC_CONN=1
+# SCO/voice PCM travels over HCI so the app receives/sends it via data callbacks.
+CONFIG_BT_CTRL_BR_EDR_SCO_DATA_PATH_HCI=y
+# Bluedroid Classic profiles: HFP Audio Gateway only (no A2DP, no HFP client).
+CONFIG_BT_CLASSIC_ENABLED=y
+# CONFIG_BT_A2DP_ENABLE is not set
+CONFIG_BT_HFP_ENABLE=y
+CONFIG_BT_HFP_AG_ENABLE=y
+# CONFIG_BT_HFP_CLIENT_ENABLE is not set
+# SCO audio over HCI (PCM frames delivered to the app), narrowband CVSD 8 kHz to
+# match the project's 8 kHz G.711 pipeline (no resample); WBS 16 kHz left off.
+CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
+# CONFIG_BT_HFP_WBS_ENABLE is not set
+# Wi-Fi/BT coexistence: UDP voice (Wi-Fi) and SCO (BT) share the single radio.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# --- Give Bluetooth its own core (core 1); Wi-Fi + app stay on core 0 ---
+# By default the Wi-Fi task, BT controller and Bluedroid host are ALL pinned to
+# core 0 while core 1 sits idle. Core 0 then preempts the BT work two ways:
+#   * the high-priority Wi-Fi task preempts the BT SCO data path while receiving
+#     the downlink stream -> (e)SCO frame jitter heard as a continuous "warble"
+#     (present only while a stream is active, clean once it stops; eSCO
+#     retransmission can't fix it because it is CPU preemption, not RF loss);
+#   * the app/lwIP tasks preempt the controller during connection setup ->
+#     role-switch/LMP collisions and dropped links.
+# Pinning the BT controller + Bluedroid host to the otherwise-idle core 1 gives
+# Bluetooth a dedicated core: stable connections AND clean SCO, while Wi-Fi RX
+# and the app keep core 0.
+# CONFIG_BT_CTRL_PINNED_TO_CORE_CHOICE_0 is not set
+CONFIG_BT_CTRL_PINNED_TO_CORE_CHOICE_1=y
+# CONFIG_BT_BLUEDROID_PINNED_TO_CORE_0 is not set
+CONFIG_BT_BLUEDROID_PINNED_TO_CORE_1=y

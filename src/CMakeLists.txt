@@ -15,6 +15,7 @@ set(app_sources
     app/driver/sci_serial.cpp
     app/driver/status_io.cpp
     lib/ble_config.cpp
+    lib/nrl_bt_hfp.cpp
     lib/nrl_at_commands.cpp
     lib/nrl_audio_bridge.cpp
     lib/nrl_captive_dns.cpp
@@ -43,10 +44,15 @@ set(app_priv_requires
     esp_timer
     esp_wifi
     espressif__esp-sr
-    h2zero__esp-nimble-cpp
     lwip
     nvs_flash
 )
+# BLE provisioning (ble_config.cpp) uses the NimBLE host via esp-nimble-cpp.
+# S31 instead uses the Bluedroid host (Classic BT + HFP for a BT headset); the
+# two hosts are mutually exclusive, so only pull esp-nimble-cpp on non-S31.
+if(NOT IDF_TARGET STREQUAL "esp32s31")
+    list(APPEND app_priv_requires h2zero__esp-nimble-cpp)
+endif()
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../components/lvgl/lvgl.h")
     list(APPEND app_priv_requires lvgl)
 endif()
