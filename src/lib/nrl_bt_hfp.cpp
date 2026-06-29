@@ -101,7 +101,8 @@ uint32_t s_volume_restore_until_ms = 0;
 // of int16 PCM samples. (A FreeRTOS byte-ring mangled the audio into static on
 // this path.) PushPlayback (network task) writes; the SCO outgoing callback
 // reads one frame per request, padding silence on underrun.
-constexpr size_t kPcmCap = 2048;       // 256 ms @ 8 kHz
+constexpr size_t kPcmCap = 4096;       // 512 ms @ 8 kHz (headroom for the prime
+                                       // depth plus a bursty MAX_MODEM RX gap)
 int16_t s_pcm[kPcmCap];
 volatile size_t s_pcm_head = 0;        // write index (PushPlayback)
 volatile size_t s_pcm_tail = 0;        // read index (SCO callback)
@@ -110,10 +111,13 @@ volatile size_t s_pcm_tail = 0;        // read index (SCO callback)
 // (scoIncomingCb), which the controller calls once per eSCO interval, so our TX
 // rate stays locked to the link rate. CVSD = 7.5 ms / 120-byte (60-sample) frame.
 // Downlink jitter buffer: wait until this many samples are queued before playing
-// (~100 ms @ 8 kHz), so bursty/jittery network packets don't underrun the SCO
-// stream. Trades latency for not having to insert silence.
+// (~200 ms @ 8 kHz), so bursty/jittery network packets -- WiFi runs MAX_MODEM
+// power-save while BT is up, which delivers UDP voice in bursts -- don't underrun
+// the SCO stream. Trades latency for not having to insert silence. The buffer also
+// re-primes whenever it drains fully (see scoOutgoingCb), so each transmission
+// after a pause rebuilds this cushion instead of resuming with none.
 bool s_pb_priming = true;
-constexpr size_t kPrimeSamples = 800u;
+constexpr size_t kPrimeSamples = 1600u;
 // Uplink gain: the headset mic (CVSD) comes in quiet; multiply before sending.
 constexpr int32_t kUplinkGain = 4;
 
@@ -222,12 +226,35 @@ uint32_t scoOutgoingCb(uint8_t *buf, uint32_t len)
         out[got++] = s_pcm[tail];
         tail = (tail + 1u) % kPcmCap;
     }
+    // Drift compensation (adaptive playout): the network source (8 kHz) and the
+    // SCO sink run on independent clocks, so a sub-percent mismatch slowly drains
+    // or fills the buffer and eventually warbles/overflows even with no packet
+    // loss. When the backlog has drifted deep, drop one sample this frame; when it
+    // has drifted shallow (but isn't empty), give one back (repeat). One 0.125 ms
+    // sample is inaudible, and ~1 sample/frame corrects up to ~1.6% drift, keeping
+    // the fill near kPrimeSamples without periodic re-prime glitches.
+    if (got == want) {
+        const size_t remaining = (head + kPcmCap - tail) % kPcmCap;
+        if (remaining > 2u * kPrimeSamples) {
+            tail = (tail + 1u) % kPcmCap;             // too deep: skip a sample
+        } else if (remaining > 0u && remaining < kPrimeSamples / 4u) {
+            tail = (tail + kPcmCap - 1u) % kPcmCap;   // too shallow: repeat a sample
+        }
+    }
     s_pcm_tail = tail;
+    // Fully drained: no samples at all were available -- a real gap (between
+    // transmissions, or a burst long enough to empty the buffer). Output silence
+    // and re-prime so the next burst rebuilds the jitter cushion before playing,
+    // instead of resuming with zero headroom and warbling on the first jittery
+    // packet. (A partial underrun, got > 0, just holds the last sample -- silence
+    // gaps on *every* underrun were the original "spring" warble.)
+    if (got == 0u) {
+        memset(buf, 0, len);
+        s_pb_priming = true;
+        return len;
+    }
     if (got < want) {
-        // Underrun: hold the last sample (simple packet-loss concealment) rather
-        // than inserting a silence gap, and don't re-prime. Silence gaps on every
-        // underrun were the "spring" warble; holding is far less audible.
-        const int16_t last = (got > 0) ? out[got - 1] : 0;
+        const int16_t last = out[got - 1];
         for (; got < want; ++got) {
             out[got] = last;
         }
