@@ -5,6 +5,7 @@
 #if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO
 #include "external_radio.h"
 #include "es8311.h"
+#include "../../lib/nrl_bt_hfp.h"  // route the volume keys to a connected headset
 #endif
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
@@ -321,6 +322,13 @@ static void reapplyEs8311Volume()
 // 0..100 %, so each key press moves it exactly one percent.
 static void adjustLineOutVolume(const int pct_delta)
 {
+    // While a Bluetooth headset is connected, the physical volume keys drive the
+    // headset's own speaker volume (one HFP step per press) rather than the
+    // onboard codec line-out. The LCD top-bar readout follows the headset value.
+    if (NRL_BtHfp_IsConnected()) {
+        NRL_BtHfp_AdjustVolume(pct_delta);
+        return;
+    }
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
     if (cfg == nullptr) {
         return;

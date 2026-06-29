@@ -157,7 +157,22 @@ char s_shown_vol[16] = {};
 char s_shown_remote_station[24] = {};
 char s_shown_ip[96] = {};
 char s_shown_server[96] = {};
+char s_shown_detail[512] = {};
+char s_shown_bt_top[24] = {};
 char s_wifi_option_ssids[kWifiOptionCount][33] = {};
+
+// Cached text colours / styles. In LVGL FULL render mode any invalidation
+// re-renders the whole 800x480 framebuffer (~80-106 ms), so re-applying a colour
+// or style every refresh tick -- even when unchanged -- forces a costly full
+// redraw and makes the UI feel laggy. These caches let the refresh helpers skip
+// the setter (and the invalidation) when the value hasn't changed. Sentinel
+// 0xFFFFFFFF / -1 means "unknown" and is reset on every page rebuild.
+constexpr uint32_t kColorUnset = 0xFFFFFFFFu;
+uint32_t s_clr_callsign = kColorUnset;
+uint32_t s_clr_server = kColorUnset;
+uint32_t s_clr_remote_station = kColorUnset;
+uint32_t s_clr_bt_top = kColorUnset;
+int s_ls_callsign = -1;  // callsign letter-spacing
 
 uint32_t millis()
 {
@@ -232,9 +247,19 @@ uint32_t lvglTick()
 
 void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
+    (void)area;
     esp_lcd_panel_handle_t panel =
         static_cast<esp_lcd_panel_handle_t>(lv_display_get_user_data(disp));
-    esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
+    // DIRECT render mode: LVGL renders only the changed areas, but straight into
+    // one of the panel's two PSRAM framebuffers (px_map is that whole buffer).
+    // Present it once per frame -- on the last flush -- by handing the framebuffer
+    // back to the RGB panel, which flips to it at VSYNC (no copy, since px_map is a
+    // known framebuffer). LVGL keeps both buffers in sync by also re-rendering the
+    // previous frame's dirty areas. Rendering touches only the back buffer, so the
+    // partial-write-into-the-live-framebuffer drift FULL mode avoided stays avoided.
+    if (lv_display_flush_is_last(disp)) {
+        esp_lcd_panel_draw_bitmap(panel, 0, 0, kWidth, kHeight, px_map);
+    }
     lv_display_flush_ready(disp);
 }
 
@@ -243,11 +268,13 @@ bool initLvgl()
     lv_init();
 
     // Use the RGB panel's own two framebuffers and let LVGL double-buffer in
-    // FULL-refresh mode: LVGL renders the whole frame into the off-screen buffer,
-    // the flush hands that buffer to the panel (which swaps it in at VSYNC), and
-    // the GDMA scans it straight from PSRAM. No bounce buffer and no partial
-    // writes into the live framebuffer, so a codec I2C write can no longer starve
-    // a refill and drift the image.
+    // DIRECT mode: LVGL renders only the changed areas into the off-screen
+    // framebuffer, the flush hands that whole buffer to the panel (which swaps it
+    // in at VSYNC), and the GDMA scans it straight from PSRAM. No bounce buffer and
+    // no partial writes into the live framebuffer, so a codec I2C write can no
+    // longer starve a refill and drift the image. DIRECT (vs FULL) avoids
+    // re-rendering the entire 800x480 screen on every small change (e.g. the clock
+    // tick), which in FULL mode cost ~80-106 ms per refresh and made the UI laggy.
     void *fb0 = nullptr;
     void *fb1 = nullptr;
     if (esp_lcd_rgb_panel_get_frame_buffer(s_panel, 2, &fb0, &fb1) != ESP_OK) {
@@ -264,7 +291,7 @@ bool initLvgl()
     lv_display_set_user_data(s_disp, s_panel);
     lv_display_set_flush_cb(s_disp, lvglFlush);
     const size_t fb_bytes = static_cast<size_t>(kWidth) * kHeight * 2u;
-    lv_display_set_buffers(s_disp, fb0, fb1, fb_bytes, LV_DISPLAY_RENDER_MODE_FULL);
+    lv_display_set_buffers(s_disp, fb0, fb1, fb_bytes, LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_tick_set_cb(lvglTick);
     return true;
 }
@@ -494,6 +521,18 @@ bool setLabel(lv_obj_t *obj, char *cache, size_t cache_size, const char *text)
     return true;
 }
 
+// Apply a text colour only when it differs from the cached value, to avoid the
+// invalidation (and full-screen re-render) that lv_obj_set_style_text_color
+// triggers every time it is called.
+void setLabelColor(lv_obj_t *obj, uint32_t &cache, uint32_t color)
+{
+    if (obj == nullptr || cache == color) {
+        return;
+    }
+    cache = color;
+    lv_obj_set_style_text_color(obj, lv_color_hex(color), 0);
+}
+
 void formatStationBadge(char *out, size_t out_size, const char *call, unsigned ssid)
 {
     if (out == nullptr || out_size == 0u) {
@@ -535,6 +574,14 @@ void clearScreen()
     memset(s_shown_remote_station, 0, sizeof(s_shown_remote_station));
     memset(s_shown_ip, 0, sizeof(s_shown_ip));
     memset(s_shown_server, 0, sizeof(s_shown_server));
+    memset(s_shown_detail, 0, sizeof(s_shown_detail));
+    memset(s_shown_bt_top, 0, sizeof(s_shown_bt_top));
+    // Labels are recreated on rebuild, so drop the colour/style caches too.
+    s_clr_callsign = kColorUnset;
+    s_clr_server = kColorUnset;
+    s_clr_remote_station = kColorUnset;
+    s_clr_bt_top = kColorUnset;
+    s_ls_callsign = -1;
     s_lbl_caption = nullptr;
     s_lbl_callsign = nullptr;
     s_lbl_ssid = nullptr;
@@ -626,13 +673,14 @@ void topBar(lv_obj_t *scr)
     lv_obj_set_style_text_align(s_lbl_wifi, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI " --");
 
-    // Bluetooth state lives next to WiFi: dim when off, accent when on, bright +
-    // checkmark when a headset is linked. Updated in refresh().
+    // Bluetooth state lives next to WiFi: hidden when off, grey when on but
+    // unlinked, green + headset glyph once a headset is linked. Updated in
+    // refresh() (starts empty -- Bluetooth defaults off).
     s_lbl_bt_top = label(bar, &lv_font_montserrat_16, kColorDim);
     lv_obj_set_width(s_lbl_bt_top, kTopBtW);
     lv_obj_align(s_lbl_bt_top, LV_ALIGN_LEFT_MID, kTopBtX, 0);
     lv_obj_set_style_text_align(s_lbl_bt_top, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(s_lbl_bt_top, LV_SYMBOL_BLUETOOTH);
+    lv_label_set_text(s_lbl_bt_top, "");
 }
 
 void buildHome()
@@ -876,9 +924,14 @@ void buildAudio()
     topBar(scr);
     lv_obj_t *box = panel(scr, 24, 86, 750, 250);
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
-    const int speaker_pct = cfg ? (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255 : 0;
+    // When a headset is online the Speaker slider tracks/controls its volume;
+    // otherwise it controls the onboard codec line-out.
+    const int bt_pct = NRL_BtHfp_IsConnected() ? NRL_BtHfp_GetVolumePercent() : -1;
+    const int speaker_pct = (bt_pct >= 0)
+                                ? bt_pct
+                                : (cfg ? (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255 : 0);
 
-    fieldLabel(box, 0, 0, "Speaker");
+    fieldLabel(box, 0, 0, (bt_pct >= 0) ? "Speaker (headset)" : "Speaker");
     s_lbl_speaker_value = valueLabel(box, 620, 0, 90);
     s_slider_speaker = slider(box, 0, 36, 710, 0, 100, speaker_pct, AudioControl::Speaker);
 
@@ -927,6 +980,14 @@ void markAudioChanged()
 
 void setVolumePercentDelta(int pct_delta)
 {
+    // While a Bluetooth headset is connected, the volume keys drive the headset's
+    // own speaker volume (one HFP step per press), not the onboard codec. The
+    // top-bar readout (refreshVolume) follows the headset value.
+    if (NRL_BtHfp_IsConnected()) {
+        NRL_BtHfp_AdjustVolume(pct_delta);
+        s_last_refresh_ms = 0;
+        return;
+    }
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
     if (cfg == nullptr) {
         return;
@@ -1107,8 +1168,15 @@ void btEnableEvent(lv_event_t *event)
 {
     lv_obj_t *obj = lv_event_get_target_obj(event);
     const bool checked = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    // Apply + persist immediately: starts/stops the BT stack right away.
+    // Request the change (non-blocking -- the BT task does the slow stack work)
+    // and persist the preference. Give immediate on-screen feedback so the user
+    // knows the tap registered while the stack comes up/down in the background.
     EXTERNAL_RADIO_SetBtEnabled(checked, true);
+    if (s_lbl_bt_status != nullptr) {
+        lv_label_set_text(s_lbl_bt_status, checked ? "Turning Bluetooth on..."
+                                                   : "Turning Bluetooth off...");
+        lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorWarn), 0);
+    }
     s_last_refresh_ms = 0;
 }
 
@@ -1267,23 +1335,30 @@ void scanBtForDropdown()
     }
 }
 
-// Top-bar Bluetooth indicator: dim when off, accent when on (searching), bright
-// green with a check when a headset is linked.
+// Top-bar Bluetooth indicator: hidden when Bluetooth is off, grey when enabled
+// but no headset is linked, and green with a headset glyph once a headset is
+// connected (no checkmark).
 void refreshBtTop()
 {
     if (s_lbl_bt_top == nullptr) {
         return;
     }
-    uint32_t color = kColorDim;
-    const char *txt = LV_SYMBOL_BLUETOOTH;
-    if (NRL_BtHfp_IsConnected()) {
+    uint32_t color;
+    const char *txt;
+    if (!NRL_BtHfp_IsEnabled()) {
+        color = kColorDim;
+        txt = "";  // Bluetooth off: no icon at all.
+    } else if (NRL_BtHfp_IsConnected()) {
+        // Linked to a headset: green BT glyph plus a headset glyph.
         color = kColorGood;
-        txt = LV_SYMBOL_BLUETOOTH " " LV_SYMBOL_OK;
-    } else if (NRL_BtHfp_IsEnabled()) {
-        color = kColorAccent;
+        txt = LV_SYMBOL_BLUETOOTH " " LV_SYMBOL_AUDIO;
+    } else {
+        // Enabled but no headset linked yet: grey BT glyph only.
+        color = kColorDim;
+        txt = LV_SYMBOL_BLUETOOTH;
     }
-    lv_label_set_text(s_lbl_bt_top, txt);
-    lv_obj_set_style_text_color(s_lbl_bt_top, lv_color_hex(color), 0);
+    setLabel(s_lbl_bt_top, s_shown_bt_top, sizeof(s_shown_bt_top), txt);
+    setLabelColor(s_lbl_bt_top, s_clr_bt_top, color);
 }
 
 void refreshBtPage()
@@ -1305,7 +1380,11 @@ void refreshBtPage()
     char bt[96];
     uint32_t color = kColorSub;
     char peer[32] = {};
-    if (!NRL_BtHfp_IsEnabled()) {
+    if (NRL_BtHfp_TogglePending()) {
+        // Mid-transition: the BT task is bringing the stack up/down.
+        snprintf(bt, sizeof(bt), "Switching Bluetooth...");
+        color = kColorWarn;
+    } else if (!NRL_BtHfp_IsEnabled()) {
         snprintf(bt, sizeof(bt), "Bluetooth off.");
     } else if (NRL_BtHfp_IsAudioActive()) {
         NRL_BtHfp_GetPeerName(peer, sizeof(peer));
@@ -1394,6 +1473,13 @@ void audioSliderEvent(lv_event_t *event)
         static_cast<AudioControl>(reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
     const int value = static_cast<int>(lv_slider_get_value(obj));
     if (id == AudioControl::Speaker) {
+        if (NRL_BtHfp_IsConnected()) {
+            // Headset online: the Speaker slider drives its volume, saved live by
+            // the BT module (no separate Save needed), so don't flag the form.
+            NRL_BtHfp_SetVolumePercent(value);
+            updateAudioValueLabels();
+            return;
+        }
         const int volume = (value * 255 + 50) / 100;
         EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(volume), false);
     } else if (id == AudioControl::Mic) {
@@ -1501,10 +1587,7 @@ void refreshStationBadges()
     formatStationBadge(remote, sizeof(remote), (rx && voice_call[0] != '\0') ? voice_call : nullptr,
                        voice_ssid);
     setLabel(s_lbl_remote_station, s_shown_remote_station, sizeof(s_shown_remote_station), remote);
-    if (s_lbl_remote_station != nullptr) {
-        lv_obj_set_style_text_color(s_lbl_remote_station,
-                                    lv_color_hex(rx ? kColorAccent : kColorDim), 0);
-    }
+    setLabelColor(s_lbl_remote_station, s_clr_remote_station, rx ? kColorAccent : kColorDim);
 }
 
 void refreshHome()
@@ -1522,8 +1605,13 @@ void refreshHome()
     setLabel(s_lbl_callsign, s_shown_callsign, sizeof(s_shown_callsign), call);
     if (s_lbl_callsign != nullptr) {
         // Spread only the placeholder dashes so they read bigger; keep a real
-        // callsign at normal spacing.
-        lv_obj_set_style_text_letter_space(s_lbl_callsign, has_caller ? 0 : 12, 0);
+        // callsign at normal spacing. Only re-apply on change (avoids a full
+        // re-render every tick).
+        const int letter_space = has_caller ? 0 : 12;
+        if (letter_space != s_ls_callsign) {
+            s_ls_callsign = letter_space;
+            lv_obj_set_style_text_letter_space(s_lbl_callsign, letter_space, 0);
+        }
     }
 
     const char *caption = "STANDBY";
@@ -1546,9 +1634,7 @@ void refreshHome()
     if (setLabel(s_lbl_caption, s_shown_caption, sizeof(s_shown_caption), caption)) {
         lv_obj_set_style_text_color(s_lbl_caption, lv_color_hex(color), 0);
     }
-    if (s_lbl_callsign != nullptr) {
-        lv_obj_set_style_text_color(s_lbl_callsign, lv_color_hex(call_color), 0);
-    }
+    setLabelColor(s_lbl_callsign, s_clr_callsign, call_color);
 
     char ip[96];
     uint32_t ip_color = kColorAccent;
@@ -1571,9 +1657,7 @@ void refreshHome()
     snprintf(server, sizeof(server), "%s", host);
     const uint32_t server_color = tx ? kColorTx : (rx ? kColorAccent : kColorSub);
     setLabel(s_lbl_server, s_shown_server, sizeof(s_shown_server), server);
-    if (s_lbl_server != nullptr) {
-        lv_obj_set_style_text_color(s_lbl_server, lv_color_hex(server_color), 0);
-    }
+    setLabelColor(s_lbl_server, s_clr_server, server_color);
 }
 
 // Volume now lives in the shared top bar, so refresh it on every page.
@@ -1582,11 +1666,21 @@ void refreshVolume()
     if (s_lbl_vol == nullptr) {
         return;
     }
-    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
-    char vol[16];
-    const int pct = cfg ? (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255 : 0;
-    snprintf(vol, sizeof(vol), LV_SYMBOL_VOLUME_MID " %d%%", pct);
-    setLabel(s_lbl_vol, s_shown_vol, sizeof(s_shown_vol), vol);
+    char vol[24];
+    uint32_t color = kColorSub;
+    const int bt_pct = NRL_BtHfp_IsConnected() ? NRL_BtHfp_GetVolumePercent() : -1;
+    if (bt_pct >= 0) {
+        // Headset connected: show its speaker volume (green, with the BT glyph).
+        snprintf(vol, sizeof(vol), LV_SYMBOL_BLUETOOTH " %d%%", bt_pct);
+        color = kColorGood;
+    } else {
+        const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+        const int pct = cfg ? (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255 : 0;
+        snprintf(vol, sizeof(vol), LV_SYMBOL_VOLUME_MID " %d%%", pct);
+    }
+    if (setLabel(s_lbl_vol, s_shown_vol, sizeof(s_shown_vol), vol)) {
+        lv_obj_set_style_text_color(s_lbl_vol, lv_color_hex(color), 0);
+    }
 }
 
 void refreshDetailPage()
@@ -1625,7 +1719,7 @@ void refreshDetailPage()
     } else {
         return;
     }
-    lv_label_set_text(s_lbl_detail, text);
+    setLabel(s_lbl_detail, s_shown_detail, sizeof(s_shown_detail), text);
 }
 
 void refresh()

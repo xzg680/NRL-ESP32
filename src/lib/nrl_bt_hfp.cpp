@@ -40,9 +40,14 @@ constexpr uint8_t kInquiryLen = 8;
 
 // Discovered-device table for the on-screen pick list.
 constexpr size_t kMaxDevices = 12;
+// HFP speaker gain is a 0..15 scale. Each headset remembers its own last gain
+// (spk_volume), persisted with the saved list, so reconnecting restores it.
+constexpr uint8_t kSpkVolumeMax = 15;
+constexpr uint8_t kDefaultSpkVolume = 9;  // ~60 %, adjustable both ways
 struct BtDevice {
     esp_bd_addr_t bda;
     char name[32];
+    uint8_t spk_volume;  // saved HFP speaker gain (0..15) for this headset
 };
 BtDevice s_devices[kMaxDevices];
 size_t s_device_count = 0;
@@ -57,14 +62,40 @@ size_t s_saved_count = 0;
 
 // Defined below stackUp(); used from the GAP auth-complete callback above it.
 void addSaved(const esp_bd_addr_t bda, const char *name);
+// Per-headset volume helpers, also used from the HFP callback above their defs.
+int findSavedIndex(const esp_bd_addr_t bda);
+void savePeerVolume();
+void applyPeerVolume();
 
-bool s_enabled = false;        // desired on/off (mirrors the bt_enabled config)
+bool s_enabled = false;        // actual on/off of the stack (applied by the task)
 bool s_stack_up = false;       // Bluedroid + controller actually running
+
+// Bringing the stack up/down is slow (controller + Bluedroid init, and a teardown
+// that waits up to ~1 s for a clean headset disconnect). Doing that inside the UI
+// touch callback froze the screen, so the switch never repainted -- it felt
+// unresponsive and users tapped repeatedly. Instead SetEnabled just records the
+// desired state here; the next NRL_BtHfp_Poll() (main loop) applies it, so the
+// touch callback returns immediately and LVGL can repaint. Rapid toggles coalesce
+// to the latest request; the one-time stack transition still runs on the main
+// loop but only once per toggle (not every frame).
+volatile bool s_request_pending = false;   // a SetEnabled request is queued
+volatile bool s_request_enabled = false;   // its desired state
+volatile bool s_transitioning = false;     // Poll is mid stack up/down
 bool s_ble_mem_released = false;
 bool s_connected = false;      // service-level connection to a headset
 bool s_audio_active = false;   // SCO/voice link up
 esp_bd_addr_t s_peer_bda = {};
 char s_peer_name[32] = {};
+
+// Connected headset's speaker gain (0..15). Loaded from the saved entry on
+// connect, pushed to the headset, and updated live when the headset's own volume
+// buttons report a change (+VGS / ESP_HF_VOLUME_CONTROL_EVT). s_peer_volume_dirty
+// defers the NVS write to Poll (out of the BT callback context). During the
+// restore window after connect, incoming +VGS reports are ignored so the
+// headset's auto-reported volume can't clobber the value we are restoring.
+uint8_t s_peer_volume = kDefaultSpkVolume;
+volatile bool s_peer_volume_dirty = false;
+uint32_t s_volume_restore_until_ms = 0;
 
 // Downlink jitter buffer: a plain lock-free single-producer/single-consumer ring
 // of int16 PCM samples. (A FreeRTOS byte-ring mangled the audio into static on
@@ -105,7 +136,10 @@ uint32_t s_last_reconnect_ms = 0;
 // PushPlayback (downlink) and by PTT in Poll.
 uint32_t s_last_voice_ms = 0;
 bool s_call_active = false;       // our "voice burst in progress" notion
-constexpr uint32_t kVoiceHangoverMs = 3000;
+// Keep the SCO up for 10 s after the last voice so a whole conversation (gaps
+// under this) never re-incurs the ~0.3-0.5 s SCO setup / first-syllable loss;
+// only a >10 s silence drops it back to the SLC-only (sniff) power-saving state.
+constexpr uint32_t kVoiceHangoverMs = 10000;
 
 inline uint32_t nowMs()
 {
@@ -219,6 +253,18 @@ void hfAgCb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             memcpy(s_peer_bda, param->conn_stat.remote_bda, sizeof(s_peer_bda));
             s_connected = true;
             s_connecting = false;
+            // Restore this headset's saved speaker volume and push it now. Ignore
+            // any +VGS the headset auto-reports for the next couple of seconds so
+            // it can't overwrite the value we are restoring.
+            {
+                const int idx = findSavedIndex(s_peer_bda);
+                s_peer_volume = (idx >= 0) ? s_saved[idx].spk_volume : kDefaultSpkVolume;
+                if (s_peer_volume > kSpkVolumeMax) {
+                    s_peer_volume = kSpkVolumeMax;
+                }
+            }
+            s_volume_restore_until_ms = nowMs() + 2000u;
+            applyPeerVolume();
             // Linked but idle: let the radio share fairly and let the link sniff
             // for power save. The SCO voice link is opened on demand (see Poll),
             // and only then do we bias the radio toward BT.
@@ -244,10 +290,11 @@ void hfAgCb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             // backlog as permanent delay. The jitter buffer re-primes from here.
             s_pcm_tail = s_pcm_head;
             s_pb_priming = true;
-            // Set the headset speaker to max -- it can default low/0 for the
-            // "call", making downlink network voice inaudible.
+            // Re-assert this headset's saved speaker volume -- a headset can reset
+            // its gain (sometimes to 0) when the "call" SCO opens, which would make
+            // downlink network voice inaudible.
             esp_hf_ag_volume_control(param->audio_stat.remote_addr,
-                                     ESP_HF_VOLUME_CONTROL_TARGET_SPK, 15);
+                                     ESP_HF_VOLUME_CONTROL_TARGET_SPK, s_peer_volume);
             ESP_LOGI(TAG, "SCO audio up (%s) -- voice routes through the headset",
                      param->audio_stat.state == ESP_HF_AUDIO_STATE_CONNECTED_MSBC ? "mSBC" : "CVSD");
         } else if (param->audio_stat.state == ESP_HF_AUDIO_STATE_DISCONNECTED) {
@@ -261,6 +308,24 @@ void hfAgCb(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
         s_headset_ptt = (param->vra_rep.value == ESP_HF_VR_STATE_ENABLED);
         s_headset_ptt_dirty = true;
         ESP_LOGI(TAG, "headset button -> PTT %s", s_headset_ptt ? "ON" : "OFF");
+        break;
+    case ESP_HF_VOLUME_CONTROL_EVT:
+        // The headset's own volume buttons (+VGS speaker / +VGM mic). Track the
+        // speaker gain so the on-screen readout follows it and it is saved for
+        // this headset. Skip reports during the post-connect restore window so the
+        // headset's auto-report can't clobber the value we just restored.
+        if (param->volume_control.type == ESP_HF_VOLUME_TYPE_SPK &&
+            nowMs() >= s_volume_restore_until_ms) {
+            int v = param->volume_control.volume;
+            if (v < 0) {
+                v = 0;
+            } else if (v > kSpkVolumeMax) {
+                v = kSpkVolumeMax;
+            }
+            s_peer_volume = static_cast<uint8_t>(v);
+            s_peer_volume_dirty = true;  // persist from Poll (not in this context)
+            ESP_LOGI(TAG, "headset volume -> %u/15", (unsigned)s_peer_volume);
+        }
         break;
     // The following replies are required to complete the HFP service-level
     // connection (SLC) handshake -- without them Bluedroid waits on the AT
@@ -430,6 +495,12 @@ void loadSaved()
         if (s_saved_count > kMaxSaved) {
             s_saved_count = kMaxSaved;
         }
+        // Clamp volumes from older/garbled blobs into the valid 0..15 range.
+        for (size_t i = 0; i < s_saved_count; ++i) {
+            if (s_saved[i].spk_volume > kSpkVolumeMax) {
+                s_saved[i].spk_volume = kDefaultSpkVolume;
+            }
+        }
     }
     nvs_close(h);
 }
@@ -445,12 +516,43 @@ void persistSaved()
     nvs_close(h);
 }
 
+int findSavedIndex(const esp_bd_addr_t bda)
+{
+    for (size_t i = 0; i < s_saved_count; ++i) {
+        if (memcmp(s_saved[i].bda, bda, sizeof(esp_bd_addr_t)) == 0) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+// Persist the connected headset's current speaker volume back to its saved entry.
+void savePeerVolume()
+{
+    const int idx = findSavedIndex(s_peer_bda);
+    if (idx >= 0 && s_saved[idx].spk_volume != s_peer_volume) {
+        s_saved[idx].spk_volume = s_peer_volume;
+        persistSaved();
+    }
+}
+
+// Push the connected headset's speaker gain to it over the (RFCOMM) SLC link.
+void applyPeerVolume()
+{
+    if (s_connected) {
+        esp_hf_ag_volume_control(s_peer_bda, ESP_HF_VOLUME_CONTROL_TARGET_SPK, s_peer_volume);
+    }
+}
+
 // Insert/refresh a paired device at the front of the saved list (most recent).
 void addSaved(const esp_bd_addr_t bda, const char *name)
 {
+    // Carry the saved per-headset volume across a re-pair (default for new ones).
+    uint8_t saved_volume = kDefaultSpkVolume;
     // Drop any existing entry for this address.
     for (size_t i = 0; i < s_saved_count; ++i) {
         if (memcmp(s_saved[i].bda, bda, sizeof(esp_bd_addr_t)) == 0) {
+            saved_volume = s_saved[i].spk_volume;
             for (size_t j = i; j + 1 < s_saved_count; ++j) {
                 s_saved[j] = s_saved[j + 1];
             }
@@ -466,6 +568,7 @@ void addSaved(const esp_bd_addr_t bda, const char *name)
         s_saved[j] = s_saved[j - 1];
     }
     memcpy(s_saved[0].bda, bda, sizeof(esp_bd_addr_t));
+    s_saved[0].spk_volume = saved_volume;
     if (name != nullptr && name[0] != '\0') {
         snprintf(s_saved[0].name, sizeof(s_saved[0].name), "%s", name);
     } else {
@@ -603,16 +706,9 @@ void stackDown()
     ESP_LOGI(TAG, "BT HFP AG down; free heap=%u", (unsigned)esp_get_free_heap_size());
 }
 
-} // namespace
-
-// ---- Public API -------------------------------------------------------------
-
-void NRL_BtHfp_Init(void)
-{
-    // State is statically initialised; nothing to bring up until SetEnabled(true).
-}
-
-void NRL_BtHfp_SetEnabled(bool enabled)
+// Bring the stack to match `enabled`. Slow (see stackUp/stackDown); only ever
+// called from the BT task so it never blocks the UI or main loop.
+void applyEnabled(bool enabled)
 {
     if (enabled == s_enabled) {
         return;
@@ -624,6 +720,27 @@ void NRL_BtHfp_SetEnabled(bool enabled)
         stackDown();
     }
 }
+
+} // namespace
+
+// ---- Public API -------------------------------------------------------------
+
+void NRL_BtHfp_Init(void)
+{
+    // State is statically initialised; nothing to bring up until SetEnabled(true).
+    // Enable/disable requests are applied from NRL_BtHfp_Poll() on the main loop.
+}
+
+void NRL_BtHfp_SetEnabled(bool enabled)
+{
+    // Non-blocking: just record the desired state. The BT task brings the stack
+    // up/down (slow), so the caller -- a UI touch callback or boot -- never
+    // blocks. Rapid toggles coalesce to the most recent request.
+    s_request_enabled = enabled;
+    s_request_pending = true;
+}
+
+bool NRL_BtHfp_TogglePending(void) { return s_request_pending || s_transitioning; }
 
 bool NRL_BtHfp_IsEnabled(void) { return s_enabled; }
 
@@ -737,12 +854,69 @@ size_t NRL_BtHfp_GetPeerName(char *out, size_t out_size)
     return copy;
 }
 
-void NRL_BtHfp_PushPlayback(const int16_t *samples, size_t sample_count)
+int NRL_BtHfp_GetVolumePercent(void)
 {
-    if (!s_audio_active || samples == nullptr || sample_count == 0u) {
+    if (!s_connected) {
+        return -1;
+    }
+    return (static_cast<int>(s_peer_volume) * 100 + kSpkVolumeMax / 2) / kSpkVolumeMax;
+}
+
+void NRL_BtHfp_AdjustVolume(int direction)
+{
+    if (!s_connected || direction == 0) {
         return;
     }
-    s_last_voice_ms = nowMs();  // downlink audio arriving -> a voice burst is live
+    int v = static_cast<int>(s_peer_volume) + (direction > 0 ? 1 : -1);
+    if (v < 0) {
+        v = 0;
+    } else if (v > kSpkVolumeMax) {
+        v = kSpkVolumeMax;
+    }
+    if (static_cast<uint8_t>(v) == s_peer_volume) {
+        return;  // already at the limit
+    }
+    s_peer_volume = static_cast<uint8_t>(v);
+    applyPeerVolume();
+    savePeerVolume();
+    ESP_LOGI(TAG, "NRL volume key -> headset %u/15", (unsigned)s_peer_volume);
+}
+
+void NRL_BtHfp_SetVolumePercent(int percent)
+{
+    if (!s_connected) {
+        return;
+    }
+    if (percent < 0) {
+        percent = 0;
+    } else if (percent > 100) {
+        percent = 100;
+    }
+    const uint8_t gain = static_cast<uint8_t>((percent * kSpkVolumeMax + 50) / 100);
+    if (gain == s_peer_volume) {
+        return;
+    }
+    s_peer_volume = gain;
+    applyPeerVolume();
+    savePeerVolume();
+    ESP_LOGI(TAG, "NRL slider -> headset %u/15", (unsigned)s_peer_volume);
+}
+
+void NRL_BtHfp_PushPlayback(const int16_t *samples, size_t sample_count)
+{
+    if (samples == nullptr || sample_count == 0u) {
+        return;
+    }
+    // Downlink network voice is arriving -> a voice burst is live. Record this
+    // even when the SCO is not up yet, so Poll opens it on demand. Without this,
+    // receive-only audio (no local PTT) would never trigger the SCO and the
+    // headset would stay silent until PTT was pressed.
+    s_last_voice_ms = nowMs();
+    if (!s_audio_active) {
+        // SCO not up yet; nothing to buffer (the jitter buffer re-primes when the
+        // SCO connects, so anything queued now would just be discarded).
+        return;
+    }
     size_t head = s_pcm_head;
     const size_t tail = s_pcm_tail;  // snapshot (consumer side)
     for (size_t i = 0; i < sample_count; ++i) {
@@ -758,6 +932,14 @@ void NRL_BtHfp_PushPlayback(const int16_t *samples, size_t sample_count)
 
 void NRL_BtHfp_Poll(void)
 {
+    // Apply a pending enable/disable request first (this runs on the BT task, so
+    // the slow stack up/down never blocks the UI or the main loop).
+    if (s_request_pending) {
+        s_request_pending = false;
+        s_transitioning = true;
+        applyEnabled(s_request_enabled);
+        s_transitioning = false;
+    }
     if (!s_enabled || !s_stack_up) {
         return;
     }
@@ -765,6 +947,11 @@ void NRL_BtHfp_Poll(void)
     if (s_headset_ptt_dirty) {
         s_headset_ptt_dirty = false;
         STATUS_IO_SetSoftPtt(s_headset_ptt);
+    }
+    // Persist a headset-reported volume change (NVS write kept out of the callback).
+    if (s_peer_volume_dirty) {
+        s_peer_volume_dirty = false;
+        savePeerVolume();
     }
     const uint32_t now = nowMs();
     // Let a stuck in-flight attempt expire so a fresh retry is allowed.
@@ -825,6 +1012,7 @@ void NRL_BtHfp_Poll(void)
 void NRL_BtHfp_Init(void) {}
 void NRL_BtHfp_SetEnabled(bool) {}
 bool NRL_BtHfp_IsEnabled(void) { return false; }
+bool NRL_BtHfp_TogglePending(void) { return false; }
 void NRL_BtHfp_Poll(void) {}
 void NRL_BtHfp_StartScan(void) {}
 bool NRL_BtHfp_IsScanning(void) { return false; }
@@ -857,5 +1045,8 @@ size_t NRL_BtHfp_GetPeerName(char *out, size_t out_size)
     return 0u;
 }
 void NRL_BtHfp_PushPlayback(const int16_t *, size_t) {}
+int NRL_BtHfp_GetVolumePercent(void) { return -1; }
+void NRL_BtHfp_AdjustVolume(int) {}
+void NRL_BtHfp_SetVolumePercent(int) {}
 
 #endif // CONFIG_BT_HFP_AG_ENABLE

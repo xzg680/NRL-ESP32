@@ -24,11 +24,17 @@ void NRL_BtHfp_Init(void);
 // Runtime on/off. Enabling brings up the Bluedroid Classic-BT + HFP AG stack,
 // makes the device discoverable/connectable and (auto-)connects a headset.
 // Disabling tears the stack down so the radio is free for Wi-Fi-only voice.
+// Non-blocking: records the desired state and returns immediately; a dedicated
+// BT task performs the (slow) stack transition, so a UI callback never freezes.
 void NRL_BtHfp_SetEnabled(bool enabled);
 bool NRL_BtHfp_IsEnabled(void);
 
-// Periodic housekeeping (keeps the SCO link up, applies the headset PTT button).
-// Call from the main loop.
+// True while a SetEnabled request is still waiting to be applied by the BT task
+// (i.e. the stack is mid-transition). Lets the UI show a transient state.
+bool NRL_BtHfp_TogglePending(void);
+
+// Periodic housekeeping (keeps the SCO link up, applies the headset PTT button,
+// and applies any pending enable/disable request). Call from the main loop.
 void NRL_BtHfp_Poll(void);
 
 // Start a Bluetooth inquiry for nearby devices. Results accumulate and can be
@@ -67,6 +73,27 @@ size_t NRL_BtHfp_GetPeerName(char *out, size_t out_size);
 // Queue downlink (network->headset) PCM16 mono 8 kHz samples for the headset
 // speaker. Called by the audio bridge while IsAudioActive(). Excess is dropped.
 void NRL_BtHfp_PushPlayback(const int16_t *samples, size_t sample_count);
+
+// ---- Headset speaker volume -------------------------------------------------
+// Each headset remembers its own speaker volume (HFP gain 0..15, persisted with
+// the saved-device list). On connect the saved value is pushed to the headset;
+// pressing the headset's own volume keys updates it live. While a headset is
+// connected the NRL device's volume buttons should drive these instead of the
+// onboard codec.
+
+// Current headset speaker volume as a percentage (0..100), or -1 if no headset
+// is connected.
+int NRL_BtHfp_GetVolumePercent(void);
+
+// Step the connected headset's speaker volume by one HFP gain unit
+// (direction > 0 = louder, < 0 = quieter; ~6.7 % per step). No-op when not
+// connected. Applies to the headset and saves the value for that device.
+void NRL_BtHfp_AdjustVolume(int direction);
+
+// Set the connected headset's speaker volume to an absolute percentage (0..100,
+// snapped to the nearest HFP gain step). No-op when not connected. Applies to
+// the headset and saves the value for that device. Used by the on-screen slider.
+void NRL_BtHfp_SetVolumePercent(int percent);
 
 #ifdef __cplusplus
 }
