@@ -66,4 +66,10 @@ idf_component_register(
         app
         app/driver
     PRIV_REQUIRES ${app_priv_requires}
+    # WHOLE_ARCHIVE keeps app_main (and other referenced-by-startup symbols) from
+    # being dropped at link time. Under PlatformIO src is the main component
+    # (already whole-archived); for the native idf.py build (build-s31 job) src is
+    # registered as a plain component via EXTRA_COMPONENT_DIRS, so it needs this
+    # explicitly or the link fails with "undefined reference to app_main".
+    WHOLE_ARCHIVE
 )

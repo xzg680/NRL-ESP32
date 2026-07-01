@@ -157,6 +157,7 @@ jobs:
           command: >-
             python3 scripts/fetch_lvgl.py &&
             idf.py -DIDF_TARGET=esp32s31
+            -DNRL_NATIVE_BUILD=1
             -DSDKCONFIG_DEFAULTS=sdkconfig.defaults
             -DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo
             -DNRL_FW_VERSION=${{ steps.ver.outputs.version }}

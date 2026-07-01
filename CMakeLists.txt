@@ -15,15 +15,20 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp/CMakeLists.txt")
     list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp")
 endif()
-# S31 board identity + feature flags for NATIVE idf.py builds (GitHub CI).
-# In PlatformIO these come from [env:s31_korvo] build_flags in platformio.ini,
-# but a native `idf.py` build never reads platformio.ini. idf.py always passes
-# -DIDF_TARGET on the command line, so this block only fires for a native S31
-# build; PlatformIO's gezipai/bh4tdv (esp32s3) and PlatformIO's own S31 build are
-# unaffected. NRL_BOARD in particular MUST be set or board_pins.h defaults to
-# gezipai. Pass the firmware version with -DNRL_FW_VERSION=... (optional; falls
-# back to the default in nrl_version.h).
-if(IDF_TARGET STREQUAL "esp32s31")
+# Support for NATIVE idf.py builds (the GitHub build-s31 job); pass
+# -DNRL_NATIVE_BUILD=1. PlatformIO is NOT involved in these, so we must
+# reproduce what platformio.ini normally provides:
+#   * src_dir = src -> register src/ as a component. There is no main/ dir, so
+#     without this the app (incl. app_main) is never compiled/linked -> the link
+#     fails with "undefined reference to app_main". WHOLE_ARCHIVE on the src
+#     component (src/CMakeLists.txt) then keeps app_main from being dropped.
+#   * [env:s31_korvo] build_flags -> the S31 board identity + feature macros.
+#     NRL_BOARD in particular MUST be set or board_pins.h defaults to gezipai.
+#     Firmware version via -DNRL_FW_VERSION=... (optional; nrl_version.h default).
+# Gated on NRL_NATIVE_BUILD (not IDF_TARGET) so PlatformIO's own S31 build, which
+# already registers src as its main component, does not double-register it.
+if(NRL_NATIVE_BUILD)
+    list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/src")
     add_compile_definitions(
         NRL_BOARD=NRL_BOARD_S31_KORVO
         NRL_ENABLE_AUDIO_AFE=1
