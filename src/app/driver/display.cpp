@@ -61,8 +61,11 @@ static const char *TAG = "LCD";
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_rgb.h>
-#include <esp_lcd_touch.h>
 #if NRL_DISPLAY_BUS_RGB
+// Touch is only wired on the RGB-panel path (all esp_lcd_touch* usage below is
+// under NRL_DISPLAY_BUS_RGB). Keeping the include out of the ST7789 path avoids
+// pulling the esp_lcd_touch component on gezipai, which has no touch.
+#include <esp_lcd_touch.h>
 #include <esp_lcd_touch_gt1151.h>
 #endif
 #include <esp_lcd_panel_vendor.h>

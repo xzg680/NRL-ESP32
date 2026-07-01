@@ -48,6 +48,7 @@ set(app_priv_requires
     esp_http_server
     esp_lcd
     esp_netif
+    esp_ringbuf
     esp_partition
     esp_psram
     esp_timer
