@@ -248,7 +248,7 @@ python -m http.server 8000 -d web-flasher
 
 1. 连接设备配置 AP，或访问设备在局域网中的 IP。
 2. 打开 `http://192.168.4.1/update`，或从配置首页点击 `Firmware update`。
-3. 上传 `.pio/build/gezipai/firmware.bin`（BH4TDV 板用 `.pio/build/bh4tdv/firmware.bin`）。
+3. 上传对应板子的应用固件 `build/<板名>/nrl-esp32.bin`（例如格子派 `build/gezipai/nrl-esp32.bin`、BH4TDV `build/bh4tdv/nrl-esp32.bin`、S31 `build/s31_korvo/nrl-esp32.bin`）。
 4. 上传完成后设备会自动重启到新固件。
 
 注意：WiFi OTA 需要 `part.csv` 中的 `app0/app1` 双 OTA 分区布局。旧分区布局设备应先用 USB 网页刷机或串口刷机更新分区表。

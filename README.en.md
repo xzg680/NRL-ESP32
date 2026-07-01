@@ -196,7 +196,7 @@ After the device is running the dual OTA partition layout, firmware can be updat
 
 1. Connect to the device configuration AP, or browse to the device IP on your LAN.
 2. Open `http://192.168.4.1/update`, or click `Firmware update` on the setup page.
-3. Upload `.pio/build/gezipai/firmware.bin` (use `.pio/build/bh4tdv/firmware.bin` for the BH4TDV board).
+3. Upload the board's application image `build/<board>/nrl-esp32.bin` (e.g. `build/gezipai/nrl-esp32.bin`, `build/bh4tdv/nrl-esp32.bin`, or `build/s31_korvo/nrl-esp32.bin`).
 4. The device reboots automatically after a successful upload.
 
 Note: WiFi OTA requires the `app0/app1` dual OTA layout from `part.csv`. Devices using the old partition layout should first be updated with USB web flashing or serial flashing so the new partition table is installed.
