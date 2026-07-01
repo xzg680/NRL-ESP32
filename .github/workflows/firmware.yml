@@ -150,8 +150,9 @@ jobs:
       - name: Build S31 firmware (ESP-IDF 6.2)
         uses: espressif/esp-idf-ci-action@v1
         with:
-          # v6.2 has no stable Docker tag yet; use the release branch image.
-          esp_idf_version: release-v6.2
+          # No v6.2 / release-v6.2 Docker tag exists yet, so track the rolling
+          # master image (espressif/idf:latest), which is >= 6.2 and has esp32s31.
+          esp_idf_version: latest
           target: esp32s31
           command: >-
             python3 scripts/fetch_lvgl.py &&
