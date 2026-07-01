@@ -9,8 +9,9 @@
 // Board variant switch
 //   NRL_BOARD_GEZIPAI  -- 格子派 (default)
 //   NRL_BOARD_BH4TDV   -- BH4TDV 3188 NRL
-// Set NRL_BOARD below, or override from platformio.ini with:
-//   build_flags = -DNRL_BOARD=NRL_BOARD_BH4TDV
+// The native build passes this per board via -DNRL_BOARD_ID (see the top-level
+// CMakeLists.txt NRL_NATIVE_BUILD block / scripts/build.py); it defaults to
+// gezipai below only if nothing sets it.
 // ============================================================
 #define NRL_BOARD_GEZIPAI   0
 #define NRL_BOARD_BH4TDV    1
