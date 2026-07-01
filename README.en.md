@@ -171,14 +171,24 @@ GitHub Actions builds all three boards natively with the official ESP-IDF image 
 
 ### USB Web Flashing
 
-The `web-flasher/` page is intended for first installation or recovery. It writes the bootloader, partition table, OTA data, and `app0` firmware.
+The `web-flasher/` page is intended for first installation or recovery. It writes the bootloader, partition table, OTA data, application firmware, and esp-sr models.
 
-> Note: USB web flashing (`scripts/stage_web_flasher.py` + `web-flasher/`) was a
-> PlatformIO/Arduino flow and has not yet been ported to the native ESP-IDF
-> build, so it is currently unavailable. For now flash over serial with
-> `python scripts/build.py <board> flash`.
+> Only the two ESP32-S3 boards (`gezipai` / `bh4tdv`) are supported. The ESP32-S31
+> is not supported by esptool-js, so flash it over serial
+> (`python scripts/build.py s31_korvo flash`).
 
-Then open `http://localhost:8000` in Chrome or Edge and install the firmware over USB serial.
+Build both boards, then stage the page (`stage_web_flasher.py` reads each
+`build/<board>/flasher_args.json` for the image offsets and writes the
+esp-web-tools manifests):
+
+```powershell
+python scripts/build.py gezipai build
+python scripts/build.py bh4tdv build
+python scripts/stage_web_flasher.py
+python -m http.server 8000 -d web-flasher
+```
+
+Then open `http://localhost:8000` in Chrome or Edge and install the firmware over USB serial. (CI also bundles this in the `web-flasher` job and publishes `web-flasher-<version>.zip` to the Release on tags.)
 
 ### WiFi Web Flashing
 

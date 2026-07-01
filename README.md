@@ -224,13 +224,23 @@ GitHub Actions 会在每次 push、pull request 或手动触发时，用官方 E
 
 ### USB 网页刷机
 
-工程提供 `web-flasher/` 页面，适合首次烧录或恢复设备。它会写入 bootloader、分区表、OTA data 和 `app0` 固件。
+工程提供 `web-flasher/` 页面，适合首次烧录或恢复设备。它会写入 bootloader、分区表、OTA data、应用固件和 esp-sr 模型。
 
-> 注意：USB 网页刷机（`scripts/stage_web_flasher.py` + `web-flasher/`）原为
-> PlatformIO/Arduino 流程，尚未适配原生 ESP-IDF 构建，暂不可用。目前请用上面的
-> `python scripts/build.py <板名> flash` 直接通过串口烧录。
+> 仅支持两块 ESP32-S3 板（`gezipai` / `bh4tdv`）。ESP32-S31 因 esptool-js 不支持，
+> 只能串口烧录（`python scripts/build.py s31_korvo flash`）。
+
+先编译这两块板，再打包页面（`stage_web_flasher.py` 从 `build/<board>/flasher_args.json`
+读取各镜像的偏移并生成 esp-web-tools manifest）：
+
+```powershell
+python scripts/build.py gezipai build
+python scripts/build.py bh4tdv build
+python scripts/stage_web_flasher.py
+python -m http.server 8000 -d web-flasher
+```
 
 然后用 Chrome 或 Edge 打开 `http://localhost:8000`，通过 USB 串口安装固件。
+（CI 也会在 `web-flasher` 任务里自动打包，打 tag 时把 `web-flasher-<版本>.zip` 发布到 Release。）
 
 ### WiFi 网页刷机
 
