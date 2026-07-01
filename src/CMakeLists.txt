@@ -34,6 +34,10 @@ set(app_priv_requires
     app_update
     bt
     driver
+    efuse
+    esp_adc
+    espressif__esp_codec_dev
+    esp_coex
     esp_driver_usb_serial_jtag
     esp_event
     esp_http_server
@@ -46,6 +50,7 @@ set(app_priv_requires
     espressif__esp-sr
     lwip
     nvs_flash
+    spi_flash
 )
 # BLE provisioning (ble_config.cpp) uses the NimBLE host via esp-nimble-cpp.
 # S31 instead uses the Bluedroid host (Classic BT + HFP for a BT headset); the
