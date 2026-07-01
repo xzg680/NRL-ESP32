@@ -3,7 +3,7 @@ dependencies:
     version: ">=2.0.0"
   # Audio codec HAL used directly by the ES7210/ES8311/ES8389 drivers on every
   # board. On S31 the korvo BSP also pulls it (^1.5.9); declare it here too so
-  # gezipai/bh4tdv (no BSP) resolve it as well. Keep the range compatible.
+  # gezipai/bh4tdv (no BSP) resolve it as well.
   espressif/esp_codec_dev:
     version: "^1.5.9"
   # esp-nimble-cpp: pure-IDF C++ wrapper around the NimBLE host stack used by
@@ -16,9 +16,5 @@ dependencies:
   # because the IDF component manager would (a) overwrite it from the
   # registry and (b) prune the directory on reconfigure if its lock file
   # doesn't reference it.
-  # Keep this at >=6.0.1 so the PlatformIO gezipai/bh4tdv build (espressif32
-  # 7.0.1 ships IDF 6.0.1) still resolves. S31's real >=6.1 requirement is met by
-  # the native ESP-IDF image in the build-s31 CI job, not by this manifest line;
-  # bumping this to 6.1.0 only breaks the 6.0.1 PlatformIO boards.
   idf:
-    version: ">=6.0.1"
+    version: ">=6.1.0"

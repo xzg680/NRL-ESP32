@@ -30,6 +30,10 @@ endif()
 # already registers src as its main component, does not double-register it.
 if(NRL_NATIVE_BUILD)
     list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/src")
+    # Source files carry UTF-8 Chinese string literals (UI text). PlatformIO's
+    # [env] build_flags forced UTF-8 in/out charset; reproduce that so the text
+    # isn't mangled on a non-UTF-8 host (e.g. a Windows console). No-op on Linux.
+    add_compile_options(-finput-charset=UTF-8 -fexec-charset=UTF-8 -fextended-identifiers)
     add_compile_definitions(
         NRL_BOARD=${NRL_BOARD_ID}
         NRL_ENABLE_AUDIO_AFE=1

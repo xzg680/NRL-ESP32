@@ -15,6 +15,11 @@ TARGET = PROJECT_DIR / "src" / "idf_component.yml"
 CONTENT = """dependencies:
   espressif/esp-sr:
     version: ">=2.0.0"
+  # Audio codec HAL used directly by the ES7210/ES8311/ES8389 drivers on every
+  # board. On S31 the korvo BSP also pulls it (^1.5.9); declare it here too so
+  # gezipai/bh4tdv (no BSP) resolve it as well.
+  espressif/esp_codec_dev:
+    version: "^1.5.9"
   # esp-nimble-cpp: pure-IDF C++ wrapper around the NimBLE host stack used by
   # src/lib/ble_config.cpp. Requires CONFIG_BT_NIMBLE_ENABLED=y (set in
   # sdkconfig.defaults); Bluedroid must be off (mutually exclusive stacks).

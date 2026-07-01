@@ -38,6 +38,11 @@ set(app_priv_requires
     esp_adc
     espressif__esp_codec_dev
     esp_coex
+    esp_driver_gpio
+    esp_driver_i2c
+    esp_driver_i2s
+    esp_driver_spi
+    esp_driver_uart
     esp_driver_usb_serial_jtag
     esp_event
     esp_http_server
