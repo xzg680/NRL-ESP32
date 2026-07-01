@@ -20,6 +20,11 @@ bool NRLAudioBridge_GetRemoteCaller(char *callsign, size_t callsign_size, unsign
 
 void NRLAudioBridge_ApplyConfig(bool restart_wifi, bool restart_udp);
 
+// Feed externally-captured microphone audio (PCM16 mono 8 kHz) into the network
+// uplink, exactly as the onboard mic path does. Used by the Bluetooth HFP link
+// so a headset mic's audio is transmitted. Subject to the same PTT gating.
+void NRLAudioBridge_FeedExternalMic(const short *pcm8k, size_t sample_count);
+
 // Poll the USB debug serial for AT commands typed by the user. Lines are
 // terminated by CR/LF; e.g. "AT" lists commands, "AT+WIFI_SSID=MyNet" sets it.
 void NRLAudioBridge_PollSerialConsole(void);

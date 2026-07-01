@@ -1,3 +1,31 @@
+# --- RGB LCD notes (S31) ---
+# The S31 RGB panel streams two full framebuffers straight from PSRAM via GDMA
+# (no bounce buffer; display_s31.cpp) and needs PSRAM at 250 MHz for the bandwidth
+# (set in sdkconfig.defaults.esp32s31). Do NOT enable CONFIG_LCD_RGB_RESTART_IN_VSYNC
+# or CONFIG_LCD_RGB_ISR_IRAM_SAFE: both corrupt/flicker this board. Because GDMA
+# reads PSRAM directly (bypassing the CPU cache), flash/codec writes that disable
+# the cache no longer disturb the panel, so there is no volume-change drift.
+
+# --- Linker: orphan section handling ---
+# PlatformIO's toolchain-riscv32-esp (and the xtensa one) link against picolibc,
+# which emits .fini_array / .fini_array_onexit sections (global destructors /
+# atexit). ESP-IDF's linker scripts are newlib-oriented and don't place those,
+# so with the default CONFIG_COMPILER_ORPHAN_SECTIONS_ERROR a clean link fails
+# with "unplaced orphan section `.fini_array`". The IDF-bundled toolchain used by
+# the official examples is newlib and never hits this. Demote to a warning so the
+# linker just places the (never-executed on an embedded app) sections.
+CONFIG_COMPILER_ORPHAN_SECTIONS_WARNING=y
+
+# --- esp_err_to_name lookup ---
+# Disabled because ESP-IDF 6.2 generates per-component <name>_esp_err_codes.c
+# sources via an idf_define_esp_err_codes() CMake custom command (see
+# tools/cmake/err_codes.cmake). PlatformIO espressif32 7.0.1 lists those sources
+# for compilation but never runs the generator, so the build fails with
+# "app_update_esp_err_codes.c not found". Turning the lookup off makes
+# idf_define_esp_err_codes() a no-op (no generated source). Trade-off:
+# esp_err_to_name() returns the numeric code instead of a human-readable string.
+# CONFIG_ESP_ERR_TO_NAME_LOOKUP is not set
+
 CONFIG_FREERTOS_HZ=1000
 # CONFIG_ESPTOOLPY_FLASHSIZE_2MB is not set
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

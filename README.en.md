@@ -140,38 +140,55 @@ When downlink network voice is received, the firmware enables PTT and starts fee
 
 ## Build and Flash
 
-This project uses PlatformIO with two board environments: `gezipai` (格子派) and `bh4tdv` (BH4TDV 3188), selected via `-DNRL_BOARD`.
+This project builds with native ESP-IDF (>= 6.1, which supports the ESP32-S31); PlatformIO is no longer used. There are three boards: `gezipai` (格子派, ESP32-S3), `bh4tdv` (BH4TDV 3188, ESP32-S3) and `s31_korvo` (ESP32-S31-Korvo-1, ESP32-S31).
+
+One-time ESP-IDF toolchain install:
 
 ```powershell
-platformio run                        # build both boards
-platformio run -e gezipai             # build 格子派 only
-platformio run -e gezipai -t upload   # build and flash 格子派
+C:\esp\esp-idf\install.ps1 esp32s3,esp32s31
 ```
 
-Serial monitor:
+Then activate the ESP-IDF environment in each new terminal:
 
 ```powershell
-platformio device monitor -b 115200
+C:\esp\esp-idf\export.ps1        # Linux/macOS: . export.sh
 ```
 
-The partition table is `part.csv`, and the current application partition is `app0`.
-During build, `scripts/fix_size_per_env.py` adjusts PlatformIO's maximum firmware size to the actual `app0` size from `part.csv`.
+Build/flash/monitor by board name (first arg is the board; the rest is passed through to idf.py):
 
-GitHub Actions builds the firmware automatically on every push, pull request, or manual workflow run. The workflow uploads `firmware.bin`, the partition table, bootloader, and USB web flasher files as build artifacts.
+```powershell
+python scripts/build.py gezipai build                     # build 格子派
+python scripts/build.py bh4tdv build                      # build BH4TDV
+python scripts/build.py s31_korvo flash monitor -p COM5   # S31: build + flash + monitor
+python scripts/build.py gezipai menuconfig                # change config
+```
+
+Each board has its own `build/<board>/` directory and `sdkconfig`, so you can switch boards without clobbering. Board config: `NRL_BOARD` is passed per board via `-DNRL_BOARD_ID`; the partition table and other Kconfig come from `sdkconfig.defaults` (S31 also appends `sdkconfig.defaults.esp32s31`; bh4tdv overrides the partition table via `sdkconfig.bh4tdv.defaults`).
+
+GitHub Actions builds all three boards natively with the official ESP-IDF image on every push, pull request, or manual run, uploading each board's `firmware` / `partition-table` / `bootloader` as artifacts and publishing to a Release on tags.
 
 ## Firmware Flashing
 
 ### USB Web Flashing
 
-The `web-flasher/` page is intended for first installation or recovery. It writes the bootloader, partition table, OTA data, and `app0` firmware.
+The `web-flasher/` page is intended for first installation or recovery. It writes the bootloader, partition table, OTA data, application firmware, and esp-sr models.
+
+> Only the two ESP32-S3 boards (`gezipai` / `bh4tdv`) are supported. The ESP32-S31
+> is not supported by esptool-js, so flash it over serial
+> (`python scripts/build.py s31_korvo flash`).
+
+Build both boards, then stage the page (`stage_web_flasher.py` reads each
+`build/<board>/flasher_args.json` for the image offsets and writes the
+esp-web-tools manifests):
 
 ```powershell
-platformio run
+python scripts/build.py gezipai build
+python scripts/build.py bh4tdv build
 python scripts/stage_web_flasher.py
 python -m http.server 8000 -d web-flasher
 ```
 
-Then open `http://localhost:8000` in Chrome or Edge and install the firmware over USB serial.
+Then open `http://localhost:8000` in Chrome or Edge and install the firmware over USB serial. (CI also bundles this in the `web-flasher` job and publishes `web-flasher-<version>.zip` to the Release on tags.)
 
 ### WiFi Web Flashing
 

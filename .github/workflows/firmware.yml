@@ -15,35 +15,55 @@ permissions:
   contents: write
 
 jobs:
+  # All boards build natively with ESP-IDF (no PlatformIO). The repo root is a
+  # native IDF project (CMakeLists.txt); pass -DNRL_NATIVE_BUILD=1 so it
+  # registers src/ as the (whole-archived) main component and applies the board
+  # macros that platformio.ini used to supply. Board config that differs beyond
+  # compile macros (partition table) lives in per-board sdkconfig defaults.
+  #
+  # IDF version: there is no v6.2 / release-v6.2 Docker tag yet, so track the
+  # rolling master image (espressif/idf:latest, which is the 6.2 line and has
+  # esp32s31). Pin to v6.2 once Espressif publishes that tag.
   build:
-    name: PlatformIO (gezipai + bh4tdv)
+    name: ESP-IDF native (${{ matrix.board }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: gezipai
+            target: esp32s3
+            board_macro: NRL_BOARD_GEZIPAI
+            sdkconfig: sdkconfig.defaults
+            lvgl: "true"
+            extra_args: ""
+          - board: bh4tdv
+            target: esp32s3
+            board_macro: NRL_BOARD_BH4TDV
+            sdkconfig: "sdkconfig.defaults;sdkconfig.bh4tdv.defaults"
+            lvgl: "false"
+            extra_args: ""
+          - board: s31_korvo
+            target: esp32s31
+            board_macro: NRL_BOARD_S31_KORVO
+            sdkconfig: sdkconfig.defaults
+            lvgl: "true"
+            extra_args: "-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache PlatformIO
+      - name: Cache LVGL
+        if: matrix.lvgl == 'true'
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/pip
-            ~/.platformio/.cache
-            ~/.platformio/packages
-            components/lvgl
-          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini', 'part.csv', 'part-gezipai.csv', 'scripts/fetch_lvgl.py') }}
-          restore-keys: |
-            ${{ runner.os }}-pio-
+          path: components/lvgl
+          key: ${{ runner.os }}-lvgl-${{ hashFiles('scripts/fetch_lvgl.py') }}
 
-      - name: Install PlatformIO
-        # click<8.2 pin: pioarduino's esptool 5.0.0 is incompatible with the
-        # click 8.2+ get_metavar() signature change.
-        run: python -m pip install --upgrade platformio "click<8.2"
+      - name: Fetch LVGL
+        if: matrix.lvgl == 'true'
+        run: python3 scripts/fetch_lvgl.py
 
       - name: Resolve firmware version
         id: ver
@@ -56,46 +76,42 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved firmware version: ${VERSION}"
 
-      - name: Build firmware (all boards)
-        env:
-          PLATFORMIO_BUILD_FLAGS: -DNRL_FIRMWARE_VERSION=\"${{ steps.ver.outputs.version }}\"
-        run: pio run
-
-      - name: Stage USB web flasher files
-        run: python scripts/stage_web_flasher.py --version "${{ steps.ver.outputs.version }}"
+      - name: Build ${{ matrix.board }} (ESP-IDF)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: latest
+          target: ${{ matrix.target }}
+          # `rm -f sdkconfig` first so our SDKCONFIG_DEFAULTS is applied fresh
+          # (defaults are only read when sdkconfig does not already exist; the
+          # action may have generated one during set-target).
+          command: >-
+            rm -f sdkconfig &&
+            idf.py -DIDF_TARGET=${{ matrix.target }}
+            -DNRL_NATIVE_BUILD=1
+            -DNRL_BOARD_ID=${{ matrix.board_macro }}
+            -DSDKCONFIG_DEFAULTS="${{ matrix.sdkconfig }}"
+            ${{ matrix.extra_args }}
+            -DNRL_FW_VERSION=${{ steps.ver.outputs.version }}
+            build
 
       - name: Collect firmware binaries
+        # The full flashable set (see build/flasher_args.json for offsets):
+        # bootloader, partition-table, ota_data_initial, app, and the esp-sr
+        # models (srmodels). All five are needed for a from-scratch flash.
         run: |
           mkdir -p dist
-          for b in gezipai bh4tdv; do
-            cp ".pio/build/$b/firmware.bin"   "dist/firmware-$b.bin"
-            cp ".pio/build/$b/partitions.bin" "dist/partitions-$b.bin"
-            cp ".pio/build/$b/bootloader.bin" "dist/bootloader-$b.bin"
-          done
-
-      - name: Bundle web-flasher
-        run: |
-          cd web-flasher
-          zip -r "../web-flasher-${{ steps.ver.outputs.version }}.zip" .
+          cp build/nrl-esp32.bin                       "dist/firmware-${{ matrix.board }}.bin"
+          cp build/partition_table/partition-table.bin "dist/partitions-${{ matrix.board }}.bin"
+          cp build/bootloader/bootloader.bin           "dist/bootloader-${{ matrix.board }}.bin"
+          cp build/ota_data_initial.bin                "dist/ota_data-${{ matrix.board }}.bin"
+          cp build/srmodels/srmodels.bin               "dist/srmodels-${{ matrix.board }}.bin"
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nrl-esp32-firmware-${{ steps.ver.outputs.version }}
+          name: nrl-esp32-firmware-${{ matrix.board }}-${{ steps.ver.outputs.version }}
           if-no-files-found: error
-          path: |
-            dist/firmware-gezipai.bin
-            dist/firmware-bh4tdv.bin
-            dist/partitions-gezipai.bin
-            dist/partitions-bh4tdv.bin
-            dist/bootloader-gezipai.bin
-            dist/bootloader-bh4tdv.bin
-            web-flasher/index.html
-            web-flasher/manifest-gezipai.json
-            web-flasher/manifest-bh4tdv.json
-            web-flasher/firmware/gezipai/*.bin
-            web-flasher/firmware/bh4tdv/*.bin
-            web-flasher-${{ steps.ver.outputs.version }}.zip
+          path: dist/*-${{ matrix.board }}.bin
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -105,11 +121,80 @@ jobs:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            dist/firmware-gezipai.bin
-            dist/firmware-bh4tdv.bin
-            dist/partitions-gezipai.bin
-            dist/partitions-bh4tdv.bin
-            dist/bootloader-gezipai.bin
-            dist/bootloader-bh4tdv.bin
+          files: dist/*-${{ matrix.board }}.bin
+
+  # USB browser flasher (esp-web-tools) for the two ESP32-S3 boards only:
+  # esptool-js has no ESP32-S31 support, so s31_korvo is serial-only. Builds both
+  # S3 boards into separate build/<board>/ dirs, then scripts/stage_web_flasher.py
+  # reads each build/<board>/flasher_args.json to copy the images + write the
+  # esp-web-tools manifests.
+  web-flasher:
+    name: Bundle web-flasher (S3)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache LVGL
+        uses: actions/cache@v4
+        with:
+          path: components/lvgl
+          key: ${{ runner.os }}-lvgl-${{ hashFiles('scripts/fetch_lvgl.py') }}
+
+      - name: Fetch LVGL
+        run: python3 scripts/fetch_lvgl.py
+
+      - name: Resolve firmware version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.0.0+$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build gezipai + bh4tdv (ESP-IDF)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: latest
+          target: esp32s3
+          command: >-
+            idf.py -B build/gezipai -DIDF_TARGET=esp32s3 -DNRL_NATIVE_BUILD=1
+            -DNRL_BOARD_ID=NRL_BOARD_GEZIPAI -DSDKCONFIG=build/gezipai/sdkconfig
+            -DSDKCONFIG_DEFAULTS=sdkconfig.defaults
+            -DNRL_FW_VERSION=${{ steps.ver.outputs.version }} build &&
+            idf.py -B build/bh4tdv -DIDF_TARGET=esp32s3 -DNRL_NATIVE_BUILD=1
+            -DNRL_BOARD_ID=NRL_BOARD_BH4TDV -DSDKCONFIG=build/bh4tdv/sdkconfig
+            "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.bh4tdv.defaults"
+            -DNRL_FW_VERSION=${{ steps.ver.outputs.version }} build
+
+      - name: Stage web-flasher
+        run: python3 scripts/stage_web_flasher.py --version "${{ steps.ver.outputs.version }}"
+
+      - name: Bundle web-flasher zip
+        run: |
+          cd web-flasher
+          zip -r "../web-flasher-${{ steps.ver.outputs.version }}.zip" .
+
+      - name: Upload web-flasher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nrl-esp32-web-flasher-${{ steps.ver.outputs.version }}
+          if-no-files-found: error
+          path: |
             web-flasher-${{ steps.ver.outputs.version }}.zip
+            web-flasher/index.html
+            web-flasher/manifest-gezipai.json
+            web-flasher/manifest-bh4tdv.json
+            web-flasher/firmware/gezipai/*.bin
+            web-flasher/firmware/bh4tdv/*.bin
+
+      - name: Publish web-flasher to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: web-flasher-${{ steps.ver.outputs.version }}.zip

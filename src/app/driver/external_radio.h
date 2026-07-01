@@ -86,6 +86,8 @@ struct ExternalRadioConfig {
     // ~200 Hz cutoff at 8 kHz). Strips DC offset and low-frequency rumble
     // before AEC / network uplink. See AUDIO_SetMicHpfEnabled().
     bool mic_hpf_enabled;
+    // Route the project's voice through a Bluetooth headset (HFP). S31 only.
+    bool bt_enabled;
     uint16_t ptt_timeout_s;
     // Battery-voltage calibration factor, in units of 1/1000 (1000 = 1.000x).
     // The raw ADC reading is multiplied by this divided by 1000 to compensate
@@ -150,6 +152,9 @@ bool EXTERNAL_RADIO_SetAiNoiseEnabled(bool enabled, bool persist);
 // Software microphone high-pass filter (~200 Hz cutoff). Takes effect
 // immediately on the running passthrough task; no codec restart needed.
 bool EXTERNAL_RADIO_SetMicHpfEnabled(bool enabled, bool persist);
+// Enable/disable the Bluetooth-headset (HFP) voice link. Persists the choice and
+// brings the BT stack up/down immediately. No-op on non-S31 boards.
+bool EXTERNAL_RADIO_SetBtEnabled(bool enabled, bool persist);
 // PTT button auto-off / maximum continuous transmit time, in seconds. A short
 // press latches transmit on; it is forced off again after this many seconds.
 bool EXTERNAL_RADIO_SetPttTimeout(uint16_t value, bool persist);

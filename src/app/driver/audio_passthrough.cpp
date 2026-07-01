@@ -657,6 +657,19 @@ extern "C" bool AUDIO_SetupI2S(void) {
     return i2s_setup();
 }
 
+extern "C" bool AUDIO_GetI2SHandles(i2s_chan_handle_t *tx_handle, i2s_chan_handle_t *rx_handle) {
+    if (!s_i2s_ready || s_i2s_tx == nullptr || s_i2s_rx == nullptr) {
+        return false;
+    }
+    if (tx_handle != nullptr) {
+        *tx_handle = s_i2s_tx;
+    }
+    if (rx_handle != nullptr) {
+        *rx_handle = s_i2s_rx;
+    }
+    return true;
+}
+
 extern "C" bool AUDIO_IsPassthroughRunning(void) {
     return s_passthrough_task != nullptr;
 }

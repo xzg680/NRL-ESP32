@@ -11,6 +11,9 @@ void STATUS_IO_Init(void);
 void STATUS_IO_Poll(void);
 void STATUS_IO_SetPttActive(bool active);
 void STATUS_IO_NotifyHeartbeatReceived(void);
+// Hold-to-talk from a touch UI region (S31): true = key up (transmit), false =
+// release. No-op on boards whose STATUS_IO build doesn't implement it.
+void STATUS_IO_SetSoftPtt(bool held);
 bool STATUS_IO_IsSqlActive(void);
 bool STATUS_IO_IsPttActive(void);
 

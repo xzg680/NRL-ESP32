@@ -10,6 +10,7 @@
 
 #include "../lib/ble_config.h"
 #include "../lib/nrl_audio_bridge.h"
+#include "../lib/nrl_bt_hfp.h"
 #include "../lib/nrl_usb_console.h"
 #include "../lib/nrl_version.h"
 #include "../lib/wifi_config_portal.h"
@@ -17,6 +18,7 @@
 #include "driver/display.h"
 #include "driver/es7210.h"
 #include "driver/es8311.h"
+#include "driver/es8389.h"
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
 
@@ -63,6 +65,7 @@ static void initSystem()
 static void initApp()
 {
     EXTERNAL_RADIO_Init();
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
         ES8311_ApplyAudioConfig(config->mic_volume,
                                 config->line_out_volume,
@@ -104,10 +107,15 @@ static void initApp()
                                 config->adceq_b2);
         AUDIO_SetMicHpfEnabled(config->mic_hpf_enabled);
     }
+#else
+    if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
+        AUDIO_SetMicHpfEnabled(config->mic_hpf_enabled);
+    }
+#endif
 
     STATUS_IO_Init();
 
-#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
     // Bring the LCD up early so it shows a status frame while WiFi/BLE start.
     Display_Init();
 #endif
@@ -127,6 +135,14 @@ static void initApp()
         ESP_LOGE(TAG, "NRL audio bridge init failed.");
     }
 
+    // Bluetooth headset (HFP) voice link. Brought up only if enabled in config;
+    // on non-S31 boards these are no-ops.
+    NRL_BtHfp_Init();
+    if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
+        NRL_BtHfp_SetEnabled(config->bt_enabled);
+    }
+
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (ES8311_Init()) {
         ESP_LOGI(TAG, "ES8311 ready.");
     } else {
@@ -136,6 +152,17 @@ static void initApp()
     if (!ES8311_SetReceiveMode()) {
         ESP_LOGE(TAG, "ES8311 set receive mode failed.");
     }
+#elif defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
+    if (ES8389_Init()) {
+        ESP_LOGI(TAG, "ES8389 ready.");
+    } else {
+        ESP_LOGE(TAG, "ES8389 initialization failed.");
+    }
+
+    if (!ES8389_SetReceiveMode()) {
+        ESP_LOGE(TAG, "ES8389 set receive mode failed.");
+    }
+#endif
 
 #if NRL_HAS_ES7210
     // The mic ADC on this board is a separate ES7210 chip. ES8311_Init()
@@ -158,8 +185,9 @@ static void mainLoopTask(void *)
         STATUS_IO_Poll();
         WifiConfigPortal_Poll();
         BLEConfig_Poll();
+        NRL_BtHfp_Poll();
         NRLAudioBridge_PollSerialConsole();
-#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
         Display_Poll();
 #endif
         vTaskDelay(pdMS_TO_TICKS(kPollIntervalMs));

@@ -2,6 +2,7 @@
 
 #include "nrl_at_commands.h"
 #include "nrl_audio_config.h"
+#include "nrl_bt_hfp.h"
 #include "nrl_g711.h"
 #include "nrl_net_compat.h"
 #include "nrl_usb_console.h"
@@ -9,6 +10,7 @@
 #include "wifi_config_portal.h"
 
 #include "driver/audio_passthrough.h"
+#include "driver/board_pins.h"
 #include "driver/es8311.h"
 #include "driver/external_radio.h"
 #include "driver/sci_serial.h"
@@ -463,6 +465,11 @@ static void es8311FrameHook(const int16_t *samples,
     if (mode != AUDIO_MODE_RECEIVE) {
         return;
     }
+    // When a Bluetooth headset is connected, its mic is the uplink source;
+    // ignore the onboard mic so audio isn't double-captured.
+    if (NRL_BtHfp_IsConnected()) {
+        return;
+    }
     if (sample_count == kAudioCapture16kFrameSamples) {
         int16_t pcm8k[kAudioCodecFrameSamples];
         const size_t out_count = downsample16kTo8kForG711(samples, sample_count, pcm8k, kAudioCodecFrameSamples);
@@ -589,11 +596,13 @@ static void startDownlinkPlayback(void)
     AUDIO_ClearOutputQueue();
     STATUS_IO_SetPttActive(true);
 
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (!ES8311_SetReceiveMode()) {
         ESP_LOGI(TAG,"[NRL] failed to keep ES8311 in receive/speaker mode");
         STATUS_IO_SetPttActive(false);
         return;
     }
+#endif
 
     s_downlink_playback_active = true;
 }
@@ -650,9 +659,11 @@ static void stopDownlinkPlayback(void)
 
     AUDIO_ClearOutputQueue();
 
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (!ES8311_SetReceiveMode()) {
         ESP_LOGI(TAG,"[NRL] failed to keep ES8311 in receive/speaker mode");
     }
+#endif
 
     s_downlink_playback_active = false;
     s_voice_stream_logged = false;
@@ -723,7 +734,15 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
         s_voice_decode_sample_total += static_cast<uint32_t>(chunk);
         ++s_voice_decode_chunks;
         if (chunk > 0u) {
-            AUDIO_QueueOutputSamples(s_downlink_pcm_buffer, chunk);
+            // Route the downlink to the Bluetooth headset whenever one is
+            // connected; otherwise play it out the onboard codec. Pushing while
+            // merely connected (not just while SCO is already up) lets the buffer
+            // fill and signals nrl_bt_hfp to open the SCO on demand.
+            if (NRL_BtHfp_IsConnected()) {
+                NRL_BtHfp_PushPlayback(s_downlink_pcm_buffer, chunk);
+            } else {
+                AUDIO_QueueOutputSamples(s_downlink_pcm_buffer, chunk);
+            }
         }
         offset += chunk;
     }
@@ -975,6 +994,14 @@ static void bridgeTask(void *)
 }
 
 } // namespace
+
+void NRLAudioBridge_FeedExternalMic(const short *pcm8k, size_t sample_count)
+{
+    // The Bluetooth headset mic already delivers PCM16 mono at 8 kHz, the same
+    // rate sendVoiceFrame expects -- feed it straight in (PTT gating and G.711
+    // packetisation are reused unchanged).
+    sendVoiceFrame(pcm8k, sample_count);
+}
 
 bool NRLAudioBridge_Init(void)
 {

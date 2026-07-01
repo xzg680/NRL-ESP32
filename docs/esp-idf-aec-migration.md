@@ -35,7 +35,7 @@ Important files in the reference project:
 
 - `main/idf_component.yml`
   - Uses ESP-IDF component manager.
-  - Requires `idf >=6.0.1`.
+  - Requires `idf >=6.1.0`.
   - Uses `espressif/esp-sr` and `espressif/esp_codec_dev`.
 - `sdkconfig.defaults.esp32s3`
   - Enables PSRAM for ESP32-S3.
@@ -95,7 +95,7 @@ No ESP-SR AEC should be compiled or initialized for this board.
 Target ESP-IDF version:
 
 ```text
-ESP-IDF 6.0.1 or newer
+ESP-IDF 6.1.0 or newer
 ```
 
 Core dependencies:
@@ -105,7 +105,7 @@ dependencies:
   espressif/esp-sr: "~2.1.5"
   espressif/esp_codec_dev: "~1.4.0"
   idf:
-    version: ">=6.0.1"
+    version: ">=6.1.0"
 ```
 
 ## PlatformIO Status
@@ -120,17 +120,17 @@ This PlatformIO release provides:
 
 ```text
 platform-espressif32 7.0.1
-framework-espidf 6.0.1
+framework-espidf 6.1.0
 ```
 
-This satisfies the project's ESP-IDF 6.0.1+ requirement for the migrated
+This satisfies the project's ESP-IDF 6.1.0+ requirement for the migrated
 ESP-IDF path.
 
 Recommended migration route:
 
 ```text
 Keep the existing Arduino gezipai/bh4tdv environments intact.
-Add a new Gezipai-only AEC migration environment using ESP-IDF 6.0.1 or newer.
+Add a new Gezipai-only AEC migration environment using ESP-IDF 6.1.0 or newer.
 Do not add AEC code to the BH4TDV build.
 ```
 

@@ -3,7 +3,9 @@
 #include "board_pins.h"
 #include "eeprom.h"
 #include "es8311.h"
+#include "es8389.h"
 #include "../../lib/nrl_audio_config.h"
+#include "../../lib/nrl_bt_hfp.h"
 #if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
 #include "aec/aec_processor.h"
 #endif
@@ -360,6 +362,7 @@ static void applyDefaultAudioConfig(void)
     s_config.aec_reference_source = defaultAecReferenceSource();
     s_config.ai_noise_enabled = false;
     s_config.mic_hpf_enabled = true;
+    s_config.bt_enabled = false;
 }
 
 static void loadAdcRegisters(const uint8_t reg14,
@@ -396,6 +399,7 @@ static void loadAdcRegisters(const uint8_t reg14,
 
 static void applyAudioConfigToCodec(void)
 {
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     ES8311_ApplyAudioConfig(s_config.mic_volume,
                             s_config.line_out_volume,
                             s_config.hp_drive_enabled,
@@ -434,6 +438,10 @@ static void applyAudioConfigToCodec(void)
                             s_config.adceq_a2,
                             s_config.adceq_b1,
                             s_config.adceq_b2);
+#endif
+#if defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
+    ES8389_SetOutputVolume(s_config.line_out_volume);
+#endif
     // The mic HPF is a pure-software filter (no I2C registers involved), so
     // it is pushed to the codec driver separately from ES8311_ApplyAudioConfig.
     AUDIO_SetMicHpfEnabled(s_config.mic_hpf_enabled);
@@ -645,6 +653,10 @@ static bool loadPersistedConfig(void)
         // reserved3[1] holds the software mic HPF flag (~200 Hz). Same
         // "0 == not written yet, treat as default" pattern as AEC above.
         s_config.mic_hpf_enabled = persisted.reserved3[1] != kPersistedFlagOff;
+        // reserved3[4] holds the Bluetooth-headset enable flag. Defaults OFF, so
+        // (unlike the flags above) an unwritten 0 must read as false -- match the
+        // explicit "on" sentinel instead of "not off".
+        s_config.bt_enabled = persisted.reserved3[4] == kPersistedFlagOn;
         if (persisted.reserved3[3] == kPersistedAecRefMic) {
             s_config.aec_reference_source = EXTERNAL_RADIO_AEC_REF_MIC;
         } else if (persisted.reserved3[3] == kPersistedAecRefNetwork) {
@@ -662,6 +674,7 @@ static bool loadPersistedConfig(void)
         s_config.aec_reference_source = defaultAecReferenceSource();
         s_config.ai_noise_enabled = false;
         s_config.mic_hpf_enabled = true;
+        s_config.bt_enabled = false;
     }
     if (persisted.version == kConfigVersion) {
         loadAdcRegisters(persisted.adc_reg14,
@@ -745,6 +758,7 @@ static bool savePersistedConfig(void)
     persisted.reserved3[0] = s_config.aec_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[1] = s_config.mic_hpf_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[2] = s_config.ai_noise_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.reserved3[4] = s_config.bt_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[3] = (s_config.aec_reference_source == EXTERNAL_RADIO_AEC_REF_MIC)
                                  ? kPersistedAecRefMic
                                  : kPersistedAecRefNetwork;
@@ -1367,6 +1381,17 @@ bool EXTERNAL_RADIO_SetMicHpfEnabled(const bool enabled, const bool persist)
     EXTERNAL_RADIO_Init();
     s_config.mic_hpf_enabled = enabled;
     AUDIO_SetMicHpfEnabled(enabled);
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetBtEnabled(const bool enabled, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.bt_enabled = enabled;
+    NRL_BtHfp_SetEnabled(enabled);
     if (persist) {
         return savePersistedConfig();
     }

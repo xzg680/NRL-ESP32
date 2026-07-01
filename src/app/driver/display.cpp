@@ -31,8 +31,9 @@
 #include "display.h"
 
 #include "board_pins.h"
+#include "s31_i2c.h"
 
-#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD == NRL_BOARD_GEZIPAI
 
 #include "../../lib/nrl_audio_bridge.h"
 #include "external_radio.h"
@@ -59,6 +60,14 @@ static const char *TAG = "LCD";
 #include <esp_adc/adc_oneshot.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_lcd_panel_rgb.h>
+#if NRL_DISPLAY_BUS_RGB
+// Touch is only wired on the RGB-panel path (all esp_lcd_touch* usage below is
+// under NRL_DISPLAY_BUS_RGB). Keeping the include out of the ST7789 path avoids
+// pulling the esp_lcd_touch component on gezipai, which has no touch.
+#include <esp_lcd_touch.h>
+#include <esp_lcd_touch_gt1151.h>
+#endif
 #include <esp_lcd_panel_vendor.h>
 
 #include <lvgl.h>
@@ -67,6 +76,13 @@ namespace {
 
 constexpr int kWidth = NRL_DISPLAY_WIDTH;
 constexpr int kHeight = NRL_DISPLAY_HEIGHT;
+
+#ifndef NRL_DISPLAY_BUS_ST7789
+#define NRL_DISPLAY_BUS_ST7789 0
+#endif
+#ifndef NRL_DISPLAY_BUS_RGB
+#define NRL_DISPLAY_BUS_RGB 0
+#endif
 
 // LVGL partial render buffer height, in scan lines.
 constexpr int kBufLines = 60;
@@ -101,6 +117,11 @@ esp_lcd_panel_handle_t s_panel = nullptr;
 
 lv_display_t *s_disp = nullptr;
 uint8_t *s_draw_buf = nullptr;
+#if NRL_DISPLAY_BUS_RGB
+esp_lcd_touch_handle_t s_touch = nullptr;
+esp_lcd_panel_io_handle_t s_touch_io = nullptr;
+lv_indev_t *s_touch_indev = nullptr;
+#endif
 
 lv_obj_t *s_lbl_caption = nullptr;
 lv_obj_t *s_lbl_callsign = nullptr;
@@ -110,6 +131,7 @@ lv_obj_t *s_lbl_wifi = nullptr;
 lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_batt = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
+lv_obj_t *s_lbl_hint = nullptr;
 
 adc_oneshot_unit_handle_t s_adc = nullptr;
 adc_cali_handle_t s_adc_cali = nullptr;
@@ -130,17 +152,66 @@ char s_shown_batt[20] = {};
 char s_shown_ip[96] = {};
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
 
+void refreshVolume();
+
 //============================ Panel bring-up =================================
 
 bool initPanel()
 {
+#if NRL_PIN_DISPLAY_BL >= 0
     // Backlight off until the first frame is drawn, to avoid a white flash.
     gpio_config_t bl_cfg = {};
     bl_cfg.pin_bit_mask = 1ULL << NRL_PIN_DISPLAY_BL;
     bl_cfg.mode = GPIO_MODE_OUTPUT;
     gpio_config(&bl_cfg);
     gpio_set_level(static_cast<gpio_num_t>(NRL_PIN_DISPLAY_BL), 0);
+#endif
 
+#if NRL_DISPLAY_BUS_RGB
+    esp_lcd_rgb_panel_config_t panel_cfg = {};
+    panel_cfg.clk_src = LCD_CLK_SRC_DEFAULT;
+    panel_cfg.timings.pclk_hz = 26 * 1000 * 1000;
+    panel_cfg.timings.h_res = kWidth;
+    panel_cfg.timings.v_res = kHeight;
+    panel_cfg.timings.hsync_pulse_width = 1;
+    panel_cfg.timings.hsync_back_porch = 40;
+    panel_cfg.timings.hsync_front_porch = 20;
+    panel_cfg.timings.vsync_pulse_width = 1;
+    panel_cfg.timings.vsync_back_porch = 10;
+    panel_cfg.timings.vsync_front_porch = 5;
+    panel_cfg.timings.flags.pclk_active_neg = true;
+    panel_cfg.data_width = 16;
+    panel_cfg.in_color_format = LCD_COLOR_FMT_RGB565;
+    panel_cfg.out_color_format = LCD_COLOR_FMT_RGB565;
+    panel_cfg.num_fbs = 2;
+    panel_cfg.dma_burst_size = 128;
+    panel_cfg.hsync_gpio_num = static_cast<gpio_num_t>(NRL_PIN_LCD_HSYNC);
+    panel_cfg.vsync_gpio_num = static_cast<gpio_num_t>(NRL_PIN_LCD_VSYNC);
+    panel_cfg.de_gpio_num = static_cast<gpio_num_t>(NRL_PIN_LCD_DE);
+    panel_cfg.pclk_gpio_num = static_cast<gpio_num_t>(NRL_PIN_LCD_PCLK);
+    panel_cfg.disp_gpio_num = static_cast<gpio_num_t>(NRL_PIN_LCD_DISP);
+    panel_cfg.data_gpio_nums[0] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA0);
+    panel_cfg.data_gpio_nums[1] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA1);
+    panel_cfg.data_gpio_nums[2] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA2);
+    panel_cfg.data_gpio_nums[3] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA3);
+    panel_cfg.data_gpio_nums[4] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA4);
+    panel_cfg.data_gpio_nums[5] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA5);
+    panel_cfg.data_gpio_nums[6] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA6);
+    panel_cfg.data_gpio_nums[7] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA7);
+    panel_cfg.data_gpio_nums[8] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA8);
+    panel_cfg.data_gpio_nums[9] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA9);
+    panel_cfg.data_gpio_nums[10] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA10);
+    panel_cfg.data_gpio_nums[11] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA11);
+    panel_cfg.data_gpio_nums[12] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA12);
+    panel_cfg.data_gpio_nums[13] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA13);
+    panel_cfg.data_gpio_nums[14] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA14);
+    panel_cfg.data_gpio_nums[15] = static_cast<gpio_num_t>(NRL_PIN_LCD_DATA15);
+    panel_cfg.flags.fb_in_psram = true;
+    if (esp_lcd_new_rgb_panel(&panel_cfg, &s_panel) != ESP_OK) {
+        ESP_LOGI(TAG,"[LCD] RGB panel init failed");
+        return false;
+    }
+#else
     spi_bus_config_t bus_cfg = {};
     bus_cfg.sclk_io_num = NRL_PIN_DISPLAY_SCLK;
     bus_cfg.mosi_io_num = NRL_PIN_DISPLAY_MOSI;
@@ -174,10 +245,15 @@ bool initPanel()
         ESP_LOGI(TAG,"[LCD] ST7789 init failed");
         return false;
     }
+#endif
 
     esp_lcd_panel_reset(s_panel);
     esp_lcd_panel_init(s_panel);
+#if NRL_DISPLAY_BUS_RGB
+    esp_lcd_panel_invert_color(s_panel, false);
+#else
     esp_lcd_panel_invert_color(s_panel, true);
+#endif
     esp_lcd_panel_swap_xy(s_panel, false);
     esp_lcd_panel_mirror(s_panel, false, false);
     esp_lcd_panel_disp_on_off(s_panel, true);
@@ -211,14 +287,19 @@ void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     esp_lcd_panel_handle_t panel =
         static_cast<esp_lcd_panel_handle_t>(lv_display_get_user_data(disp));
 
+#if NRL_DISPLAY_BUS_ST7789
     const int32_t count = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
     uint16_t *pixels = reinterpret_cast<uint16_t *>(px_map);
     for (int32_t i = 0; i < count; ++i) {
         pixels[i] = static_cast<uint16_t>((pixels[i] >> 8) | (pixels[i] << 8));
     }
+#endif
 
     esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1,
                               area->x2 + 1, area->y2 + 1, px_map);
+#if NRL_DISPLAY_BUS_RGB
+    lv_display_flush_ready(disp);
+#endif
 }
 
 bool initLvgl()
@@ -226,7 +307,11 @@ bool initLvgl()
     lv_init();
 
     const size_t buf_bytes = static_cast<size_t>(kWidth) * kBufLines * 2u;
+#if NRL_DISPLAY_BUS_RGB
+    s_draw_buf = static_cast<uint8_t *>(heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#else
     s_draw_buf = static_cast<uint8_t *>(heap_caps_malloc(buf_bytes, MALLOC_CAP_DMA));
+#endif
     if (s_draw_buf == nullptr) {
         ESP_LOGI(TAG,"[LCD] draw buffer alloc failed");
         return false;
@@ -244,16 +329,112 @@ bool initLvgl()
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_tick_set_cb(lvglTick);
 
+#if NRL_DISPLAY_BUS_ST7789
     esp_lcd_panel_io_callbacks_t io_cbs = {};
     io_cbs.on_color_trans_done = onColorTransDone;
     esp_lcd_panel_io_register_event_callbacks(s_panel_io, &io_cbs, s_disp);
+#endif
     return true;
 }
+
+#if NRL_DISPLAY_BUS_RGB
+void touchRead(lv_indev_t * /*indev*/, lv_indev_data_t *data)
+{
+    if (s_touch == nullptr || data == nullptr) {
+        return;
+    }
+
+    uint16_t x = 0;
+    uint16_t y = 0;
+    uint16_t strength = 0;
+    uint8_t count = 0;
+    esp_lcd_touch_read_data(s_touch);
+    const bool pressed = esp_lcd_touch_get_coordinates(s_touch, &x, &y, &strength, &count, 1);
+    if (pressed && count > 0) {
+        data->point.x = static_cast<int16_t>(x);
+        data->point.y = static_cast<int16_t>(y);
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
+bool initTouch()
+{
+    i2c_master_bus_handle_t i2c_bus = nullptr;
+    if (!S31_I2C_GetBus(&i2c_bus)) {
+        ESP_LOGW(TAG, "[LCD] touch I2C unavailable");
+        return false;
+    }
+
+    esp_lcd_touch_config_t touch_cfg = {};
+    touch_cfg.x_max = kWidth;
+    touch_cfg.y_max = kHeight;
+    touch_cfg.rst_gpio_num = GPIO_NUM_NC;
+    touch_cfg.int_gpio_num = GPIO_NUM_NC;
+    touch_cfg.levels.reset = 0;
+    touch_cfg.levels.interrupt = 0;
+
+    esp_lcd_panel_io_i2c_config_t io_cfg = ESP_LCD_TOUCH_IO_I2C_GT1151_CONFIG();
+    io_cfg.scl_speed_hz = 400000;
+    if (esp_lcd_new_panel_io_i2c(i2c_bus, &io_cfg, &s_touch_io) != ESP_OK) {
+        ESP_LOGW(TAG, "[LCD] touch IO init failed");
+        return false;
+    }
+    if (esp_lcd_touch_new_i2c_gt1151(s_touch_io, &touch_cfg, &s_touch) != ESP_OK) {
+        ESP_LOGW(TAG, "[LCD] GT1151 init failed");
+        return false;
+    }
+
+    s_touch_indev = lv_indev_create();
+    if (s_touch_indev == nullptr) {
+        ESP_LOGW(TAG, "[LCD] touch LVGL indev init failed");
+        return false;
+    }
+    lv_indev_set_type(s_touch_indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_display(s_touch_indev, s_disp);
+    lv_indev_set_read_cb(s_touch_indev, touchRead);
+    ESP_LOGI(TAG, "[LCD] GT1151 touch ready");
+    return true;
+}
+
+void adjustTouchVolume(const int delta)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) {
+        return;
+    }
+    int volume = static_cast<int>(cfg->line_out_volume) + delta;
+    if (volume < 0) {
+        volume = 0;
+    } else if (volume > 255) {
+        volume = 255;
+    }
+    if (volume == static_cast<int>(cfg->line_out_volume)) {
+        return;
+    }
+    EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(volume), true);
+    refreshVolume();
+}
+
+void onTouchButton(lv_event_t *event)
+{
+    const intptr_t id = reinterpret_cast<intptr_t>(lv_event_get_user_data(event));
+    if (id < 0) {
+        adjustTouchVolume(-16);
+    } else if (id > 0) {
+        adjustTouchVolume(16);
+    } else {
+        ESP_LOGI(TAG, "[LCD] config touch action");
+    }
+}
+#endif
 
 //============================ ADC battery sense ==============================
 
 void initBatteryAdc()
 {
+#if defined(NRL_HAS_BATTERY_ADC) && NRL_HAS_BATTERY_ADC
     adc_oneshot_unit_init_cfg_t unit_cfg = {};
     unit_cfg.unit_id = ADC_UNIT_1;
     if (adc_oneshot_new_unit(&unit_cfg, &s_adc) != ESP_OK) {
@@ -264,7 +445,7 @@ void initBatteryAdc()
     adc_oneshot_chan_cfg_t chan_cfg = {};
     chan_cfg.atten = ADC_ATTEN_DB_12;
     chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-    if (adc_oneshot_config_channel(s_adc, ADC_CHANNEL_2, &chan_cfg) != ESP_OK) {
+    if (adc_oneshot_config_channel(s_adc, NRL_BATTERY_ADC_CHANNEL, &chan_cfg) != ESP_OK) {
         ESP_LOGI(TAG,"[LCD] battery ADC channel config failed");
         return;
     }
@@ -272,7 +453,7 @@ void initBatteryAdc()
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
     adc_cali_curve_fitting_config_t cali_cfg = {};
     cali_cfg.unit_id = ADC_UNIT_1;
-    cali_cfg.chan = ADC_CHANNEL_2;
+    cali_cfg.chan = NRL_BATTERY_ADC_CHANNEL;
     cali_cfg.atten = ADC_ATTEN_DB_12;
     cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
     if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_adc_cali) == ESP_OK) {
@@ -293,6 +474,9 @@ void initBatteryAdc()
     if (!s_adc_ready) {
         ESP_LOGI(TAG,"[LCD] battery ADC not calibrated (eFuse missing) -- voltage hidden");
     }
+#else
+    ESP_LOGI(TAG,"[LCD] battery ADC not present on this board");
+#endif
 }
 
 // Reads the raw (uncalibrated) battery voltage in millivolts, or 0 if
@@ -300,6 +484,7 @@ void initBatteryAdc()
 // multiplied by 3 to match the 小智 格子派 board's measurement.
 int readBatteryRawMv()
 {
+#if defined(NRL_HAS_BATTERY_ADC) && NRL_HAS_BATTERY_ADC
     if (!s_adc_ready || s_adc == nullptr || s_adc_cali == nullptr) {
         return 0;
     }
@@ -308,7 +493,7 @@ int readBatteryRawMv()
     int samples = 0;
     for (int i = 0; i < 16; ++i) {
         int raw = 0;
-        if (adc_oneshot_read(s_adc, ADC_CHANNEL_2, &raw) == ESP_OK) {
+        if (adc_oneshot_read(s_adc, NRL_BATTERY_ADC_CHANNEL, &raw) == ESP_OK) {
             sum += raw;
             ++samples;
         }
@@ -322,6 +507,9 @@ int readBatteryRawMv()
         return 0;
     }
     return voltage * 3;
+#else
+    return 0;
+#endif
 }
 
 // Applies the persisted calibration multiplier (battery_cal_milli / 1000) to
@@ -362,11 +550,127 @@ lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
     lv_obj_t *label = lv_label_create(parent);
     lv_obj_set_style_text_font(label, font, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+    lv_obj_set_style_text_letter_space(label, 0, 0);
     return label;
 }
 
+#if NRL_DISPLAY_BUS_RGB
+lv_obj_t *makePanel(lv_obj_t *parent, int x, int y, int w, int h)
+{
+    lv_obj_t *panel = lv_obj_create(parent);
+    lv_obj_remove_style_all(panel);
+    lv_obj_set_pos(panel, x, y);
+    lv_obj_set_size(panel, w, h);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x0B1220), 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x1C2B3D), 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_radius(panel, 8, 0);
+    lv_obj_set_style_pad_all(panel, 14, 0);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    return panel;
+}
+
+lv_obj_t *makeTouchButton(lv_obj_t *parent, int x, int y, int w, int h,
+                          const char *text, intptr_t id)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x142033), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1D4E63), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x29445E), 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_add_event_cb(btn, onTouchButton, LV_EVENT_CLICKED, reinterpret_cast<void *>(id));
+
+    lv_obj_t *label = makeLabel(btn, &lv_font_montserrat_20, kColorCallIdle);
+    lv_obj_center(label);
+    lv_label_set_text(label, text);
+    return btn;
+}
+
+void buildWideUi()
+{
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *top = makeBar(scr, 0, 52);
+    lv_obj_set_style_bg_color(top, lv_color_hex(0x0A111B), 0);
+
+    s_lbl_wifi = makeLabel(top, &lv_font_montserrat_20, kColorSub);
+    lv_obj_align(s_lbl_wifi, LV_ALIGN_LEFT_MID, 22, 0);
+    lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI "  --");
+
+    s_lbl_time = makeLabel(top, &lv_font_montserrat_28, kColorTime);
+    lv_obj_center(s_lbl_time);
+    lv_label_set_text(s_lbl_time, "--:--:--");
+
+    s_lbl_vol = makeLabel(top, &lv_font_montserrat_20, kColorSub);
+    lv_obj_align(s_lbl_vol, LV_ALIGN_RIGHT_MID, -22, 0);
+    lv_label_set_text(s_lbl_vol, LV_SYMBOL_VOLUME_MID " --");
+
+    lv_obj_t *accent = lv_obj_create(scr);
+    lv_obj_remove_style_all(accent);
+    lv_obj_set_pos(accent, 0, 52);
+    lv_obj_set_size(accent, kWidth, 2);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(kColorAccent), 0);
+    lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+
+    lv_obj_t *left = makePanel(scr, 22, 76, 456, 260);
+    s_lbl_caption = makeLabel(left, &lv_font_montserrat_20, kColorCaption);
+    lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_label_set_text(s_lbl_caption, "STANDBY");
+
+    s_lbl_callsign = makeLabel(left, &lv_font_montserrat_48, kColorCallIdle);
+    lv_obj_set_width(s_lbl_callsign, 428);
+    lv_obj_set_style_text_align(s_lbl_callsign, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(s_lbl_callsign, LV_ALIGN_TOP_LEFT, 0, 46);
+    lv_label_set_text(s_lbl_callsign, "----");
+
+    s_lbl_ssid = makeLabel(left, &lv_font_montserrat_28, kColorSub);
+    lv_obj_align(s_lbl_ssid, LV_ALIGN_TOP_LEFT, 2, 118);
+    lv_label_set_text(s_lbl_ssid, "SSID -");
+
+    s_lbl_hint = makeLabel(left, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_hint, 428);
+    lv_obj_align(s_lbl_hint, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_label_set_text(s_lbl_hint, "NRL voice bridge");
+
+    lv_obj_t *right = makePanel(scr, 500, 76, 278, 260);
+    lv_obj_t *net_title = makeLabel(right, &lv_font_montserrat_16, kColorCaption);
+    lv_obj_align(net_title, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_label_set_text(net_title, "NETWORK");
+
+    s_lbl_ip = makeLabel(right, &lv_font_montserrat_20, kColorIp);
+    lv_obj_set_width(s_lbl_ip, 250);
+    lv_obj_align(s_lbl_ip, LV_ALIGN_TOP_LEFT, 0, 34);
+    lv_label_set_long_mode(s_lbl_ip, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_ip, "---");
+
+    lv_obj_t *audio_title = makeLabel(right, &lv_font_montserrat_16, kColorCaption);
+    lv_obj_align(audio_title, LV_ALIGN_TOP_LEFT, 0, 104);
+    lv_label_set_text(audio_title, "POWER");
+
+    s_lbl_batt = makeLabel(right, &lv_font_montserrat_20, kColorSub);
+    lv_obj_align(s_lbl_batt, LV_ALIGN_TOP_LEFT, 0, 138);
+    lv_label_set_text(s_lbl_batt, "--  " LV_SYMBOL_BATTERY_EMPTY);
+
+    makeTouchButton(scr, 22, 362, 180, 78, "VOL-", -1);
+    makeTouchButton(scr, 222, 362, 356, 78, "CONFIG", 0);
+    makeTouchButton(scr, 598, 362, 180, 78, "VOL+", 1);
+}
+#endif
+
 void buildUi()
 {
+#if NRL_DISPLAY_BUS_RGB
+    buildWideUi();
+    return;
+#endif
+
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
@@ -672,6 +976,9 @@ extern "C" void Display_Init(void)
     if (!initLvgl()) {
         return;
     }
+#if NRL_DISPLAY_BUS_RGB
+    initTouch();
+#endif
 
     initBatteryAdc();
     s_battery_mv = readBatteryMv();
@@ -679,9 +986,11 @@ extern "C" void Display_Init(void)
     buildUi();
     lv_refr_now(nullptr);  // paint the first frame before the backlight is lit
 
+#if NRL_PIN_DISPLAY_BL >= 0
     gpio_set_level(static_cast<gpio_num_t>(NRL_PIN_DISPLAY_BL), 1);
+#endif
     s_ready = true;
-    ESP_LOGI(TAG,"[LCD] ST7789 display ready");
+    ESP_LOGI(TAG,"[LCD] display ready");
 }
 
 extern "C" void Display_Poll(void)
@@ -723,11 +1032,11 @@ extern "C" int Display_GetBatteryCalibratedMv(void)
     return applyBatteryCalibration(readBatteryRawMv());
 }
 
-#else // !NRL_HAS_DISPLAY
+#elif NRL_BOARD != NRL_BOARD_S31_KORVO
 
 extern "C" void Display_Init(void) {}
 extern "C" void Display_Poll(void) {}
 extern "C" int Display_GetBatteryRawMv(void) { return 0; }
 extern "C" int Display_GetBatteryCalibratedMv(void) { return 0; }
 
-#endif // NRL_HAS_DISPLAY
+#endif

@@ -1,0 +1,77 @@
+# ESP32-S31-only overrides (auto-appended after sdkconfig.defaults by IDF).
+# These reach the app build only; the 2nd-stage bootloader uses
+# sdkconfig.bootloader.defaults, so none of this can boot-loop it.
+#
+# --- PSRAM speed: 250 MHz (matches the official esp32-s31-korvo example) ---
+# The RGB panel streams its framebuffer straight from PSRAM via GDMA with NO
+# bounce buffer (display_s31.cpp). At the 200 MHz default the PSRAM can't feed the
+# line FIFO fast enough and the image drifts from boot. 250 MHz provides the
+# bandwidth headroom the panel needs. (The S31 PSRAM speed choice is 250/200/100/
+# 40M; there is no 80M, so the shared sdkconfig.defaults' SPIRAM_SPEED_80M is
+# ignored here.) NOTE: do NOT add CONFIG_SPIRAM_XIP_FROM_PSRAM -- XIP needs the
+# bootloader to load flash into PSRAM and boot-loops on this board; 250 MHz alone
+# does not. Because GDMA reads PSRAM directly (bypassing the CPU cache), this also
+# makes the panel immune to the cache-disable during flash/codec writes, so the
+# volume-change drift goes away too.
+CONFIG_SPIRAM_SPEED_250M=y
+
+# Flash auto-suspend: keep the cache alive during config-save flash writes so
+# other CPU code (and any cached PSRAM access) isn't stalled. Harmless alongside
+# the direct-GDBA panel path.
+CONFIG_SPI_FLASH_AUTO_SUSPEND=y
+
+# --- Console on UART0 (not USB-Serial-JTAG) ---
+# The S31-Korvo's USB port is a Silicon Labs CP210x UART bridge wired to UART0,
+# NOT the chip's native USB. The shared sdkconfig.defaults picks
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG (correct for the S3 boards' native USB), but
+# on this board that sends logs/AT to the unconnected USB-JTAG pins, so nothing
+# shows up on COM. Route the console to UART0 so ESP_LOG + the AT console reach
+# the CP210x (the same UART the ROM/bootloader already print on).
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is not set
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# --- Bluetooth: Classic BT + HFP Audio Gateway (for a BT headset) ---
+# S31 has Classic BT in silicon (SOC_BT_CLASSIC_SUPPORTED). The shared
+# sdkconfig.defaults selects the NimBLE host (BLE-only) for ble_config.cpp's BLE
+# Wi-Fi provisioning, but HFP needs the Bluedroid host + Classic BT, and the two
+# hosts are mutually exclusive. So S31 swaps to Bluedroid and drops BLE
+# provisioning (it has the touchscreen config UI + SoftAP portal instead).
+# ble_config.cpp and the esp-nimble-cpp component are compiled out for S31 (see
+# src/lib/ble_config.cpp guard and src/CMakeLists.txt).
+# CONFIG_BT_NIMBLE_ENABLED is not set
+CONFIG_BT_BLUEDROID_ENABLED=y
+# Controller in BR/EDR-only mode (Classic). Auto-enables BT_CTRL_BREDR_ENABLE.
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+# Allow one (e)SCO link for HFP voice -- the controller default is 0 (no audio).
+CONFIG_BT_CTRL_BR_EDR_MAX_SYNC_CONN=1
+# SCO/voice PCM travels over HCI so the app receives/sends it via data callbacks.
+CONFIG_BT_CTRL_BR_EDR_SCO_DATA_PATH_HCI=y
+# Bluedroid Classic profiles: HFP Audio Gateway only (no A2DP, no HFP client).
+CONFIG_BT_CLASSIC_ENABLED=y
+# CONFIG_BT_A2DP_ENABLE is not set
+CONFIG_BT_HFP_ENABLE=y
+CONFIG_BT_HFP_AG_ENABLE=y
+# CONFIG_BT_HFP_CLIENT_ENABLE is not set
+# SCO audio over HCI (PCM frames delivered to the app), narrowband CVSD 8 kHz to
+# match the project's 8 kHz G.711 pipeline (no resample); WBS 16 kHz left off.
+CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
+# CONFIG_BT_HFP_WBS_ENABLE is not set
+# Wi-Fi/BT coexistence: UDP voice (Wi-Fi) and SCO (BT) share the single radio.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# --- Give Bluetooth its own core (core 1); Wi-Fi + app stay on core 0 ---
+# By default the Wi-Fi task, BT controller and Bluedroid host are ALL pinned to
+# core 0 while core 1 sits idle. Core 0 then preempts the BT work two ways:
+#   * the high-priority Wi-Fi task preempts the BT SCO data path while receiving
+#     the downlink stream -> (e)SCO frame jitter heard as a continuous "warble"
+#     (present only while a stream is active, clean once it stops; eSCO
+#     retransmission can't fix it because it is CPU preemption, not RF loss);
+#   * the app/lwIP tasks preempt the controller during connection setup ->
+#     role-switch/LMP collisions and dropped links.
+# Pinning the BT controller + Bluedroid host to the otherwise-idle core 1 gives
+# Bluetooth a dedicated core: stable connections AND clean SCO, while Wi-Fi RX
+# and the app keep core 0.
+# CONFIG_BT_CTRL_PINNED_TO_CORE_CHOICE_0 is not set
+CONFIG_BT_CTRL_PINNED_TO_CORE_CHOICE_1=y
+# CONFIG_BT_BLUEDROID_PINNED_TO_CORE_0 is not set
+CONFIG_BT_BLUEDROID_PINNED_TO_CORE_1=y
