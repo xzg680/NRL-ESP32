@@ -15,35 +15,55 @@ permissions:
   contents: write
 
 jobs:
+  # All boards build natively with ESP-IDF (no PlatformIO). The repo root is a
+  # native IDF project (CMakeLists.txt); pass -DNRL_NATIVE_BUILD=1 so it
+  # registers src/ as the (whole-archived) main component and applies the board
+  # macros that platformio.ini used to supply. Board config that differs beyond
+  # compile macros (partition table) lives in per-board sdkconfig defaults.
+  #
+  # IDF version: there is no v6.2 / release-v6.2 Docker tag yet, so track the
+  # rolling master image (espressif/idf:latest, which is the 6.2 line and has
+  # esp32s31). Pin to v6.2 once Espressif publishes that tag.
   build:
-    name: PlatformIO (gezipai + bh4tdv)
+    name: ESP-IDF native (${{ matrix.board }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: gezipai
+            target: esp32s3
+            board_macro: NRL_BOARD_GEZIPAI
+            sdkconfig: sdkconfig.defaults
+            lvgl: "true"
+            extra_args: ""
+          - board: bh4tdv
+            target: esp32s3
+            board_macro: NRL_BOARD_BH4TDV
+            sdkconfig: "sdkconfig.defaults;sdkconfig.bh4tdv.defaults"
+            lvgl: "false"
+            extra_args: ""
+          - board: s31_korvo
+            target: esp32s31
+            board_macro: NRL_BOARD_S31_KORVO
+            sdkconfig: sdkconfig.defaults
+            lvgl: "true"
+            extra_args: "-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache PlatformIO
+      - name: Cache LVGL
+        if: matrix.lvgl == 'true'
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/pip
-            ~/.platformio/.cache
-            ~/.platformio/packages
-            components/lvgl
-          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini', 'part.csv', 'part-gezipai.csv', 'scripts/fetch_lvgl.py') }}
-          restore-keys: |
-            ${{ runner.os }}-pio-
+          path: components/lvgl
+          key: ${{ runner.os }}-lvgl-${{ hashFiles('scripts/fetch_lvgl.py') }}
 
-      - name: Install PlatformIO
-        # click<8.2 pin: pioarduino's esptool 5.0.0 is incompatible with the
-        # click 8.2+ get_metavar() signature change.
-        run: python -m pip install --upgrade platformio "click<8.2"
+      - name: Fetch LVGL
+        if: matrix.lvgl == 'true'
+        run: python3 scripts/fetch_lvgl.py
 
       - name: Resolve firmware version
         id: ver
@@ -56,46 +76,37 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved firmware version: ${VERSION}"
 
-      - name: Build firmware (all boards)
-        env:
-          PLATFORMIO_BUILD_FLAGS: -DNRL_FIRMWARE_VERSION=\"${{ steps.ver.outputs.version }}\"
-        run: pio run
-
-      - name: Stage USB web flasher files
-        run: python scripts/stage_web_flasher.py --version "${{ steps.ver.outputs.version }}"
+      - name: Build ${{ matrix.board }} (ESP-IDF)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: latest
+          target: ${{ matrix.target }}
+          # `rm -f sdkconfig` first so our SDKCONFIG_DEFAULTS is applied fresh
+          # (defaults are only read when sdkconfig does not already exist; the
+          # action may have generated one during set-target).
+          command: >-
+            rm -f sdkconfig &&
+            idf.py -DIDF_TARGET=${{ matrix.target }}
+            -DNRL_NATIVE_BUILD=1
+            -DNRL_BOARD_ID=${{ matrix.board_macro }}
+            -DSDKCONFIG_DEFAULTS="${{ matrix.sdkconfig }}"
+            ${{ matrix.extra_args }}
+            -DNRL_FW_VERSION=${{ steps.ver.outputs.version }}
+            build
 
       - name: Collect firmware binaries
         run: |
           mkdir -p dist
-          for b in gezipai bh4tdv; do
-            cp ".pio/build/$b/firmware.bin"   "dist/firmware-$b.bin"
-            cp ".pio/build/$b/partitions.bin" "dist/partitions-$b.bin"
-            cp ".pio/build/$b/bootloader.bin" "dist/bootloader-$b.bin"
-          done
-
-      - name: Bundle web-flasher
-        run: |
-          cd web-flasher
-          zip -r "../web-flasher-${{ steps.ver.outputs.version }}.zip" .
+          cp build/nrl-esp32.bin                       "dist/firmware-${{ matrix.board }}.bin"
+          cp build/partition_table/partition-table.bin "dist/partitions-${{ matrix.board }}.bin"
+          cp build/bootloader/bootloader.bin           "dist/bootloader-${{ matrix.board }}.bin"
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nrl-esp32-firmware-${{ steps.ver.outputs.version }}
+          name: nrl-esp32-firmware-${{ matrix.board }}-${{ steps.ver.outputs.version }}
           if-no-files-found: error
-          path: |
-            dist/firmware-gezipai.bin
-            dist/firmware-bh4tdv.bin
-            dist/partitions-gezipai.bin
-            dist/partitions-bh4tdv.bin
-            dist/bootloader-gezipai.bin
-            dist/bootloader-bh4tdv.bin
-            web-flasher/index.html
-            web-flasher/manifest-gezipai.json
-            web-flasher/manifest-bh4tdv.json
-            web-flasher/firmware/gezipai/*.bin
-            web-flasher/firmware/bh4tdv/*.bin
-            web-flasher-${{ steps.ver.outputs.version }}.zip
+          path: dist/*-${{ matrix.board }}.bin
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -105,89 +116,4 @@ jobs:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            dist/firmware-gezipai.bin
-            dist/firmware-bh4tdv.bin
-            dist/partitions-gezipai.bin
-            dist/partitions-bh4tdv.bin
-            dist/bootloader-gezipai.bin
-            dist/bootloader-bh4tdv.bin
-            web-flasher-${{ steps.ver.outputs.version }}.zip
-
-  # The ESP32-S31 is a RISC-V part that needs ESP-IDF >= 6.1. PlatformIO's
-  # espressif32 7.0.1 predates it, so locally s31_korvo is built against a
-  # machine-local IDF 6.2 checkout via a pile of builder patches (see
-  # scripts/setup_s31_env.py). None of that is reproducible on a Linux runner,
-  # so CI builds S31 natively with the official ESP-IDF 6.2 image instead. The
-  # repo root is already a native IDF project (CMakeLists.txt), and the S31
-  # sdkconfig lives in sdkconfig.defaults + sdkconfig.defaults.esp32s31 (the
-  # latter auto-appended by IDF for the esp32s31 target).
-  build-s31:
-    name: ESP-IDF native (s31_korvo)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Cache LVGL
-        uses: actions/cache@v4
-        with:
-          path: components/lvgl
-          key: ${{ runner.os }}-lvgl-${{ hashFiles('scripts/fetch_lvgl.py') }}
-
-      - name: Resolve firmware version
-        id: ver
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          else
-            VERSION="0.0.0+$(echo "${GITHUB_SHA}" | cut -c1-7)"
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved firmware version: ${VERSION}"
-
-      - name: Build S31 firmware (ESP-IDF 6.2)
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          # No v6.2 / release-v6.2 Docker tag exists yet, so track the rolling
-          # master image (espressif/idf:latest), which is >= 6.2 and has esp32s31.
-          esp_idf_version: latest
-          target: esp32s31
-          command: >-
-            python3 scripts/fetch_lvgl.py &&
-            idf.py -DIDF_TARGET=esp32s31
-            -DNRL_NATIVE_BUILD=1
-            -DSDKCONFIG_DEFAULTS=sdkconfig.defaults
-            -DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo
-            -DNRL_FW_VERSION=${{ steps.ver.outputs.version }}
-            build
-
-      - name: Collect S31 firmware binaries
-        run: |
-          mkdir -p dist
-          cp build/nrl-esp32.bin                      dist/firmware-s31.bin
-          cp build/partition_table/partition-table.bin dist/partitions-s31.bin
-          cp build/bootloader/bootloader.bin          dist/bootloader-s31.bin
-
-      - name: Upload S31 firmware artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: nrl-esp32-firmware-s31-${{ steps.ver.outputs.version }}
-          if-no-files-found: error
-          path: |
-            dist/firmware-s31.bin
-            dist/partitions-s31.bin
-            dist/bootloader-s31.bin
-
-      - name: Publish S31 to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          fail_on_unmatched_files: true
-          files: |
-            dist/firmware-s31.bin
-            dist/partitions-s31.bin
-            dist/bootloader-s31.bin
+          files: dist/*-${{ matrix.board }}.bin

@@ -1,0 +1,8 @@
+# BH4TDV-only overrides, layered on top of sdkconfig.defaults for the native
+# idf.py build (both share the esp32s3 target, so a sdkconfig.defaults.<target>
+# file can't tell them apart -- pass this explicitly via SDKCONFIG_DEFAULTS).
+#
+# BH4TDV uses its own partition layout; the shared sdkconfig.defaults selects
+# part-gezipai.csv.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-bh4tdv.csv"
+CONFIG_PARTITION_TABLE_FILENAME="part-bh4tdv.csv"
