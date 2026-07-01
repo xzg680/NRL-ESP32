@@ -113,3 +113,79 @@ jobs:
             dist/bootloader-gezipai.bin
             dist/bootloader-bh4tdv.bin
             web-flasher-${{ steps.ver.outputs.version }}.zip
+
+  # The ESP32-S31 is a RISC-V part that needs ESP-IDF >= 6.1. PlatformIO's
+  # espressif32 7.0.1 predates it, so locally s31_korvo is built against a
+  # machine-local IDF 6.2 checkout via a pile of builder patches (see
+  # scripts/setup_s31_env.py). None of that is reproducible on a Linux runner,
+  # so CI builds S31 natively with the official ESP-IDF 6.2 image instead. The
+  # repo root is already a native IDF project (CMakeLists.txt), and the S31
+  # sdkconfig lives in sdkconfig.defaults + sdkconfig.defaults.esp32s31 (the
+  # latter auto-appended by IDF for the esp32s31 target).
+  build-s31:
+    name: ESP-IDF native (s31_korvo)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache LVGL
+        uses: actions/cache@v4
+        with:
+          path: components/lvgl
+          key: ${{ runner.os }}-lvgl-${{ hashFiles('scripts/fetch_lvgl.py') }}
+
+      - name: Resolve firmware version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.0.0+$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved firmware version: ${VERSION}"
+
+      - name: Build S31 firmware (ESP-IDF 6.2)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          # If the v6.2 stable tag is not published yet, switch to release-v6.2.
+          esp_idf_version: v6.2
+          target: esp32s31
+          command: >-
+            python3 scripts/fetch_lvgl.py &&
+            idf.py -DIDF_TARGET=esp32s31
+            -DSDKCONFIG_DEFAULTS=sdkconfig.defaults
+            -DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo
+            -DNRL_FW_VERSION=${{ steps.ver.outputs.version }}
+            build
+
+      - name: Collect S31 firmware binaries
+        run: |
+          mkdir -p dist
+          cp build/nrl-esp32.bin                      dist/firmware-s31.bin
+          cp build/partition_table/partition-table.bin dist/partitions-s31.bin
+          cp build/bootloader/bootloader.bin          dist/bootloader-s31.bin
+
+      - name: Upload S31 firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nrl-esp32-firmware-s31-${{ steps.ver.outputs.version }}
+          if-no-files-found: error
+          path: |
+            dist/firmware-s31.bin
+            dist/partitions-s31.bin
+            dist/bootloader-s31.bin
+
+      - name: Publish S31 to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/firmware-s31.bin
+            dist/partitions-s31.bin
+            dist/bootloader-s31.bin

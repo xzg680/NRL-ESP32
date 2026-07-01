@@ -15,6 +15,25 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp/CMakeLists.txt")
     list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp")
 endif()
+# S31 board identity + feature flags for NATIVE idf.py builds (GitHub CI).
+# In PlatformIO these come from [env:s31_korvo] build_flags in platformio.ini,
+# but a native `idf.py` build never reads platformio.ini. idf.py always passes
+# -DIDF_TARGET on the command line, so this block only fires for a native S31
+# build; PlatformIO's gezipai/bh4tdv (esp32s3) and PlatformIO's own S31 build are
+# unaffected. NRL_BOARD in particular MUST be set or board_pins.h defaults to
+# gezipai. Pass the firmware version with -DNRL_FW_VERSION=... (optional; falls
+# back to the default in nrl_version.h).
+if(IDF_TARGET STREQUAL "esp32s31")
+    add_compile_definitions(
+        NRL_BOARD=NRL_BOARD_S31_KORVO
+        NRL_ENABLE_AUDIO_AFE=1
+        NRL_ENABLE_AEC=1
+    )
+    if(NRL_FW_VERSION)
+        add_compile_definitions(NRL_FIRMWARE_VERSION="${NRL_FW_VERSION}")
+    endif()
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(nrl-esp32)
 
