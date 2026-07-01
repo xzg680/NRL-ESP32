@@ -150,8 +150,8 @@ jobs:
       - name: Build S31 firmware (ESP-IDF 6.2)
         uses: espressif/esp-idf-ci-action@v1
         with:
-          # If the v6.2 stable tag is not published yet, switch to release-v6.2.
-          esp_idf_version: v6.2
+          # v6.2 has no stable Docker tag yet; use the release branch image.
+          esp_idf_version: release-v6.2
           target: esp32s31
           command: >-
             python3 scripts/fetch_lvgl.py &&
