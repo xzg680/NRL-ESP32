@@ -1,4 +1,8 @@
 .pio
+# Native idf.py build output (scripts/build.py uses build/<board>/). Also the
+# root sdkconfig a bare `idf.py` would generate; real defaults are sdkconfig.*.
+/build/
+/sdkconfig
 sdkconfig.gezipai
 sdkconfig.bh4tdv
 .vscode/.browse.c_cpp.db*
