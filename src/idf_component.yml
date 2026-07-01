@@ -11,5 +11,9 @@ dependencies:
   # because the IDF component manager would (a) overwrite it from the
   # registry and (b) prune the directory on reconfigure if its lock file
   # doesn't reference it.
+  # Keep this at >=6.0.1 so the PlatformIO gezipai/bh4tdv build (espressif32
+  # 7.0.1 ships IDF 6.0.1) still resolves. S31's real >=6.1 requirement is met by
+  # the native ESP-IDF image in the build-s31 CI job, not by this manifest line;
+  # bumping this to 6.1.0 only breaks the 6.0.1 PlatformIO boards.
   idf:
-    version: ">=6.1.0"
+    version: ">=6.0.1"

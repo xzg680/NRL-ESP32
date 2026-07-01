@@ -6,6 +6,11 @@ sdkconfig.bh4tdv
 .vscode/launch.json
 .vscode/ipch
 managed_components
+# dependencies.lock is per-target (target + idf version + manifest hash). This
+# tree builds 3 targets (gezipai/bh4tdv on esp32s3 via PlatformIO, s31_korvo on
+# esp32s31 natively), so a single committed lock always mismatches 2 of them and
+# forces a recreate. Let each build generate its own instead of committing one.
+dependencies.lock
 components/lvgl
 __pycache__/
 *.map
