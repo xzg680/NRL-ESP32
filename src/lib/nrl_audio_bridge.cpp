@@ -9,6 +9,7 @@
 #include "nrl_wifi.h"
 #include "wifi_config_portal.h"
 
+#include "audio/audio_focus.h"
 #include "audio/audio_router.h"
 #include "driver/audio_passthrough.h"
 #include "driver/board_pins.h"
@@ -580,6 +581,10 @@ static void startDownlinkPlayback(void)
     if (s_downlink_playback_active) {
         return;
     }
+
+    // Voice interrupts media playback (music yields the hi-fi speaker and
+    // the voice passthrough restarts before these samples reach the DAC).
+    AudioFocus_NotifyVoiceStart();
 
     AUDIO_ClearOutputQueue();
     STATUS_IO_SetPttActive(true);

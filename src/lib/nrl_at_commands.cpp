@@ -8,6 +8,7 @@
 #include "driver/es8311.h"
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
+#include "services/music_player.h"
 #include "driver/sci_serial.h"
 
 #include <esp_log.h>
@@ -816,6 +817,29 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
         applyCurrentAudioConfig();
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOLUME", updated->line_out_volume);
+        return;
+    }
+
+    // Music player bring-up commands: AT+PLAY=/sdcard/music/a.wav, AT+PLAY=?
+    // (current track), AT+STOP. UI/playlist control arrives with the player
+    // screen; these stay as the serial/remote test path.
+    if (stringEqualsIgnoreCase(command.command, "PLAY")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "PLAY",
+                               MUSIC_IsPlaying() ? MUSIC_CurrentPath() : "(idle)");
+            return;
+        }
+        if (!MUSIC_PlayFile(command.value)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "PLAY");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "PLAY", command.value);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "STOP")) {
+        MUSIC_Stop();
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "STOP", "OK");
         return;
     }
 

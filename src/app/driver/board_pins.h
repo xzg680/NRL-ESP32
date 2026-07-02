@@ -68,6 +68,7 @@
 #define NRL_HAS_ES7210          0
 #define NRL_AUDIO_CODEC_ES8311  1
 #define NRL_AUDIO_CODEC_ES8389  0
+#define NRL_HAS_SDCARD          0
 
 // BH4TDV has no on-board LCD.
 #define NRL_HAS_DISPLAY         0
@@ -116,6 +117,7 @@
 #define NRL_HAS_ES7210          1
 #define NRL_AUDIO_CODEC_ES8311  1
 #define NRL_AUDIO_CODEC_ES8389  0
+#define NRL_HAS_SDCARD          0
 
 // I2C bus -- 格子派
 #define NRL_PIN_I2C_SCL         47
@@ -186,6 +188,11 @@
 #define NRL_HAS_ES7210          0
 #define NRL_AUDIO_CODEC_ES8311  0
 #define NRL_AUDIO_CODEC_ES8389  1
+
+// TF card slot on the dedicated SDMMC 4-bit pins (D0-D3=20-23, CLK=24,
+// CMD=25, power switch GPIO39); mounted via the vendored BSP
+// (vendor/esp32_s31_korvo bsp/sdcard.h).
+#define NRL_HAS_SDCARD          1
 
 // I2C bus
 #define NRL_PIN_I2C_SCL         1

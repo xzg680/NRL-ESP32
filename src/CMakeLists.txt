@@ -2,7 +2,11 @@ set(app_sources
     app/main.cpp
     app/aec/aec_processor.cpp
     app/aec/esp_sr_probe.cpp
+    audio/audio_focus.cpp
     audio/audio_router.cpp
+    media/wav_reader.cpp
+    services/music_player.cpp
+    services/storage_service.cpp
     app/driver/audio_passthrough.cpp
     app/driver/eeprom.cpp
     app/driver/display.cpp

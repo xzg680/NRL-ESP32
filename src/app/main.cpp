@@ -9,6 +9,8 @@
 #include <nvs_flash.h>
 
 #include "../lib/ble_config.h"
+#include "../services/music_player.h"
+#include "../services/storage_service.h"
 #include "../lib/nrl_audio_bridge.h"
 #include "../lib/nrl_bt_hfp.h"
 #include "../lib/nrl_usb_console.h"
@@ -114,6 +116,12 @@ static void initApp()
 #endif
 
     STATUS_IO_Init();
+
+    // Removable storage + music player (no-ops on boards without the
+    // hardware). Mount before the display so the first UI frame can already
+    // show storage state.
+    STORAGE_Init();
+    MUSIC_Init();
 
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
     // Bring the LCD up early so it shows a status frame while WiFi/BLE start.

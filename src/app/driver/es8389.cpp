@@ -2,6 +2,7 @@
 
 #include "driver/audio_passthrough.h"
 #include "driver/board_pins.h"
+#include "driver/external_radio.h"
 #include "driver/s31_i2c.h"
 
 #if defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
@@ -25,6 +26,7 @@ constexpr int kDefaultOutVolume = 70;
 constexpr float kDefaultInGain = 30.0f;
 
 static bool s_es8389_ready = false;
+static bool s_hifi_active = false;
 static i2c_master_bus_handle_t s_i2c_bus = nullptr;
 static const audio_codec_ctrl_if_t *s_ctrl_if = nullptr;
 static const audio_codec_data_if_t *s_data_if = nullptr;
@@ -109,6 +111,19 @@ static bool es8389_create_codec(i2s_chan_handle_t tx_handle, i2s_chan_handle_t r
     }
 
     return true;
+}
+
+// Re-apply the persisted volume/gain after every esp_codec_dev_open (the
+// codec-dev layer resets its notion of volume on close).
+static void es8389_apply_config_levels(void) {
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    if (config != nullptr) {
+        ES8389_SetOutputVolume(config->line_out_volume);
+        ES8389_SetInputGain(config->mic_volume);
+    } else {
+        (void)esp_codec_dev_set_out_vol(s_codec, kDefaultOutVolume);
+        (void)esp_codec_dev_set_in_gain(s_codec, kDefaultInGain);
+    }
 }
 
 static bool es8389_open_codec(void) {
@@ -201,6 +216,83 @@ extern "C" bool ES8389_SetInputGain(const uint8_t value) {
     return esp_codec_dev_set_in_gain(s_codec, gain_db) == ESP_CODEC_DEV_OK;
 }
 
+extern "C" bool ES8389_HifiAcquire(const uint32_t sample_rate_hz,
+                                   const uint8_t bits_per_sample,
+                                   const uint8_t channels) {
+    if (!s_es8389_ready || s_codec == nullptr || s_hifi_active) {
+        return false;
+    }
+    if (sample_rate_hz < 8000u || sample_rate_hz > 192000u ||
+        (bits_per_sample != 16u && bits_per_sample != 24u && bits_per_sample != 32u) ||
+        (channels != 1u && channels != 2u)) {
+        return false;
+    }
+
+    // Voice passthrough owns the I2S DMA while it runs; stop it before the
+    // codec-dev reopen reconfigures the channel clocks underneath it.
+    AUDIO_StopPassthrough();
+
+    if (esp_codec_dev_close(s_codec) != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "hifi: close codec failed");
+        (void)AUDIO_StartPassthrough();
+        return false;
+    }
+
+    esp_codec_dev_sample_info_t sample_cfg = {};
+    sample_cfg.bits_per_sample = bits_per_sample;
+    sample_cfg.channel = channels;
+    sample_cfg.channel_mask = (channels == 2u) ? 0x03 : 0x01;
+    sample_cfg.sample_rate = sample_rate_hz;
+    if (esp_codec_dev_open(s_codec, &sample_cfg) != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "hifi: open %luHz/%ubit/%uch failed",
+                 static_cast<unsigned long>(sample_rate_hz),
+                 static_cast<unsigned>(bits_per_sample),
+                 static_cast<unsigned>(channels));
+        // Try to fall back to the voice format so the radio keeps working.
+        (void)es8389_open_codec();
+        es8389_apply_config_levels();
+        (void)AUDIO_StartPassthrough();
+        return false;
+    }
+    es8389_apply_config_levels();
+
+    s_hifi_active = true;
+    ESP_LOGI(TAG, "hifi: acquired %luHz/%ubit/%uch",
+             static_cast<unsigned long>(sample_rate_hz),
+             static_cast<unsigned>(bits_per_sample),
+             static_cast<unsigned>(channels));
+    return true;
+}
+
+extern "C" bool ES8389_HifiWrite(const void *pcm, const size_t bytes) {
+    if (!s_hifi_active || s_codec == nullptr || pcm == nullptr || bytes == 0u) {
+        return false;
+    }
+    return esp_codec_dev_write(s_codec, const_cast<void *>(pcm), bytes) == ESP_CODEC_DEV_OK;
+}
+
+extern "C" bool ES8389_HifiRelease(void) {
+    if (!s_hifi_active) {
+        return true;
+    }
+    s_hifi_active = false;
+
+    (void)esp_codec_dev_close(s_codec);
+    const bool reopened = es8389_open_codec();
+    if (!reopened) {
+        ESP_LOGE(TAG, "hifi: restore voice format failed");
+    }
+    es8389_apply_config_levels();
+    const bool restarted = AUDIO_StartPassthrough();
+    ESP_LOGI(TAG, "hifi: released (voice path %s)",
+             (reopened && restarted) ? "restored" : "RESTORE FAILED");
+    return reopened && restarted;
+}
+
+extern "C" bool ES8389_HifiActive(void) {
+    return s_hifi_active;
+}
+
 #else
 
 extern "C" bool ES8389_Init(void) {
@@ -220,6 +312,22 @@ extern "C" bool ES8389_SetOutputVolume(uint8_t) {
 }
 
 extern "C" bool ES8389_SetInputGain(uint8_t) {
+    return false;
+}
+
+extern "C" bool ES8389_HifiAcquire(uint32_t, uint8_t, uint8_t) {
+    return false;
+}
+
+extern "C" bool ES8389_HifiWrite(const void *, size_t) {
+    return false;
+}
+
+extern "C" bool ES8389_HifiRelease(void) {
+    return true;
+}
+
+extern "C" bool ES8389_HifiActive(void) {
     return false;
 }
 
