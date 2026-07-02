@@ -36,13 +36,17 @@ static bool has_supported_extension(const char *name)
            strcasecmp(dot, ".aac") == 0;
 }
 
-static void scan_dir(const char *mount_point)
+static void scan_dir(const char *mount_point, const char *subdir)
 {
     if (mount_point == nullptr) {
         return;
     }
     char dir_path[kMaxPathLen];
-    snprintf(dir_path, sizeof(dir_path), "%s/%s", mount_point, kMusicSubdir);
+    if (subdir != nullptr) {
+        snprintf(dir_path, sizeof(dir_path), "%s/%s", mount_point, subdir);
+    } else {
+        snprintf(dir_path, sizeof(dir_path), "%s", mount_point);
+    }
 
     DIR *dir = opendir(dir_path);
     if (dir == nullptr) {
@@ -95,8 +99,10 @@ extern "C" size_t PLAYLIST_Scan(void)
 
     s_count = 0;
     s_current = -1;
-    scan_dir(STORAGE_SdMountPoint());
-    scan_dir(STORAGE_UsbMountPoint());
+    scan_dir(STORAGE_SdMountPoint(), kMusicSubdir);
+    scan_dir(STORAGE_UsbMountPoint(), kMusicSubdir);
+    // SMB: the configured share (or its path) IS the music folder.
+    scan_dir(STORAGE_SmbMountPoint(), nullptr);
 
     if (s_count > 1u) {
         qsort(s_paths, s_count, kMaxPathLen, compare_paths);

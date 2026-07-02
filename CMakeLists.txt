@@ -67,6 +67,15 @@ if(IDF_TARGET STREQUAL "esp32s31")
     if(lvgl_lib AND freetype_lib)
         target_link_libraries(${lvgl_lib} PUBLIC ${freetype_lib})
     endif()
+
+    # libsmb2 is legacy C89-style code (old-style definitions, implicit
+    # declarations) that fails under the default gnu23 + warnings-as-errors;
+    # compile that component alone as gnu17 with non-fatal warnings.
+    idf_component_get_property(smb2_lib sahlberg__libsmb2 COMPONENT_LIB)
+    if(smb2_lib)
+        target_compile_options(${smb2_lib} PRIVATE -std=gnu17 -Wno-error
+                               -Wno-implicit-function-declaration)
+    endif()
 endif()
 
 if(TARGET ${CMAKE_PROJECT_NAME}.elf)

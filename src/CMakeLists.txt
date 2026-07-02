@@ -9,6 +9,7 @@ set(app_sources
     media/media_metadata.cpp
     services/music_player.cpp
     services/music_playlist.cpp
+    services/smb_vfs.cpp
     services/storage_service.cpp
     app/driver/audio_passthrough.cpp
     app/driver/fonts/lv_font_cjk_16.c
@@ -82,10 +83,10 @@ endif()
 if(IDF_TARGET STREQUAL "esp32s31" AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../vendor/esp32_s31_korvo/CMakeLists.txt")
     list(APPEND app_priv_requires esp32_s31_korvo)
 endif()
-# USB flash drive (storage_service USB backend) -- the usb_host_msc component
-# dependency itself is target-gated in idf_component.yml.
+# USB flash drive + SMB network share (storage_service backends) -- the
+# component dependencies themselves are target-gated in idf_component.yml.
 if(IDF_TARGET STREQUAL "esp32s31")
-    list(APPEND app_priv_requires usb espressif__usb_host_msc fatfs)
+    list(APPEND app_priv_requires usb espressif__usb_host_msc fatfs sahlberg__libsmb2 vfs)
 endif()
 
 idf_component_register(

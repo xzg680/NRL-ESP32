@@ -3,6 +3,7 @@
 #include "driver/board_pins.h"
 
 #include <esp_log.h>
+#include <stdio.h>
 
 static const char *TAG = "STORAGE";
 
@@ -241,6 +242,191 @@ extern "C" const char *STORAGE_UsbMountPoint(void)
 #endif // NRL_HAS_USB_HOST
 
 // ---------------------------------------------------------------------------
+// SMB network share backend (libsmb2 via services/smb_vfs, S31 only)
+// ---------------------------------------------------------------------------
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+
+#include "lib/nrl_net_compat.h"
+#include "services/music_playlist.h"
+#include "services/smb_vfs.h"
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <nvs.h>
+
+#include <stdio.h>
+#include <string.h>
+
+namespace {
+
+constexpr const char *kSmbNvsNamespace = "smb";
+constexpr uint32_t kSmbRetryMs = 30000u;
+
+static char s_smb_server[64] = {};
+static char s_smb_share[64] = {};
+static char s_smb_user[32] = {};
+static char s_smb_pass[64] = {};
+static TaskHandle_t s_smb_task = nullptr;
+static volatile bool s_smb_task_restart = false;
+
+static bool smb_load_config(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(kSmbNvsNamespace, NVS_READONLY, &nvs) != ESP_OK) {
+        return false;
+    }
+    size_t len = sizeof(s_smb_server);
+    const bool have_server = nvs_get_str(nvs, "server", s_smb_server, &len) == ESP_OK;
+    len = sizeof(s_smb_share);
+    const bool have_share = nvs_get_str(nvs, "share", s_smb_share, &len) == ESP_OK;
+    len = sizeof(s_smb_user);
+    (void)nvs_get_str(nvs, "user", s_smb_user, &len);
+    len = sizeof(s_smb_pass);
+    (void)nvs_get_str(nvs, "pass", s_smb_pass, &len);
+    nvs_close(nvs);
+    return have_server && have_share && s_smb_server[0] != '\0' && s_smb_share[0] != '\0';
+}
+
+static bool smb_save_config(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(kSmbNvsNamespace, NVS_READWRITE, &nvs) != ESP_OK) {
+        return false;
+    }
+    const bool ok = nvs_set_str(nvs, "server", s_smb_server) == ESP_OK &&
+                    nvs_set_str(nvs, "share", s_smb_share) == ESP_OK &&
+                    nvs_set_str(nvs, "user", s_smb_user) == ESP_OK &&
+                    nvs_set_str(nvs, "pass", s_smb_pass) == ESP_OK &&
+                    nvs_commit(nvs) == ESP_OK;
+    nvs_close(nvs);
+    return ok;
+}
+
+// Waits for WiFi, then mounts; keeps retrying while unreachable. Restarted
+// (via s_smb_task_restart) when the configuration changes.
+static void smb_mount_task(void *)
+{
+    while (true) {
+        s_smb_task_restart = false;
+        while (!nrlWifiStaConnected() && !s_smb_task_restart) {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        }
+        if (!s_smb_task_restart) {
+            if (SMB_VFS_Mount(s_smb_server, s_smb_share, s_smb_user, s_smb_pass)) {
+                (void)PLAYLIST_Scan();
+                break; // mounted; a config change spawns a fresh task
+            }
+            // Unreachable (NAS down, wrong credentials...): retry later.
+            for (uint32_t waited = 0; waited < kSmbRetryMs && !s_smb_task_restart; waited += 1000u) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        }
+        if (s_smb_task_restart) {
+            continue;
+        }
+    }
+    s_smb_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+static void smb_start_mount_task(void)
+{
+    if (s_smb_task != nullptr) {
+        s_smb_task_restart = true;
+        return;
+    }
+    if (xTaskCreatePinnedToCore(smb_mount_task, "smb_mount", 6144, nullptr, 3, &s_smb_task, 0) != pdPASS) {
+        ESP_LOGE(TAG, "smb mount task create failed");
+        s_smb_task = nullptr;
+    }
+}
+
+} // namespace
+
+extern "C" bool STORAGE_SmbConfigure(const char *server, const char *share,
+                                     const char *user, const char *password)
+{
+    if (server == nullptr || server[0] == '\0' || share == nullptr || share[0] == '\0') {
+        return false;
+    }
+    snprintf(s_smb_server, sizeof(s_smb_server), "%s", server);
+    snprintf(s_smb_share, sizeof(s_smb_share), "%s", share);
+    snprintf(s_smb_user, sizeof(s_smb_user), "%s", (user != nullptr) ? user : "");
+    snprintf(s_smb_pass, sizeof(s_smb_pass), "%s", (password != nullptr) ? password : "");
+    if (!smb_save_config()) {
+        ESP_LOGW(TAG, "smb config persist failed (mount continues)");
+    }
+    SMB_VFS_Unmount();
+    smb_start_mount_task();
+    return true;
+}
+
+extern "C" void STORAGE_SmbClear(void)
+{
+    SMB_VFS_Unmount();
+    s_smb_server[0] = '\0';
+    s_smb_share[0] = '\0';
+    nvs_handle_t nvs;
+    if (nvs_open(kSmbNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_erase_all(nvs);
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    (void)PLAYLIST_Scan();
+}
+
+extern "C" bool STORAGE_SmbMounted(void)
+{
+    return SMB_VFS_Mounted();
+}
+
+extern "C" const char *STORAGE_SmbMountPoint(void)
+{
+    return SMB_VFS_Mounted() ? SMB_VFS_MOUNT_POINT : nullptr;
+}
+
+extern "C" void STORAGE_SmbDescribe(char *out, const size_t out_size)
+{
+    if (out == nullptr || out_size == 0u) {
+        return;
+    }
+    if (s_smb_server[0] == '\0') {
+        snprintf(out, out_size, "(not configured)");
+        return;
+    }
+    snprintf(out, out_size, "//%s/%s (%s)", s_smb_server, s_smb_share,
+             SMB_VFS_Mounted() ? "mounted" : "connecting");
+}
+
+#else // !S31
+
+extern "C" bool STORAGE_SmbConfigure(const char *, const char *, const char *, const char *)
+{
+    return false;
+}
+
+extern "C" void STORAGE_SmbClear(void) {}
+
+extern "C" bool STORAGE_SmbMounted(void)
+{
+    return false;
+}
+
+extern "C" const char *STORAGE_SmbMountPoint(void)
+{
+    return nullptr;
+}
+
+extern "C" void STORAGE_SmbDescribe(char *out, const size_t out_size)
+{
+    if (out != nullptr && out_size > 0u) {
+        snprintf(out, out_size, "(unsupported)");
+    }
+}
+
+#endif // S31
+
+// ---------------------------------------------------------------------------
 
 extern "C" bool STORAGE_Init(void)
 {
@@ -254,6 +440,14 @@ extern "C" bool STORAGE_Init(void)
     if (!usb_started) {
         usb_started = true;
         storage_start_usb_host();
+    }
+#endif
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+    // SMB share configured earlier: mount once WiFi is up (deferred task).
+    static bool smb_started = false;
+    if (!smb_started && smb_load_config()) {
+        smb_started = true;
+        smb_start_mount_task();
     }
 #endif
 #if (defined(NRL_HAS_SDCARD) && NRL_HAS_SDCARD) || (defined(NRL_HAS_USB_HOST) && NRL_HAS_USB_HOST)

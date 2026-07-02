@@ -9,6 +9,7 @@
 // On boards without the hardware every call is a cheap no-op returning false.
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +33,27 @@ bool STORAGE_UsbMounted(void);
 
 // Mount point of the USB drive ("/usb"), or NULL when not mounted.
 const char *STORAGE_UsbMountPoint(void);
+
+// SMB network share backend (docs/architecture.md 3.5): plays audio from a
+// NAS / Windows shared folder mounted at /smb. Configuration persists in
+// NVS; on boot a background task waits for WiFi and mounts automatically
+// (retrying every 30 s while the share is unreachable). Point the share
+// (or its path) directly at the music folder -- the playlist scans the
+// share root, not a /music subdirectory.
+// Configure + persist + (re)mount. Empty user means guest.
+bool STORAGE_SmbConfigure(const char *server, const char *share,
+                          const char *user, const char *password);
+
+// Unmount and erase the persisted configuration.
+void STORAGE_SmbClear(void);
+
+bool STORAGE_SmbMounted(void);
+
+// Mount point ("/smb"), or NULL when not mounted.
+const char *STORAGE_SmbMountPoint(void);
+
+// Human-readable status for the AT console, e.g. "//nas/music (mounted)".
+void STORAGE_SmbDescribe(char *out, size_t out_size);
 
 #ifdef __cplusplus
 }

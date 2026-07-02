@@ -10,6 +10,7 @@
 #include "driver/external_radio.h"
 #include "services/music_player.h"
 #include "services/music_playlist.h"
+#include "services/storage_service.h"
 #include "driver/sci_serial.h"
 
 #include <esp_log.h>
@@ -881,6 +882,46 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         }
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "FONT",
                            (engine == DISPLAY_CJK_FONT_FREETYPE) ? "FT" : "BMP");
+        return;
+    }
+
+    // SMB network share for music playback (S31):
+    //   AT+SMB=server/share[,user[,password]]   configure + mount
+    //   AT+SMB=OFF                              unmount + clear config
+    //   AT+SMB=?                                status
+    if (stringEqualsIgnoreCase(command.command, "SMB")) {
+        char status[128];
+        if (is_query) {
+            STORAGE_SmbDescribe(status, sizeof(status));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SMB", status);
+            return;
+        }
+        if (stringEqualsIgnoreCase(command.value, "OFF")) {
+            STORAGE_SmbClear();
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SMB", "OFF");
+            return;
+        }
+        char parse[192];
+        snprintf(parse, sizeof(parse), "%s", command.value);
+        char *user = strchr(parse, ',');
+        char *pass = nullptr;
+        if (user != nullptr) {
+            *user++ = '\0';
+            pass = strchr(user, ',');
+            if (pass != nullptr) {
+                *pass++ = '\0';
+            }
+        }
+        char *share = strchr(parse, '/');
+        if (share != nullptr) {
+            *share++ = '\0';
+        }
+        if (share == nullptr || !STORAGE_SmbConfigure(parse, share, user, pass)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "SMB");
+            return;
+        }
+        STORAGE_SmbDescribe(status, sizeof(status));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SMB", status);
         return;
     }
 
