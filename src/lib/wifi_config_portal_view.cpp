@@ -278,6 +278,11 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
                  std::string("")
 #endif
     );
+    // ES8311 register-level expert panels only make sense on boards that
+    // actually carry an ES8311 (the S31-Korvo uses an ES8389 with a totally
+    // different register map). The ADC panel is further hidden when a
+    // separate ES7210 captures the mic, since the ES8311 ADC path is unused.
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     replaceToken(html, "{{ES8311_ADC_SECTION}}",
 #if NRL_HAS_ES7210
                  std::string("")
@@ -285,6 +290,15 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
                  std::string(kWifiConfigPortalEs8311AdcSectionTemplate)
 #endif
     );
+    replaceToken(html, "{{ES8311_DAC_SECTION}}",
+                 std::string(kWifiConfigPortalEs8311DacSectionTemplate));
+    replaceToken(html, "{{AUDIO_EXPERT_TOGGLE_HIDDEN}}", std::string(""));
+#else
+    replaceToken(html, "{{ES8311_ADC_SECTION}}", std::string(""));
+    replaceToken(html, "{{ES8311_DAC_SECTION}}", std::string(""));
+    // Without the expert panels the expert-mode switch would toggle nothing.
+    replaceToken(html, "{{AUDIO_EXPERT_TOGGLE_HIDDEN}}", std::string(" hidden"));
+#endif
     replaceToken(html, "{{HP_DRIVE_CHECKED}}", checkedAttr(config->hp_drive_enabled));
     replaceToken(html, "{{MIC_VOLUME_SLIDER}}", buildAutoSubmitSlider("mic_volume", "Mic Volume (0-255)", "micVolume", 0u, 255u, config->mic_volume));
     replaceToken(html, "{{LINE_OUT_VOLUME_SLIDER}}", buildAutoSubmitSlider("line_out_volume", "Line Out Volume (0-255)", "lineOutVolume", 0u, 255u, config->line_out_volume));

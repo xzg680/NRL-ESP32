@@ -6,6 +6,7 @@
 #include "driver/board_pins.h"
 #include "driver/display.h"
 #include "driver/es8311.h"
+#include "driver/es8389.h"
 #include "driver/external_radio.h"
 #include "driver/sci_serial.h"
 
@@ -468,6 +469,9 @@ static bool applyCurrentAudioConfig(void)
                                    config->adceq_a2,
                                    config->adceq_b1,
                                    config->adceq_b2);
+#elif defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
+    return ES8389_SetOutputVolume(config->line_out_volume) &&
+           ES8389_SetInputGain(config->mic_volume);
 #else
     return true;
 #endif

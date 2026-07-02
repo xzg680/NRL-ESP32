@@ -162,6 +162,13 @@ static void initApp()
     if (!ES8389_SetReceiveMode()) {
         ESP_LOGE(TAG, "ES8389 set receive mode failed.");
     }
+
+    // The ES8389 driver has no pending-config cache (unlike ES8311), so the
+    // persisted volume/gain must be pushed after the codec device exists.
+    if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
+        ES8389_SetOutputVolume(config->line_out_volume);
+        ES8389_SetInputGain(config->mic_volume);
+    }
 #endif
 
 #if NRL_HAS_ES7210

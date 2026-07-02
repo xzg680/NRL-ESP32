@@ -114,7 +114,7 @@
     <h2 data-i18n="audio">Audio</h2>
     <div class="audio-actions">
       <form class="inline-form" method="post" action="/save_nrl"><input type="hidden" name="audio_reset_defaults" value="1"><button class="secondary btn-small" type="submit" data-i18n="audioResetDefaults">恢复默认值</button></form>
-      <label class="switch-label"><input id="audio-expert-mode" type="checkbox" onchange="toggleAudioExpert(this.checked)"><span data-i18n="audioExpertMode">专家模式</span></label>
+      <label class="switch-label"{{AUDIO_EXPERT_TOGGLE_HIDDEN}}><input id="audio-expert-mode" type="checkbox" onchange="toggleAudioExpert(this.checked)"><span data-i18n="audioExpertMode">专家模式</span></label>
     </div>
   </div>
   <div class="grid">
@@ -123,6 +123,12 @@
       {{AEC_SECTION}}
     </div></div>
     {{ES8311_ADC_SECTION}}
+    {{ES8311_DAC_SECTION}}
+  </div>
+</section>
+<!-- @endtemplate -->
+
+<!-- @template ES8311_DAC_SECTION -->
     <div class="subpanel" data-audio-expert="1" hidden><h3 data-i18n="dac">DAC</h3><div class="subgrid">
       <div class="group-label span-2" data-i18n="output">Output</div>
       <form class="item-form span-2" method="post" action="/save_nrl"><label data-i18n="hpDrive">ES8311 HP Drive</label><input type="hidden" name="hp_drive_present" value="1"><label class="hint"><input type="checkbox" name="hp_drive_enabled" value="1" onchange="submitSwitch(this)" {{HP_DRIVE_CHECKED}}><span data-i18n="hpDriveText">Enable headphone output drive (REG13 HPSW)</span></label></form>
@@ -133,8 +139,6 @@
       <form class="item-form" method="post" action="/save_nrl"><label data-i18n="dacEqBypass">DAC EQ Bypass</label><input type="hidden" name="dac_eq_bypass_present" value="1"><label class="hint"><input type="checkbox" name="dac_eq_bypass" value="1" onchange="submitSwitch(this)" {{DAC_EQ_BYPASS_CHECKED}}><span data-i18n="dacEqBypassText">Bypass DAC EQ (REG37 bit3)</span></label></form>
       <div class="span-2 eq-panel"><div class="section-head"><h2 data-i18n="dacEqCoefficients">DAC EQ Coefficients</h2><span class="hint" data-i18n="dacEqCoefficientsText">30-bit unsigned register values for B0/B1/A1</span></div>{{DACEQ_B0_SLIDER}}{{DACEQ_B1_SLIDER}}{{DACEQ_A1_SLIDER}}</div>
     </div></div>
-  </div>
-</section>
 <!-- @endtemplate -->
 
 <!-- @template ES8311_ADC_SECTION -->

@@ -12,6 +12,7 @@ bool ES8389_Init(void);
 bool ES8389_IsReady(void);
 bool ES8389_SetReceiveMode(void);
 bool ES8389_SetOutputVolume(uint8_t value);
+bool ES8389_SetInputGain(uint8_t value);
 
 #ifdef __cplusplus
 }

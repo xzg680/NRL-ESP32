@@ -441,6 +441,7 @@ static void applyAudioConfigToCodec(void)
 #endif
 #if defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
     ES8389_SetOutputVolume(s_config.line_out_volume);
+    ES8389_SetInputGain(s_config.mic_volume);
 #endif
     // The mic HPF is a pure-software filter (no I2C registers involved), so
     // it is pushed to the codec driver separately from ES8311_ApplyAudioConfig.

@@ -190,6 +190,17 @@ extern "C" bool ES8389_SetOutputVolume(const uint8_t value) {
     return esp_codec_dev_set_out_vol(s_codec, percent) == ESP_CODEC_DEV_OK;
 }
 
+extern "C" bool ES8389_SetInputGain(const uint8_t value) {
+    if (s_codec == nullptr) {
+        return false;
+    }
+    // Same 0-255 -> 0..42 dB mapping as the ES7210 mic PGA (3 dB steps), so
+    // the shared mic-volume setting behaves alike across all board variants.
+    const unsigned step = (static_cast<unsigned>(value) * 14u + 127u) / 255u;
+    const float gain_db = static_cast<float>(step) * 3.0f;
+    return esp_codec_dev_set_in_gain(s_codec, gain_db) == ESP_CODEC_DEV_OK;
+}
+
 #else
 
 extern "C" bool ES8389_Init(void) {
@@ -205,6 +216,10 @@ extern "C" bool ES8389_SetReceiveMode(void) {
 }
 
 extern "C" bool ES8389_SetOutputVolume(uint8_t) {
+    return false;
+}
+
+extern "C" bool ES8389_SetInputGain(uint8_t) {
     return false;
 }
 
