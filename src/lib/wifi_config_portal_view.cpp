@@ -7,6 +7,10 @@
 #include "wifi_update_portal_page.generated.h"
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
+#include "../services/espnow_link.h"
+#include "../services/music_player.h"
+#include "../services/nanny.h"
+#include "../services/storage_service.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -355,6 +359,53 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
     return html;
 }
 
+std::string WifiConfigPortalView_BuildMediaSections(void)
+{
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+    std::string html = std::string(kWifiConfigPortalMediaSectionsTemplate);
+
+    const int target = MUSIC_GetTarget();
+    replaceToken(html, "{{TARGET_LOCAL_SELECTED}}", target == MUSIC_TARGET_LOCAL ? " selected" : "");
+    replaceToken(html, "{{TARGET_NET_SELECTED}}", target == MUSIC_TARGET_NET ? " selected" : "");
+    replaceToken(html, "{{TARGET_BOTH_SELECTED}}", target == MUSIC_TARGET_BOTH ? " selected" : "");
+    replaceToken(html, "{{ESPNOW_CHECKED}}", checkedAttr(ESPNOW_LINK_IsEnabled()));
+
+    char beacon_path[128] = {};
+    uint32_t beacon_interval = 0;
+    const bool beacon_armed = NANNY_GetBeacon(beacon_path, sizeof(beacon_path), &beacon_interval);
+    replaceToken(html, "{{BEACON_PATH}}", htmlEscape(beacon_path));
+    replaceToken(html, "{{BEACON_INTERVAL}}",
+                 beacon_armed ? fromU32(beacon_interval) : std::string(""));
+    replaceToken(html, "{{BEACON_CHECKED}}", checkedAttr(beacon_armed));
+
+    char radio_url[256] = {};
+    MUSIC_GetRadioUrl(radio_url, sizeof(radio_url));
+    replaceToken(html, "{{RADIO_URL}}", htmlEscape(radio_url));
+    const char *playing_path = MUSIC_CurrentPath();
+    const bool radio_playing = MUSIC_IsPlaying() &&
+                               strncmp(playing_path, "http", 4) == 0;
+    replaceToken(html, "{{RADIO_STATUS}}",
+                 radio_playing ? (std::string("&#9654; ") + htmlEscape(playing_path)) : std::string(""));
+
+    char smb_server[64] = {};
+    char smb_share[64] = {};
+    char smb_user[32] = {};
+    char smb_pass[64] = {};
+    (void)STORAGE_SmbGetConfig(smb_server, sizeof(smb_server), smb_share, sizeof(smb_share),
+                               smb_user, sizeof(smb_user), smb_pass, sizeof(smb_pass));
+    replaceToken(html, "{{SMB_SERVER}}", htmlEscape(smb_server));
+    replaceToken(html, "{{SMB_SHARE}}", htmlEscape(smb_share));
+    replaceToken(html, "{{SMB_USER}}", htmlEscape(smb_user));
+    replaceToken(html, "{{SMB_PASSWORD}}", htmlEscape(smb_pass));
+    char smb_status[128] = {};
+    STORAGE_SmbDescribe(smb_status, sizeof(smb_status));
+    replaceToken(html, "{{SMB_STATUS}}", htmlEscape(smb_status));
+    return html;
+#else
+    return std::string();
+#endif
+}
+
 std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
                                                  const WifiConfigPortalPageState &state,
                                                  const std::string &form_sections)
@@ -368,6 +419,16 @@ std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *conf
     replaceToken(html, "{{NETWORK_ACTIVE}}", state.network_active ? "active" : "");
     replaceToken(html, "{{DEVICE_ACTIVE}}", state.device_active ? "active" : "");
     replaceToken(html, "{{AUDIO_ACTIVE}}", state.audio_active ? "active" : "");
+    // Media / nanny tab only exists on the S31 (media stack is S31-only).
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+    {
+        std::string media_tab = std::string(kWifiConfigPortalMediaTabTemplate);
+        replaceToken(media_tab, "{{MEDIA_ACTIVE}}", state.media_active ? "active" : "");
+        replaceToken(html, "{{MEDIA_TAB}}", media_tab);
+    }
+#else
+    replaceToken(html, "{{MEDIA_TAB}}", std::string(""));
+#endif
     replaceToken(html, "{{AP_IP}}", ipToString(nrlWifiApIp()));
     replaceToken(html, "{{STA_IP}}", staIpOrNotConnected(nrlWifiStaIp()));
     replaceToken(html, "{{SSID_OPTIONS}}", "");

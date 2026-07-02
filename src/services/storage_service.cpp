@@ -398,6 +398,26 @@ extern "C" void STORAGE_SmbDescribe(char *out, const size_t out_size)
              SMB_VFS_Mounted() ? "mounted" : "connecting");
 }
 
+extern "C" bool STORAGE_SmbGetConfig(char *server, const size_t server_size,
+                                     char *share, const size_t share_size,
+                                     char *user, const size_t user_size,
+                                     char *password, const size_t password_size)
+{
+    if (server != nullptr && server_size > 0u) {
+        snprintf(server, server_size, "%s", s_smb_server);
+    }
+    if (share != nullptr && share_size > 0u) {
+        snprintf(share, share_size, "%s", s_smb_share);
+    }
+    if (user != nullptr && user_size > 0u) {
+        snprintf(user, user_size, "%s", s_smb_user);
+    }
+    if (password != nullptr && password_size > 0u) {
+        snprintf(password, password_size, "%s", s_smb_pass);
+    }
+    return s_smb_server[0] != '\0' && s_smb_share[0] != '\0';
+}
+
 #else // !S31
 
 extern "C" bool STORAGE_SmbConfigure(const char *, const char *, const char *, const char *)
@@ -422,6 +442,26 @@ extern "C" void STORAGE_SmbDescribe(char *out, const size_t out_size)
     if (out != nullptr && out_size > 0u) {
         snprintf(out, out_size, "(unsupported)");
     }
+}
+
+extern "C" bool STORAGE_SmbGetConfig(char *server, const size_t server_size,
+                                     char *share, const size_t share_size,
+                                     char *user, const size_t user_size,
+                                     char *password, const size_t password_size)
+{
+    if (server != nullptr && server_size > 0u) {
+        server[0] = '\0';
+    }
+    if (share != nullptr && share_size > 0u) {
+        share[0] = '\0';
+    }
+    if (user != nullptr && user_size > 0u) {
+        user[0] = '\0';
+    }
+    if (password != nullptr && password_size > 0u) {
+        password[0] = '\0';
+    }
+    return false;
 }
 
 #endif // S31

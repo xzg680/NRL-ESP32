@@ -11,6 +11,7 @@
 // On boards without the ES8389 hi-fi path MUSIC_PlayFile simply fails.
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "media/media_metadata.h"
 
@@ -27,8 +28,14 @@ typedef enum {
     MUSIC_TARGET_BOTH = 2,
 } MusicTarget_t;
 
+// Setting the target persists it in NVS; MUSIC_Init restores it on boot.
 void MUSIC_SetTarget(int target);
 int MUSIC_GetTarget(void);
+
+// Net-radio station URL (http:// or https://), persisted in NVS so the
+// web portal / LCD UI can re-tune the saved station. Empty when unset.
+bool MUSIC_SetRadioUrl(const char *url);
+void MUSIC_GetRadioUrl(char *out, size_t out_size);
 
 // Register the voice-interrupt hook. Safe to call on every board.
 void MUSIC_Init(void);

@@ -11,6 +11,10 @@
 #include "../app/driver/external_radio.h"
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
+#include "../services/espnow_link.h"
+#include "../services/music_player.h"
+#include "../services/nanny.h"
+#include "../services/storage_service.h"
 
 #include <driver/gpio.h>
 #include <esp_http_server.h>
@@ -1061,7 +1065,8 @@ static void sendConfigPage(const char *title,
                            const bool network_active,
                            const bool device_active,
                            const bool audio_active,
-                           const std::string &footer)
+                           const std::string &footer,
+                           const bool media_active = false)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     const WifiConfigPortalPageState state = {
@@ -1074,6 +1079,7 @@ static void sendConfigPage(const char *title,
         .network_active = network_active,
         .device_active = device_active,
         .audio_active = audio_active,
+        .media_active = media_active,
         .footer = footer,
     };
     sendChunkedHtml(200, WifiConfigPortalView_BuildConfigPage(config, state, form_sections));
@@ -1140,6 +1146,26 @@ static esp_err_t handleAudioPage(httpd_req_t *req)
                    "");
     return ESP_OK;
 }
+
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+static esp_err_t handleMediaPage(httpd_req_t *req)
+{
+    s_server.bind(req);
+    sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " Media / Nanny").c_str(),
+                   "Media / Nanny",
+                   "mediaHeadline",
+                   "Configure playback target, nanny beacon, net radio, and SMB network share.",
+                   "mediaIntro",
+                   "/save_media",
+                   WifiConfigPortalView_BuildMediaSections(),
+                   false,
+                   false,
+                   false,
+                   "",
+                   true);
+    return ESP_OK;
+}
+#endif
 
 static esp_err_t handleScan(httpd_req_t *req)
 {
@@ -1723,6 +1749,119 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
     return ESP_OK;
 }
 
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+// Echo the full media config back as {"ok":..,"fields":{..}} from live
+// state, so the page always reflects on-device truth after a save (the
+// media fields live outside ExternalRadioConfig, so sendSavedFieldsJson
+// can't serve them).
+static void sendMediaSavedJson(const bool ok)
+{
+    char beacon_path[128] = {};
+    uint32_t beacon_interval = 0;
+    const bool beacon_armed = NANNY_GetBeacon(beacon_path, sizeof(beacon_path), &beacon_interval);
+    char radio_url[256] = {};
+    MUSIC_GetRadioUrl(radio_url, sizeof(radio_url));
+    char smb_server[64] = {};
+    char smb_share[64] = {};
+    char smb_user[32] = {};
+    char smb_pass[64] = {};
+    (void)STORAGE_SmbGetConfig(smb_server, sizeof(smb_server), smb_share, sizeof(smb_share),
+                               smb_user, sizeof(smb_user), smb_pass, sizeof(smb_pass));
+
+    std::string body;
+    body.reserve(768);
+    body += "{\"ok\":";
+    body += ok ? "true" : "false";
+    body += ",\"fields\":{";
+    auto appendField = [&body](const char *name, const std::string &value, const bool first = false) {
+        if (!first) {
+            body += ",";
+        }
+        body += "\"";
+        body += name;
+        body += "\":\"";
+        body += jsonEscape(value);
+        body += "\"";
+    };
+    appendField("music_target", std::to_string(MUSIC_GetTarget()), true);
+    appendField("espnow_enabled", ESPNOW_LINK_IsEnabled() ? "1" : "0");
+    appendField("beacon_enabled", beacon_armed ? "1" : "0");
+    appendField("beacon_path", beacon_path);
+    appendField("beacon_interval", beacon_armed ? std::to_string(beacon_interval) : std::string(""));
+    appendField("radio_url", radio_url);
+    appendField("smb_server", smb_server);
+    appendField("smb_share", smb_share);
+    appendField("smb_user", smb_user);
+    appendField("smb_password", smb_pass);
+    body += "}}";
+    s_server.send(ok ? 200 : 400, "application/json; charset=utf-8", body);
+}
+
+static esp_err_t handleSaveMedia(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    bool ok = true;
+
+    if (s_server.hasArg("music_target")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("music_target"), &value) &&
+             value <= MUSIC_TARGET_BOTH;
+        if (ok) {
+            MUSIC_SetTarget(static_cast<int>(value));
+            ESP_LOGI(TAG, "media: playback target=%lu", value);
+        }
+    }
+    if (ok && s_server.hasArg("espnow_present")) {
+        // Fails when enabling while WiFi is still down -- surfaced to the page.
+        ok = ESPNOW_LINK_SetEnabled(s_server.hasArg("espnow_enabled"));
+    }
+    if (ok && s_server.hasArg("beacon_present")) {
+        if (s_server.hasArg("beacon_enabled")) {
+            unsigned long minutes = 0UL;
+            ok = parseUIntArg(s_server.arg("beacon_interval"), &minutes) &&
+                 NANNY_SetBeacon(s_server.arg("beacon_path").c_str(),
+                                 static_cast<uint32_t>(minutes));
+        } else {
+            NANNY_DisableBeacon();
+        }
+    }
+    if (ok && s_server.hasArg("smb_clear")) {
+        STORAGE_SmbClear();
+        ESP_LOGI(TAG, "media: SMB config cleared");
+    } else if (ok && s_server.hasArg("smb_server")) {
+        const std::string server = s_server.arg("smb_server");
+        const std::string share = s_server.arg("smb_share");
+        if (server.empty() && share.empty()) {
+            STORAGE_SmbClear();
+        } else {
+            ok = STORAGE_SmbConfigure(server.c_str(), share.c_str(),
+                                      s_server.arg("smb_user").c_str(),
+                                      s_server.arg("smb_password").c_str());
+        }
+    }
+    if (ok && s_server.hasArg("radio_url")) {
+        ok = MUSIC_SetRadioUrl(s_server.arg("radio_url").c_str());
+    }
+    if (ok && s_server.hasArg("radio_play")) {
+        char url[256] = {};
+        MUSIC_GetRadioUrl(url, sizeof(url));
+        ok = url[0] != '\0' && MUSIC_PlayFile(url);
+    }
+    if (ok && s_server.hasArg("radio_stop")) {
+        MUSIC_Stop();
+    }
+
+    if (!ok) {
+        ESP_LOGE(TAG, "media config save via web failed (invalid params)");
+    }
+    sendMediaSavedJson(ok);
+    return ESP_OK;
+}
+#endif // NRL_BOARD_S31_KORVO
+
 static esp_err_t handleUpdatePage(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -1936,6 +2075,10 @@ static void ensureServerRunning()
         { "/scan",                 HTTP_GET,  handleScan },
         { "/save_wifi",            HTTP_POST, handleSaveWifi },
         { "/save_nrl",             HTTP_POST, handleSaveNrl },
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+        { "/media",                HTTP_GET,  handleMediaPage },
+        { "/save_media",           HTTP_POST, handleSaveMedia },
+#endif
         { "/update",               HTTP_GET,  handleUpdatePage },
         { "/update",               HTTP_POST, handleUpdate },
         { "/portal.css",           HTTP_GET,  handlePortalCss },

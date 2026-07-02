@@ -29,6 +29,16 @@ bool ESPNOW_LINK_SetEnabled(bool enabled);
 
 bool ESPNOW_LINK_IsEnabled(void);
 
+// Dedicated hold-to-talk for the ESP-NOW link (S31 touch UI): while held,
+// mic audio broadcasts over ESP-NOW, independent of the NRL PTT. On boards
+// without a touch UI the link keys off the radio squelch instead and these
+// are unused.
+void ESPNOW_LINK_SetPtt(bool held);
+bool ESPNOW_LINK_PttActive(void);
+
+// True while ESP-NOW voice frames are actively arriving (UI RX indicator).
+bool ESPNOW_LINK_IsReceiving(void);
+
 // Callsign-SSID of the most recent peer heard (empty when none yet).
 void ESPNOW_LINK_GetLastPeer(char *out, size_t out_size);
 

@@ -1,12 +1,14 @@
 #include "services/espnow_link.h"
 
 #include "audio/audio_router.h"
+#include "driver/board_pins.h"
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
 #include "lib/nrl_g711.h"
 
 #include <esp_log.h>
 #include <esp_now.h>
+#include <esp_timer.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -36,6 +38,8 @@ static bool s_espnow_inited = false;
 static uint8_t s_tx_packet[kPacketBytes];
 static size_t s_tx_fill = kHeaderBytes;
 static char s_last_peer[16] = {};
+static volatile bool s_ptt_held = false;      // dedicated ESP-NOW hold-to-talk
+static volatile int64_t s_last_rx_us = 0;     // last voice frame arrival
 
 static void save_enabled(const bool enabled)
 {
@@ -59,15 +63,21 @@ static bool load_enabled(void)
 }
 
 // Router sink: mic frames (8 kHz, router-converted) -> G.711 -> broadcast.
-// Same squelch gate as the NRL uplink: transmit only while the radio hears
-// audio. Runs in the audio task.
+// Keying: the S31 touch UI has a dedicated ESP-NOW PTT (the NRL PTT no
+// longer simulcasts here); radio-gateway boards without a touch UI keep the
+// squelch-relay gate. Runs in the audio task.
 static void espnow_sink_write(uint8_t /*source_id*/,
                               const int16_t *samples,
                               size_t sample_count,
                               void *)
 {
-    if (!s_enabled || !STATUS_IO_IsSqlActive()) {
-        s_tx_fill = kHeaderBytes; // drop partial packet on squelch close
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+    const bool keyed = s_ptt_held;
+#else
+    const bool keyed = STATUS_IO_IsSqlActive();
+#endif
+    if (!s_enabled || !keyed) {
+        s_tx_fill = kHeaderBytes; // drop partial packet on key release
         return;
     }
     for (size_t i = 0; i < sample_count; ++i) {
@@ -98,6 +108,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t * /*info*/,
     }
     snprintf(s_last_peer, sizeof(s_last_peer), "%s-%u", callsign,
              static_cast<unsigned>(data[11]));
+    s_last_rx_us = esp_timer_get_time();
 
     const size_t payload = static_cast<size_t>(len) - kHeaderBytes;
     int16_t pcm[ESP_NOW_MAX_DATA_LEN];
@@ -200,6 +211,7 @@ extern "C" bool ESPNOW_LINK_SetEnabled(const bool enabled)
         s_enabled = true;
     } else {
         s_enabled = false;
+        s_ptt_held = false;
         s_tx_fill = kHeaderBytes;
     }
     save_enabled(enabled);
@@ -209,6 +221,23 @@ extern "C" bool ESPNOW_LINK_SetEnabled(const bool enabled)
 extern "C" bool ESPNOW_LINK_IsEnabled(void)
 {
     return s_enabled;
+}
+
+extern "C" void ESPNOW_LINK_SetPtt(const bool held)
+{
+    s_ptt_held = held && s_enabled;
+}
+
+extern "C" bool ESPNOW_LINK_PttActive(void)
+{
+    return s_ptt_held;
+}
+
+extern "C" bool ESPNOW_LINK_IsReceiving(void)
+{
+    // "Receiving" = a voice frame arrived within the last half second.
+    return s_enabled && s_last_rx_us != 0 &&
+           (esp_timer_get_time() - s_last_rx_us) < 500000;
 }
 
 extern "C" void ESPNOW_LINK_GetLastPeer(char *out, const size_t out_size)

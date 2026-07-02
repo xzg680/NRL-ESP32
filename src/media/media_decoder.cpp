@@ -1,11 +1,13 @@
 #include "media/media_decoder.h"
 
+#include <esp_audio_dec_default.h>
 #include <esp_audio_simple_dec.h>
 #include <esp_audio_simple_dec_default.h>
 #include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
 #include <esp_http_client.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -56,7 +58,14 @@ static size_t read_source(MediaDecoder *d, uint8_t *dst, const size_t size)
         return total;
     }
     if (d->file != nullptr) {
-        return total + fread(dst + total, 1, size - total, d->file);
+        const int64_t t0 = esp_timer_get_time();
+        const size_t got = fread(dst + total, 1, size - total, d->file);
+        const int64_t dt_ms = (esp_timer_get_time() - t0) / 1000;
+        if (dt_ms > 2000) {
+            ESP_LOGW(TAG, "slow source read: %u bytes in %lld ms",
+                     static_cast<unsigned>(got), static_cast<long long>(dt_ms));
+        }
+        return total + got;
     }
     if (d->http != nullptr) {
         const int got = esp_http_client_read(d->http, reinterpret_cast<char *>(dst) + total,
@@ -136,7 +145,21 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
     }
 
     if (!s_default_registered) {
-        if (esp_audio_simple_dec_register_default() != ESP_AUDIO_ERR_OK) {
+        // Two registries: the simple-dec default only adds the container
+        // parsers (WAV/M4A/TS/OGG); they dispatch into the elementary-stream
+        // decoder registry, which must be populated separately -- without it
+        // every MP3/FLAC open fails with "Decoder ... not registered".
+        // Register only the codecs the playlist accepts (wav/mp3/flac/m4a/aac,
+        // see music_playlist.cpp): esp_audio_dec_register_default() would link
+        // every codec lib (Opus/Vorbis/LC3/SBC/...) and overflow the app
+        // partition.
+        const bool ok = esp_mp3_dec_register() == ESP_AUDIO_ERR_OK &&
+                        esp_aac_dec_register() == ESP_AUDIO_ERR_OK &&
+                        esp_flac_dec_register() == ESP_AUDIO_ERR_OK &&
+                        esp_pcm_dec_register() == ESP_AUDIO_ERR_OK &&
+                        esp_adpcm_dec_register() == ESP_AUDIO_ERR_OK &&
+                        esp_audio_simple_dec_register_default() == ESP_AUDIO_ERR_OK;
+        if (!ok) {
             ESP_LOGE(TAG, "register default decoders failed");
             return nullptr;
         }
@@ -231,7 +254,26 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
         return -1;
     }
 
+    // Progress diagnostics: a healthy call returns within a few reads. If we
+    // are still in here after seconds, report where the time is going (spin
+    // in the parser vs. blocked in the source read) instead of hanging mute.
+    const int64_t enter_us = esp_timer_get_time();
+    int64_t last_report_us = enter_us;
+    unsigned iterations = 0;
+
     while (true) {
+        ++iterations;
+        const int64_t now_us = esp_timer_get_time();
+        if (now_us - last_report_us > 5000000LL) {
+            last_report_us = now_us;
+            ESP_LOGW(TAG, "decode stalled %llds: %u loops, raw fill=%u off=%u eof=%d",
+                     static_cast<long long>((now_us - enter_us) / 1000000LL),
+                     iterations,
+                     static_cast<unsigned>(d->raw_fill),
+                     static_cast<unsigned>(d->raw_offset),
+                     d->eof ? 1 : 0);
+        }
+
         // Refill the raw buffer when the parser consumed everything.
         if (d->raw_offset >= d->raw_fill) {
             if (d->eof) {
@@ -262,9 +304,18 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
 
         const esp_audio_err_t err = esp_audio_simple_dec_process(d->handle, &raw, &frame);
         if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+            const size_t before = d->out_capacity;
             if (!grow_out_buffer(d, frame.needed_size)) {
                 ESP_LOGE(TAG, "out buffer grow to %lu failed",
                          static_cast<unsigned long>(frame.needed_size));
+                return -1;
+            }
+            if (d->out_capacity == before) {
+                // Decoder demands a buffer we already have: bail rather than
+                // spin forever on the same error.
+                ESP_LOGE(TAG, "decoder wants %lu bytes but %lu available",
+                         static_cast<unsigned long>(frame.needed_size),
+                         static_cast<unsigned long>(d->out_capacity));
                 return -1;
             }
             continue;

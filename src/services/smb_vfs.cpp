@@ -91,13 +91,31 @@ static ssize_t vfs_read(const int fd, void *dst, const size_t size)
         errno = EBADF;
         return -1;
     }
-    const int got = smb2_read(s_smb, s_files[fd], static_cast<uint8_t *>(dst),
-                              static_cast<uint32_t>(size));
-    if (got < 0) {
-        errno = EIO;
-        return -1;
+    // libsmb2's sync smb2_read never returns on this port once a single
+    // request spans multiple TCP segments (the media player's 8 KB reads
+    // hang forever while metadata-sized reads always complete). Issue
+    // MTU-sized requests instead so every SMB2 READ response fits in one
+    // segment, and reassemble here.
+    constexpr size_t kChunk = 1200;
+    uint8_t *out = static_cast<uint8_t *>(dst);
+    size_t done = 0;
+    while (done < size) {
+        const size_t want = ((size - done) < kChunk) ? (size - done) : kChunk;
+        const int got = smb2_read(s_smb, s_files[fd], out + done,
+                                  static_cast<uint32_t>(want));
+        if (got < 0) {
+            if (done > 0) {
+                break; // hand back what we already have
+            }
+            errno = EIO;
+            return -1;
+        }
+        done += static_cast<size_t>(got);
+        if (got == 0 || static_cast<size_t>(got) < want) {
+            break; // EOF or short read
+        }
     }
-    return got;
+    return static_cast<ssize_t>(done);
 }
 
 static off_t vfs_lseek(const int fd, const off_t offset, const int whence)

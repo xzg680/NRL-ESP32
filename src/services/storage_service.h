@@ -55,6 +55,14 @@ const char *STORAGE_SmbMountPoint(void);
 // Human-readable status for the AT console, e.g. "//nas/music (mounted)".
 void STORAGE_SmbDescribe(char *out, size_t out_size);
 
+// Copy the current SMB configuration into the out buffers (any pointer may
+// be NULL to skip that field). Returns true when a server+share are
+// configured. Web/UI config forms use this to prefill their fields.
+bool STORAGE_SmbGetConfig(char *server, size_t server_size,
+                          char *share, size_t share_size,
+                          char *user, size_t user_size,
+                          char *password, size_t password_size);
+
 #ifdef __cplusplus
 }
 #endif

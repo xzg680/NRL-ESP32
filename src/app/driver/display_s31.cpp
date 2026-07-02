@@ -9,8 +9,10 @@
 #include "../../lib/nrl_net_compat.h"
 #include "../../lib/nrl_wifi.h"
 #include "../../media/cover_decoder.h"
+#include "../../services/espnow_link.h"
 #include "../../services/music_player.h"
 #include "../../services/music_playlist.h"
+#include "../../services/nanny.h"
 #include "../../services/storage_service.h"
 #include "external_radio.h"
 #include "fonts/lv_font_cjk.h"
@@ -69,11 +71,16 @@ constexpr size_t kWifiOptionCount = 12u;  // max scanned SSIDs listed in the dro
 enum class Page : uint8_t {
     Home,
     Config,
+    Apps,
     Wifi,
     Station,
     Audio,
     Bt,
     Music,
+    Radio,
+    Nanny,
+    Smb,
+    EspNow,
 };
 
 enum class Action : intptr_t {
@@ -99,6 +106,18 @@ enum class Action : intptr_t {
     MusicNext,
     MusicPrev,
     MusicRescan,
+    Radio,
+    Nanny,
+    Smb,
+    Apps,
+    EspNow,
+    SaveSmb,
+    ClearSmb,
+    SaveNanny,
+    BeaconOff,
+    SaveRadio,
+    RadioPlay,
+    RadioStop,
 };
 
 enum class AudioControl : intptr_t {
@@ -107,6 +126,7 @@ enum class AudioControl : intptr_t {
     Aec,
     Noise,
     MicHpf,
+    EspNow,
 };
 
 bool s_ready = false;
@@ -157,6 +177,22 @@ lv_obj_t *s_sw_mic_hpf = nullptr;
 lv_obj_t *s_sw_bt = nullptr;
 lv_obj_t *s_lbl_bt_status = nullptr;
 lv_obj_t *s_keyboard = nullptr;
+
+// Media / nanny config pages (SMB share, beacon scheduler, net radio).
+lv_obj_t *s_ta_smb_server = nullptr;
+lv_obj_t *s_ta_smb_share = nullptr;
+lv_obj_t *s_ta_smb_user = nullptr;
+lv_obj_t *s_ta_smb_pass = nullptr;
+lv_obj_t *s_ta_beacon_path = nullptr;
+lv_obj_t *s_ta_beacon_interval = nullptr;
+lv_obj_t *s_ta_radio_url = nullptr;
+lv_obj_t *s_dd_music_target = nullptr;
+lv_obj_t *s_sw_espnow = nullptr;
+lv_obj_t *s_lbl_espnow_status = nullptr;
+char s_shown_espnow_status[128] = {};
+// Whether the Home page was built with the split (NRL + ESP-NOW) PTT; when
+// the ESP-NOW enable state changes, refreshHome rebuilds the page.
+bool s_home_espnow_split = false;
 
 // Music player page widgets. The list is rebuilt on page entry / rescan;
 // the now-playing labels update from refresh().
@@ -436,12 +472,24 @@ lv_obj_t *panel(lv_obj_t *parent, int x, int y, int w, int h)
 void action(lv_event_t *event);
 void volumeEvent(lv_event_t *event);
 void softPttEvent(lv_event_t *event);
+void espnowPttEvent(lv_event_t *event);
 void textAreaEvent(lv_event_t *event);
 void wifiOptionEvent(lv_event_t *event);
 void audioSliderEvent(lv_event_t *event);
 void audioSwitchEvent(lv_event_t *event);
+void musicTargetEvent(lv_event_t *event);
 void updateAudioValueLabels();
 void refresh();
+lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w);
+
+// Set the per-page form status line (no-op when the page has none).
+void formStatus(const char *text, uint32_t color)
+{
+    if (s_lbl_form_status != nullptr) {
+        lv_label_set_text(s_lbl_form_status, text);
+        lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(color), 0);
+    }
+}
 
 lv_obj_t *button(lv_obj_t *parent, int x, int y, int w, int h, const char *text, Action id)
 {
@@ -663,6 +711,17 @@ void clearScreen()
     s_sw_bt = nullptr;
     s_lbl_bt_status = nullptr;
     s_keyboard = nullptr;
+    s_ta_smb_server = nullptr;
+    s_ta_smb_share = nullptr;
+    s_ta_smb_user = nullptr;
+    s_ta_smb_pass = nullptr;
+    s_ta_beacon_path = nullptr;
+    s_ta_beacon_interval = nullptr;
+    s_ta_radio_url = nullptr;
+    s_dd_music_target = nullptr;
+    s_sw_espnow = nullptr;
+    s_lbl_espnow_status = nullptr;
+    memset(s_shown_espnow_status, 0, sizeof(s_shown_espnow_status));
     s_lbl_music_title = nullptr;
     s_lbl_music_artist = nullptr;
     s_lbl_music_album = nullptr;
@@ -774,25 +833,79 @@ void buildHome()
     lv_label_set_long_mode(s_lbl_server, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_server, "---");
 
-    // Right: the whole panel is one big hold-to-talk PTT button.
-    lv_obj_t *ptt = lv_button_create(scr);
-    lv_obj_set_pos(ptt, 502, 78);
-    lv_obj_set_size(ptt, 276, 270);
-    lv_obj_set_style_radius(ptt, 12, 0);
-    lv_obj_set_style_bg_color(ptt, lv_color_hex(kColorPanel2), 0);
-    lv_obj_set_style_bg_color(ptt, lv_color_hex(0x7A1F1F), LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(ptt, lv_color_hex(kColorBorder), 0);
-    lv_obj_set_style_border_width(ptt, 1, 0);
-    lv_obj_add_event_cb(ptt, softPttEvent, LV_EVENT_PRESSED, nullptr);
-    lv_obj_add_event_cb(ptt, softPttEvent, LV_EVENT_RELEASED, nullptr);
-    lv_obj_add_event_cb(ptt, softPttEvent, LV_EVENT_PRESS_LOST, nullptr);
-    lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
-    lv_obj_center(ptt_lbl);
-    lv_label_set_text(ptt_lbl, "PTT");
+    // Right: hold-to-talk PTT. With ESP-NOW enabled the area splits into two
+    // stacked PTTs -- top keys the NRL network, bottom is the dedicated
+    // ESP-NOW intercom PTT (purple when pressed to tell them apart).
+    const bool espnow_split = ESPNOW_LINK_IsEnabled();
+    s_home_espnow_split = espnow_split;
+    auto make_ptt = [&scr](int y, int h, void (*cb)(lv_event_t *), uint32_t pressed_color) {
+        lv_obj_t *ptt = lv_button_create(scr);
+        lv_obj_set_pos(ptt, 502, y);
+        lv_obj_set_size(ptt, 276, h);
+        lv_obj_set_style_radius(ptt, 12, 0);
+        lv_obj_set_style_bg_color(ptt, lv_color_hex(kColorPanel2), 0);
+        lv_obj_set_style_bg_color(ptt, lv_color_hex(pressed_color), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(ptt, lv_color_hex(kColorBorder), 0);
+        lv_obj_set_style_border_width(ptt, 1, 0);
+        lv_obj_add_event_cb(ptt, cb, LV_EVENT_PRESSED, nullptr);
+        lv_obj_add_event_cb(ptt, cb, LV_EVENT_RELEASED, nullptr);
+        lv_obj_add_event_cb(ptt, cb, LV_EVENT_PRESS_LOST, nullptr);
+        return ptt;
+    };
+    if (!espnow_split) {
+        lv_obj_t *ptt = make_ptt(78, 270, softPttEvent, 0x7A1F1F);
+        lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
+        lv_obj_center(ptt_lbl);
+        lv_label_set_text(ptt_lbl, "PTT");
+    } else {
+        lv_obj_t *ptt = make_ptt(78, 128, softPttEvent, 0x7A1F1F);
+        lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
+        lv_obj_center(ptt_lbl);
+        lv_label_set_text(ptt_lbl, "PTT");
 
-    button(scr, 22, 372, 180, 78, "VOL-", Action::VolumeDown);
-    button(scr, 222, 372, 356, 78, "CONFIG", Action::Config);
-    button(scr, 598, 372, 180, 78, "VOL+", Action::VolumeUp);
+        lv_obj_t *eptt = make_ptt(220, 128, espnowPttEvent, 0x4C1D95);
+        lv_obj_t *eptt_lbl = label(eptt, &lv_font_montserrat_20, kColorDuplex);
+        lv_obj_center(eptt_lbl);
+        lv_obj_set_style_text_align(eptt_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(eptt_lbl, "ESP-NOW\nPTT");
+    }
+
+    button(scr, 22, 372, 170, 78, "VOL-", Action::VolumeDown);
+    button(scr, 208, 372, 184, 78, "Config", Action::Config);
+    button(scr, 408, 372, 184, 78, "Apps", Action::Apps);
+    button(scr, 608, 372, 170, 78, "VOL+", Action::VolumeUp);
+}
+
+void buildApps()
+{
+    clearScreen();
+    s_page = Page::Apps;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    button(scr, 24, 84, 240, 120, "Music", Action::Music);
+    button(scr, 280, 84, 240, 120, "Radio", Action::Radio);
+    button(scr, 536, 84, 238, 120, "ESP-NOW", Action::EspNow);
+
+    // Shared playback target: one setting for everything the music player
+    // outputs (music / nanny beacon / net radio), so it lives here next to
+    // those features instead of inside any single one's settings page.
+    lv_obj_t *box = panel(scr, 24, 220, 750, 132);
+    fieldLabel(box, 0, 0, "Playback Target (music / beacon / radio)");
+    s_dd_music_target = styledDropdown(box, 0, 24, 340);
+    lv_dropdown_set_options(s_dd_music_target, "Local speaker\nNRL network\nLocal + network");
+    const int target = MUSIC_GetTarget();
+    lv_dropdown_set_selected(s_dd_music_target,
+                             (target >= MUSIC_TARGET_LOCAL && target <= MUSIC_TARGET_BOTH)
+                                 ? static_cast<uint32_t>(target)
+                                 : 0u);
+    lv_obj_add_event_cb(s_dd_music_target, musicTargetEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 370, 34);
+    lv_obj_set_width(s_lbl_form_status, 350);
+    lv_label_set_text(s_lbl_form_status, "Applies from the next track.");
+
+    button(scr, 24, 372, 230, 76, "Back", Action::Home);
 }
 
 void buildConfig()
@@ -801,17 +914,14 @@ void buildConfig()
     s_page = Page::Config;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    button(scr, 24, 84, 136, 132, "WiFi", Action::Wifi);
-    button(scr, 176, 84, 136, 132, "Station", Action::Station);
-    button(scr, 328, 84, 136, 132, "Audio", Action::Audio);
-    button(scr, 480, 84, 136, 132, "BT", Action::Bt);
-    button(scr, 632, 84, 142, 132, "Music", Action::Music);
+    // Settings entries only; the feature/app entries live on the Apps page.
+    button(scr, 24, 84, 240, 120, "WiFi", Action::Wifi);
+    button(scr, 280, 84, 240, 120, "Station", Action::Station);
+    button(scr, 536, 84, 238, 120, "Audio", Action::Audio);
+    button(scr, 24, 220, 240, 120, "BT", Action::Bt);
+    button(scr, 280, 220, 240, 120, "Nanny", Action::Nanny);
+    button(scr, 536, 220, 238, 120, "NAS", Action::Smb);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
-
-    lv_obj_t *info = label(scr, &lv_font_montserrat_20, kColorSub);
-    lv_obj_set_width(info, 720);
-    lv_obj_align(info, LV_ALIGN_TOP_LEFT, 34, 250);
-    lv_label_set_text(info, "Use the touch panels for quick changes. Full text editing remains available through the WiFi/BLE config portal.");
 }
 
 void sanitizeOptionText(const char *src, char *dst, size_t dst_size)
@@ -1012,6 +1122,180 @@ void buildAudio()
     button(scr, 544, 372, 230, 76, "Save", Action::SaveAudio);
 }
 
+// Dark-theme dropdown matching the WiFi page's (shared styling for the
+// playback-target selector).
+lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w)
+{
+    lv_obj_t *dd = lv_dropdown_create(parent);
+    lv_obj_set_pos(dd, x, y);
+    lv_obj_set_size(dd, w, 42);
+    lv_obj_set_style_radius(dd, 6, 0);
+    lv_obj_set_style_bg_color(dd, lv_color_hex(kColorPanel2), 0);
+    lv_obj_set_style_border_color(dd, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(dd, 1, 0);
+    lv_obj_set_style_text_color(dd, lv_color_hex(kColorText), 0);
+    lv_obj_t *dd_list = lv_dropdown_get_list(dd);
+    if (dd_list != nullptr) {
+        lv_obj_set_style_bg_color(dd_list, lv_color_hex(kColorPanel), 0);
+        lv_obj_set_style_text_color(dd_list, lv_color_hex(kColorText), 0);
+        lv_obj_set_style_border_color(dd_list, lv_color_hex(kColorBorder), 0);
+        lv_obj_set_style_max_height(dd_list, 220, 0);
+    }
+    return dd;
+}
+
+void buildSmb()
+{
+    clearScreen();
+    s_page = Page::Smb;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 86, 750, 250);
+
+    char server[64] = {};
+    char share[64] = {};
+    char user[32] = {};
+    char pass[64] = {};
+    (void)STORAGE_SmbGetConfig(server, sizeof(server), share, sizeof(share),
+                               user, sizeof(user), pass, sizeof(pass));
+
+    fieldLabel(box, 0, 0, "Server (NAS / PC)");
+    s_ta_smb_server = textArea(box, 0, 24, 340, "192.168.1.10", server, 63, false, nullptr, false);
+    fieldLabel(box, 370, 0, "Share Name");
+    s_ta_smb_share = textArea(box, 370, 24, 340, "music", share, 63, false, nullptr, false);
+    fieldLabel(box, 0, 82, "Username (empty = guest)");
+    s_ta_smb_user = textArea(box, 0, 106, 340, "guest", user, 31, false, nullptr, false);
+    fieldLabel(box, 370, 82, "Password");
+    s_ta_smb_pass = textArea(box, 370, 106, 340, "Password", pass, 63, true, nullptr, false);
+
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_obj_set_pos(s_lbl_form_status, 0, 174);
+    char status[96] = {};
+    STORAGE_SmbDescribe(status, sizeof(status));
+    char text[128];
+    snprintf(text, sizeof(text), "SMB: %s", status);
+    lv_label_set_text(s_lbl_form_status, text);
+
+    button(scr, 24, 372, 230, 76, "Back", Action::Config);
+    button(scr, 284, 372, 230, 76, "Clear", Action::ClearSmb);
+    button(scr, 544, 372, 230, 76, "Save", Action::SaveSmb);
+    createKeyboard(scr);
+}
+
+void buildNanny()
+{
+    clearScreen();
+    s_page = Page::Nanny;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 86, 750, 250);
+
+    char path[128] = {};
+    uint32_t interval = 0;
+    const bool armed = NANNY_GetBeacon(path, sizeof(path), &interval);
+
+    fieldLabel(box, 0, 0, "Beacon File Path");
+    s_ta_beacon_path = textArea(box, 0, 24, 460, "/sdcard/beacon/id.wav", path, 127, false, nullptr, false);
+    fieldLabel(box, 490, 0, "Interval (min)");
+    char interval_text[8] = {};
+    if (armed) {
+        snprintf(interval_text, sizeof(interval_text), "%lu", static_cast<unsigned long>(interval));
+    }
+    s_ta_beacon_interval = textArea(box, 490, 24, 140, "30", interval_text, 4, false, "0123456789", true);
+
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_obj_set_pos(s_lbl_form_status, 0, 100);
+    lv_label_set_text(s_lbl_form_status,
+                      armed ? "Beacon armed. Save applies changes; Beacon Off disarms."
+                            : "Beacon off. Set file path + minutes, then Save.");
+
+    button(scr, 24, 372, 230, 76, "Back", Action::Config);
+    button(scr, 284, 372, 230, 76, "Beacon Off", Action::BeaconOff);
+    button(scr, 544, 372, 230, 76, "Save", Action::SaveNanny);
+    createKeyboard(scr);
+}
+
+void buildRadio()
+{
+    clearScreen();
+    s_page = Page::Radio;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 86, 750, 250);
+
+    char url[256] = {};
+    MUSIC_GetRadioUrl(url, sizeof(url));
+
+    fieldLabel(box, 0, 0, "Stream URL (http:// or https://)");
+    s_ta_radio_url = textArea(box, 0, 24, 710, "http://...", url, 200, false, nullptr, false);
+
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_obj_set_pos(s_lbl_form_status, 0, 100);
+    const char *playing_path = MUSIC_CurrentPath();
+    if (MUSIC_IsPlaying() && strncmp(playing_path, "http", 4) == 0) {
+        char text[192];
+        snprintf(text, sizeof(text), "Playing: %s", playing_path);
+        lv_label_set_text(s_lbl_form_status, text);
+        lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorGood), 0);
+    } else {
+        lv_label_set_text(s_lbl_form_status, "Save the station URL, then tap Play.");
+    }
+
+    button(scr, 24, 372, 190, 76, "Back", Action::Apps);
+    button(scr, 230, 372, 170, 76, "Save", Action::SaveRadio);
+    button(scr, 416, 372, 170, 76, LV_SYMBOL_PLAY, Action::RadioPlay);
+    button(scr, 602, 372, 172, 76, LV_SYMBOL_STOP, Action::RadioStop);
+    createKeyboard(scr);
+}
+
+void refreshEspNowPage()
+{
+    if (s_lbl_espnow_status == nullptr) {
+        return;
+    }
+    char peer[16] = {};
+    ESPNOW_LINK_GetLastPeer(peer, sizeof(peer));
+    char text[128];
+    snprintf(text, sizeof(text), "State: %s\nLast peer heard: %s%s",
+             ESPNOW_LINK_IsEnabled() ? "ON" : "OFF",
+             peer[0] != '\0' ? peer : "(none)",
+             ESPNOW_LINK_IsReceiving() ? "  " LV_SYMBOL_VOLUME_MAX " receiving" : "");
+    if (setLabel(s_lbl_espnow_status, s_shown_espnow_status,
+                 sizeof(s_shown_espnow_status), text)) {
+        lv_obj_set_style_text_color(s_lbl_espnow_status,
+                                    lv_color_hex(ESPNOW_LINK_IsReceiving() ? kColorDuplex : kColorText), 0);
+    }
+}
+
+void buildEspNow()
+{
+    clearScreen();
+    s_page = Page::EspNow;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 86, 750, 250);
+
+    s_sw_espnow = switchControl(box, 0, 8, "ESP-NOW Intercom",
+                                ESPNOW_LINK_IsEnabled(), AudioControl::EspNow);
+
+    s_lbl_espnow_status = label(box, &lv_font_montserrat_20, kColorText);
+    lv_obj_set_width(s_lbl_espnow_status, 710);
+    lv_obj_set_pos(s_lbl_espnow_status, 0, 70);
+    refreshEspNowPage();
+
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_obj_set_pos(s_lbl_form_status, 0, 174);
+    lv_label_set_text(s_lbl_form_status,
+                      "Off-grid intercom with nearby devices. When on, the home screen "
+                      "gains a dedicated ESP-NOW PTT below the network PTT.");
+
+    button(scr, 24, 372, 230, 76, "Back", Action::Apps);
+}
+
 const char *musicBasename(const char *path)
 {
     if (path == nullptr) {
@@ -1183,7 +1467,7 @@ void buildMusic()
     lv_obj_set_style_text_font(s_list_music, &s_font_music_16, 0);
     populateMusicList();
 
-    button(scr, 24, 372, 150, 76, "Back", Action::Config);
+    button(scr, 24, 372, 150, 76, "Back", Action::Apps);
     button(scr, 190, 372, 120, 76, LV_SYMBOL_PREV, Action::MusicPrev);
     lv_obj_t *toggle = button(scr, 326, 372, 120, 76,
                               MUSIC_IsPlaying() ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY,
@@ -1416,6 +1700,86 @@ void resetAudioForm()
     } else if (s_lbl_form_status != nullptr) {
         lv_label_set_text(s_lbl_form_status, "Reset failed.");
         lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorBad), 0);
+    }
+}
+
+void saveSmbForm()
+{
+    const char *server = (s_ta_smb_server != nullptr) ? lv_textarea_get_text(s_ta_smb_server) : "";
+    const char *share = (s_ta_smb_share != nullptr) ? lv_textarea_get_text(s_ta_smb_share) : "";
+    const char *user = (s_ta_smb_user != nullptr) ? lv_textarea_get_text(s_ta_smb_user) : "";
+    const char *pass = (s_ta_smb_pass != nullptr) ? lv_textarea_get_text(s_ta_smb_pass) : "";
+    if (server[0] == '\0' && share[0] == '\0') {
+        STORAGE_SmbClear();
+        formStatus("SMB config cleared.", kColorGood);
+        return;
+    }
+    if (STORAGE_SmbConfigure(server, share, user, pass)) {
+        formStatus("SMB saved. Mounting in background...", kColorGood);
+    } else {
+        formStatus("Save failed: server and share are required.", kColorBad);
+    }
+}
+
+void clearSmbForm()
+{
+    STORAGE_SmbClear();
+    if (s_ta_smb_server != nullptr) lv_textarea_set_text(s_ta_smb_server, "");
+    if (s_ta_smb_share != nullptr) lv_textarea_set_text(s_ta_smb_share, "");
+    if (s_ta_smb_user != nullptr) lv_textarea_set_text(s_ta_smb_user, "");
+    if (s_ta_smb_pass != nullptr) lv_textarea_set_text(s_ta_smb_pass, "");
+    formStatus("SMB config cleared.", kColorGood);
+}
+
+void saveNannyForm()
+{
+    const char *path = (s_ta_beacon_path != nullptr) ? lv_textarea_get_text(s_ta_beacon_path) : "";
+    const char *interval_text =
+        (s_ta_beacon_interval != nullptr) ? lv_textarea_get_text(s_ta_beacon_interval) : "";
+    char *end = nullptr;
+    const unsigned long minutes = strtoul(interval_text, &end, 10);
+    const bool interval_ok = interval_text[0] != '\0' && end != interval_text && *end == '\0' &&
+                             minutes >= 1ul && minutes <= 1440ul;
+    if (!interval_ok) {
+        formStatus("Save failed: interval must be 1-1440 minutes.", kColorBad);
+        return;
+    }
+    if (NANNY_SetBeacon(path, static_cast<uint32_t>(minutes))) {
+        formStatus("Beacon armed.", kColorGood);
+    } else {
+        formStatus("Save failed: set the beacon file path.", kColorBad);
+    }
+}
+
+void beaconOffForm()
+{
+    NANNY_DisableBeacon();
+    if (s_ta_beacon_interval != nullptr) {
+        lv_textarea_set_text(s_ta_beacon_interval, "");
+    }
+    formStatus("Beacon disabled.", kColorGood);
+}
+
+// Save the station URL; with `play` also tune in right away.
+void saveRadioForm(const bool play)
+{
+    const char *url = (s_ta_radio_url != nullptr) ? lv_textarea_get_text(s_ta_radio_url) : "";
+    if (!MUSIC_SetRadioUrl(url)) {
+        formStatus("Save failed: URL must start with http:// or https://.", kColorBad);
+        return;
+    }
+    if (!play) {
+        formStatus("Station URL saved.", kColorGood);
+        return;
+    }
+    if (url[0] == '\0') {
+        formStatus("Set a station URL first.", kColorBad);
+        return;
+    }
+    if (MUSIC_PlayFile(url)) {
+        formStatus("Tuning in...", kColorGood);
+    } else {
+        formStatus("Play failed.", kColorBad);
     }
 }
 
@@ -1690,6 +2054,21 @@ void action(lv_event_t *event)
             (void)PLAYLIST_Scan();
             populateMusicList();
             break;
+        case Action::Radio: buildRadio(); break;
+        case Action::Nanny: buildNanny(); break;
+        case Action::Smb: buildSmb(); break;
+        case Action::Apps: buildApps(); break;
+        case Action::EspNow: buildEspNow(); break;
+        case Action::SaveSmb: saveSmbForm(); break;
+        case Action::ClearSmb: clearSmbForm(); break;
+        case Action::SaveNanny: saveNannyForm(); break;
+        case Action::BeaconOff: beaconOffForm(); break;
+        case Action::SaveRadio: saveRadioForm(false); break;
+        case Action::RadioPlay: saveRadioForm(true); break;
+        case Action::RadioStop:
+            MUSIC_Stop();
+            formStatus("Stopped.", kColorSub);
+            break;
     }
     s_last_refresh_ms = 0;
 }
@@ -1769,10 +2148,30 @@ void audioSwitchEvent(lv_event_t *event)
         case AudioControl::MicHpf:
             EXTERNAL_RADIO_SetMicHpfEnabled(checked, false);
             break;
+        case AudioControl::EspNow:
+            // Persists immediately (own NVS entry), no Save step. Enabling
+            // fails while WiFi is down -- revert the switch so it shows truth.
+            if (ESPNOW_LINK_SetEnabled(checked)) {
+                formStatus(checked ? "ESP-NOW intercom on." : "ESP-NOW intercom off.", kColorGood);
+            } else {
+                if (checked) {
+                    lv_obj_remove_state(obj, LV_STATE_CHECKED);
+                }
+                formStatus("ESP-NOW enable failed (WiFi not started).", kColorBad);
+            }
+            return;
         default:
             break;
     }
     markAudioChanged();
+}
+
+// Playback-target dropdown (nanny page): applies + persists immediately.
+void musicTargetEvent(lv_event_t *event)
+{
+    lv_obj_t *dd = lv_event_get_target_obj(event);
+    MUSIC_SetTarget(static_cast<int>(lv_dropdown_get_selected(dd)));
+    formStatus("Playback target saved (applies from the next track).", kColorGood);
 }
 
 // The Home "network" panel doubles as a hold-to-talk soft PTT: pressing anywhere
@@ -1791,6 +2190,23 @@ void softPttEvent(lv_event_t *event)
             return;
     }
     s_last_refresh_ms = 0;  // reflect the TX state on screen immediately
+}
+
+// Dedicated ESP-NOW hold-to-talk (bottom half of the split Home PTT).
+void espnowPttEvent(lv_event_t *event)
+{
+    switch (lv_event_get_code(event)) {
+        case LV_EVENT_PRESSED:
+            ESPNOW_LINK_SetPtt(true);
+            break;
+        case LV_EVENT_RELEASED:
+        case LV_EVENT_PRESS_LOST:
+            ESPNOW_LINK_SetPtt(false);
+            break;
+        default:
+            return;
+    }
+    s_last_refresh_ms = 0;
 }
 
 void refreshClock()
@@ -1857,22 +2273,41 @@ void refreshStationBadges()
 
 void refreshHome()
 {
+    // ESP-NOW got toggled while sitting on Home (config page, web, AT, or the
+    // deferred boot restore): rebuild so the PTT area matches (single/split).
+    if (ESPNOW_LINK_IsEnabled() != s_home_espnow_split) {
+        buildHome();
+        return;
+    }
+
     char voice_call[8] = {};
     unsigned voice_ssid = 0;
     const bool rx = NRLAudioBridge_GetRemoteCaller(voice_call, sizeof(voice_call), &voice_ssid);
     const bool tx = STATUS_IO_IsSqlActive();
+    const bool espnow_tx = ESPNOW_LINK_PttActive();
+    const bool espnow_rx = ESPNOW_LINK_IsReceiving();
+    char espnow_peer[16] = {};
+    if (espnow_rx) {
+        ESPNOW_LINK_GetLastPeer(espnow_peer, sizeof(espnow_peer));
+    }
 
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
-    // Main panel shows only the remote caller. Local station lives in the top bar.
+    // Main panel shows only the remote caller (NRL stream first, else the
+    // ESP-NOW peer). Local station lives in the top bar.
     const bool has_caller = (rx && voice_call[0] != '\0');
+    const bool has_espnow_caller = (!has_caller && espnow_rx && espnow_peer[0] != '\0');
     char call[24] = {};
-    formatStationBadge(call, sizeof(call), has_caller ? voice_call : nullptr, voice_ssid);
+    if (has_espnow_caller) {
+        snprintf(call, sizeof(call), "%s", espnow_peer);
+    } else {
+        formatStationBadge(call, sizeof(call), has_caller ? voice_call : nullptr, voice_ssid);
+    }
     setLabel(s_lbl_callsign, s_shown_callsign, sizeof(s_shown_callsign), call);
     if (s_lbl_callsign != nullptr) {
         // Spread only the placeholder dashes so they read bigger; keep a real
         // callsign at normal spacing. Only re-apply on change (avoids a full
         // re-render every tick).
-        const int letter_space = has_caller ? 0 : 12;
+        const int letter_space = (has_caller || has_espnow_caller) ? 0 : 12;
         if (letter_space != s_ls_callsign) {
             s_ls_callsign = letter_space;
             lv_obj_set_style_text_letter_space(s_lbl_callsign, letter_space, 0);
@@ -1889,10 +2324,19 @@ void refreshHome()
     } else if (tx) {
         caption = "TRANSMITTING";
         color = kColorTx;
+    } else if (espnow_tx) {
+        // Dedicated ESP-NOW PTT held: purple, to match its button.
+        caption = "ESP-NOW TX";
+        color = kColorDuplex;
     } else if (rx) {
         caption = "RECEIVING";
         color = kColorAccent;
         call_color = kColorAccent;
+    } else if (espnow_rx) {
+        // Voice arriving over the off-grid ESP-NOW link (not the NRL server).
+        caption = "ESP-NOW RX";
+        color = kColorDuplex;
+        call_color = kColorDuplex;
     } else {
         call_color = kColorDim;
     }
@@ -2005,6 +2449,9 @@ void refresh()
     if (s_page == Page::Music) {
         refreshMusic();
     }
+    if (s_page == Page::EspNow) {
+        refreshEspNowPage();
+    }
 }
 
 // Rebuild the active page so a font-engine switch takes effect on every
@@ -2019,6 +2466,11 @@ void rebuildCurrentPage()
         case Page::Audio: buildAudio(); break;
         case Page::Bt: buildBt(); break;
         case Page::Music: buildMusic(); break;
+        case Page::Radio: buildRadio(); break;
+        case Page::Nanny: buildNanny(); break;
+        case Page::Smb: buildSmb(); break;
+        case Page::Apps: buildApps(); break;
+        case Page::EspNow: buildEspNow(); break;
     }
     s_last_refresh_ms = 0;
 }

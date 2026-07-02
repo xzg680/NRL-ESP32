@@ -11,7 +11,9 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <nvs.h>
 
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "MUSIC";
@@ -35,6 +37,42 @@ static volatile int s_target = MUSIC_TARGET_LOCAL;
 // 8 kHz mono scratch for the network branch of the fan-out.
 static int16_t *s_net_buffer = nullptr;
 static size_t s_net_capacity = 0;
+
+// Playback target + net-radio station persist in NVS so the web portal and
+// LCD UI survive a reboot (the AT path shares the same setters).
+constexpr const char *kMediaNvsNamespace = "media";
+static char s_radio_url[kMaxPathLen] = {};
+
+static void media_config_load(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(kMediaNvsNamespace, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    uint8_t target = MUSIC_TARGET_LOCAL;
+    if (nvs_get_u8(nvs, "target", &target) == ESP_OK &&
+        target <= MUSIC_TARGET_BOTH) {
+        s_target = target;
+    }
+    size_t len = sizeof(s_radio_url);
+    if (nvs_get_str(nvs, "radio_url", s_radio_url, &len) != ESP_OK) {
+        s_radio_url[0] = '\0';
+    }
+    nvs_close(nvs);
+}
+
+static void media_config_save(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(kMediaNvsNamespace, NVS_READWRITE, &nvs) != ESP_OK) {
+        ESP_LOGW(TAG, "media config persist failed");
+        return;
+    }
+    (void)nvs_set_u8(nvs, "target", static_cast<uint8_t>(s_target));
+    (void)nvs_set_str(nvs, "radio_url", s_radio_url);
+    (void)nvs_commit(nvs);
+    nvs_close(nvs);
+}
 
 static bool ensure_stereo_capacity(const size_t bytes)
 {
@@ -235,6 +273,7 @@ static void on_voice_start(void)
 extern "C" void MUSIC_Init(void)
 {
     AudioFocus_RegisterVoiceStart(on_voice_start);
+    media_config_load();
 }
 
 extern "C" bool MUSIC_PlayFile(const char *path)
@@ -302,12 +341,37 @@ extern "C" void MUSIC_SetTrackEndCallback(MusicTrackEndCb_t callback)
 
 extern "C" void MUSIC_SetTarget(const int target)
 {
-    if (target >= MUSIC_TARGET_LOCAL && target <= MUSIC_TARGET_BOTH) {
+    if (target >= MUSIC_TARGET_LOCAL && target <= MUSIC_TARGET_BOTH &&
+        target != s_target) {
         s_target = target;
+        media_config_save();
     }
 }
 
 extern "C" int MUSIC_GetTarget(void)
 {
     return s_target;
+}
+
+extern "C" bool MUSIC_SetRadioUrl(const char *url)
+{
+    if (url == nullptr || strlen(url) >= sizeof(s_radio_url)) {
+        return false;
+    }
+    if (url[0] != '\0' &&
+        strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+        return false;
+    }
+    if (strcmp(url, s_radio_url) != 0) {
+        snprintf(s_radio_url, sizeof(s_radio_url), "%s", url);
+        media_config_save();
+    }
+    return true;
+}
+
+extern "C" void MUSIC_GetRadioUrl(char *out, const size_t out_size)
+{
+    if (out != nullptr && out_size > 0u) {
+        snprintf(out, out_size, "%s", s_radio_url);
+    }
 }

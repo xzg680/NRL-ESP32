@@ -22,6 +22,7 @@ struct WifiConfigPortalPageState {
     bool network_active;
     bool device_active;
     bool audio_active;
+    bool media_active;
     std::string footer;
 };
 
@@ -30,6 +31,9 @@ std::string WifiConfigPortalView_BuildNetworkSection(const ExternalRadioConfig *
                                                      size_t scan_count);
 std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *config);
 std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config);
+// Media / nanny page (S31 only; returns "" elsewhere): playback target,
+// nanny beacon, net radio, SMB network share, ESP-NOW intercom.
+std::string WifiConfigPortalView_BuildMediaSections(void);
 std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
                                                  const WifiConfigPortalPageState &state,
                                                  const std::string &form_sections);

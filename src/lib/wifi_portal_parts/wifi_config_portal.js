@@ -133,7 +133,33 @@ const translations = {
         audioResetDefaults: 'Restore Defaults',
         audioExpertMode: 'Expert Mode',
         saved: 'Saved',
-        saveFailed: 'Save failed'
+        saveFailed: 'Save failed',
+        mediaConfig: 'Media / Nanny',
+        mediaHeadline: 'Media / Nanny',
+        mediaIntro: 'Configure playback target, nanny beacon, net radio, and SMB network share.',
+        playback: 'Playback',
+        musicTarget: 'Playback Target',
+        musicTargetHint: 'One shared setting for everything the player outputs: music, nanny beacon, and net radio.',
+        targetLocal: 'Local speaker',
+        targetNet: 'NRL network',
+        targetBoth: 'Local + network',
+        espnowLabel: 'ESP-NOW Intercom',
+        espnowText: 'Off-grid voice link between nearby devices',
+        nannyBeacon: 'Nanny Beacon',
+        nannyBeaconHint: 'Play a beacon file every N minutes through the configured target.',
+        beaconPath: 'Beacon file path',
+        beaconInterval: 'Interval (minutes, 1-1440)',
+        beaconEnabledText: 'Beacon armed (uncheck and Save to disable)',
+        netRadio: 'Net Radio',
+        radioUrl: 'Stream URL (http:// or https://)',
+        radioPlay: 'Play',
+        radioStop: 'Stop',
+        smbShare: 'Network Share (SMB)',
+        smbServer: 'Server (NAS / PC)',
+        smbShareName: 'Share name',
+        smbUser: 'Username (empty = guest)',
+        smbPassword: 'Password',
+        smbClear: 'Clear'
       },
       zh: {
         language: '语言',
@@ -274,7 +300,33 @@ const translations = {
         batteryCalibrated: '校准后 (mV)',
         batteryActual: '万用表测量值 (mV) -- 点击校准按当前读数拟合系数',
         batteryCalibrate: '校准',
-        batteryScale: '校准系数 (500-2000，1000 表示不修正)'
+        batteryScale: '校准系数 (500-2000，1000 表示不修正)',
+        mediaConfig: '媒体/保姆',
+        mediaHeadline: '媒体/保姆',
+        mediaIntro: '配置播放目标、保姆信标、网络收音机和 SMB 网络共享。',
+        playback: '播放',
+        musicTarget: '播放目标',
+        musicTargetHint: '全局共用设置：音乐、保姆信标、网络收音机的播放都按它路由。',
+        targetLocal: '本地扬声器',
+        targetNet: 'NRL 网络',
+        targetBoth: '本地 + 网络',
+        espnowLabel: 'ESP-NOW 对讲',
+        espnowText: '附近设备间脱网语音互通',
+        nannyBeacon: '保姆信标',
+        nannyBeaconHint: '每隔 N 分钟按播放目标播放一段信标音频。',
+        beaconPath: '信标文件路径',
+        beaconInterval: '间隔 (分钟, 1-1440)',
+        beaconEnabledText: '信标已启用 (取消勾选并保存即停用)',
+        netRadio: '网络收音机',
+        radioUrl: '直播流地址 (http:// 或 https://)',
+        radioPlay: '播放',
+        radioStop: '停止',
+        smbShare: '网络共享 (SMB)',
+        smbServer: '服务器 (NAS / 电脑)',
+        smbShareName: '共享名',
+        smbUser: '用户名 (留空为来宾)',
+        smbPassword: '密码',
+        smbClear: '清除'
       }
     };
 
@@ -452,6 +504,25 @@ const translations = {
 
     function submitSwitch(input) {
       postAndApply(input.form);
+    }
+
+    // Post a form plus one extra action flag (e.g. radio_play=1). Needed
+    // because postForm serialises FormData without the clicked submit
+    // button, so action buttons are type="button" with an onclick instead.
+    function submitFormAction(button, name) {
+      const form = button ? button.form : null;
+      if (!form) return;
+      const flag = document.createElement('input');
+      flag.type = 'hidden';
+      flag.name = name;
+      flag.value = '1';
+      form.appendChild(flag);
+      button.disabled = true;
+      postAndApply(form).then((reply) => {
+        flag.remove();
+        button.disabled = false;
+        flashButtonFeedback(button, reply && reply.ok);
+      });
     }
 
     async function scanWifi() {

@@ -162,3 +162,60 @@
       <div class="span-2 eq-panel"><div class="section-head"><h2 data-i18n="adcEqCoefficients">ADC EQ Coefficients</h2><span class="hint" data-i18n="adcEqCoefficientsText">30-bit unsigned register values for B0/A1/A2/B1/B2</span></div><form class="eq-preset-form" method="post" action="/save_nrl"><input type="hidden" name="adceq_b0" value="227219675"><input type="hidden" name="adceq_a1" value="625668518"><input type="hidden" name="adceq_a2" value="192369940"><input type="hidden" name="adceq_b1" value="619302472"><input type="hidden" name="adceq_b2" value="227219675"><button class="secondary btn-small" type="button" onclick="applyAdcEqPreset(this)">硬件哑音过滤</button></form>{{ADCEQ_B0_SLIDER}}{{ADCEQ_A1_SLIDER}}{{ADCEQ_A2_SLIDER}}{{ADCEQ_B1_SLIDER}}{{ADCEQ_B2_SLIDER}}</div>
     </div></div>
 <!-- @endtemplate -->
+
+<!-- @template MEDIA_TAB -->
+<a class="{{MEDIA_ACTIVE}}" href="/media" data-i18n="mediaConfig">Media / Nanny</a>
+<!-- @endtemplate -->
+
+<!-- @template MEDIA_SECTIONS -->
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="musicTarget">Playback Target</h2><span class="hint" data-i18n="musicTargetHint">One shared setting for everything the player outputs: music, nanny beacon, and net radio.</span></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="musicTarget">Playback Target</label><select name="music_target" onchange="submitSwitch(this)"><option value="0"{{TARGET_LOCAL_SELECTED}} data-i18n="targetLocal">Local speaker</option><option value="1"{{TARGET_NET_SELECTED}} data-i18n="targetNet">NRL network</option><option value="2"{{TARGET_BOTH_SELECTED}} data-i18n="targetBoth">Local + network</option></select></form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="espnowLabel">ESP-NOW Intercom</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowLabel">ESP-NOW Intercom</label><input type="hidden" name="espnow_present" value="1"><label class="hint"><input type="checkbox" name="espnow_enabled" value="1" onchange="submitSwitch(this)" {{ESPNOW_CHECKED}}><span data-i18n="espnowText">Off-grid voice link between nearby devices</span></label></form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="nannyBeacon">Nanny Beacon</h2><span class="hint" data-i18n="nannyBeaconHint">Play a beacon file every N minutes through the configured target.</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_media">
+      <div class="subgrid">
+        <div><label data-i18n="beaconPath">Beacon file path</label><input name="beacon_path" value="{{BEACON_PATH}}" placeholder="/sdcard/beacon/id.wav"></div>
+        <div><label data-i18n="beaconInterval">Interval (minutes, 1-1440)</label><input name="beacon_interval" value="{{BEACON_INTERVAL}}"></div>
+        <div class="span-2"><input type="hidden" name="beacon_present" value="1"><label class="hint"><input type="checkbox" name="beacon_enabled" value="1" {{BEACON_CHECKED}}><span data-i18n="beaconEnabledText">Beacon armed (uncheck and Save to disable)</span></label></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="netRadio">Net Radio</h2><span class="hint mono">{{RADIO_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_media">
+      <div class="subgrid">
+        <div class="span-2"><label data-i18n="radioUrl">Stream URL (http:// or https://)</label><input name="radio_url" value="{{RADIO_URL}}" placeholder="http://..."></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="btn-small" type="button" onclick="submitFormAction(this, 'radio_play')" data-i18n="radioPlay">Play</button><button class="secondary btn-small" type="button" onclick="submitFormAction(this, 'radio_stop')" data-i18n="radioStop">Stop</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="smbShare">Network Share (SMB)</h2><span class="hint mono">{{SMB_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_media">
+      <div class="subgrid">
+        <div><label data-i18n="smbServer">Server (NAS / PC)</label><input name="smb_server" value="{{SMB_SERVER}}" placeholder="192.168.1.10"></div>
+        <div><label data-i18n="smbShareName">Share name</label><input name="smb_share" value="{{SMB_SHARE}}" placeholder="music"></div>
+        <div><label data-i18n="smbUser">Username (empty = guest)</label><input name="smb_user" value="{{SMB_USER}}"></div>
+        <div><label data-i18n="smbPassword">Password</label><input name="smb_password" type="password" value="{{SMB_PASSWORD}}"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="secondary btn-small" type="button" onclick="submitFormAction(this, 'smb_clear')" data-i18n="smbClear">Clear</button></div>
+    </form>
+  </div>
+</section>
+<!-- @endtemplate -->
