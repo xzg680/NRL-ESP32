@@ -11,6 +11,8 @@ set(app_sources
     services/music_playlist.cpp
     services/storage_service.cpp
     app/driver/audio_passthrough.cpp
+    app/driver/fonts/lv_font_cjk_16.c
+    app/driver/fonts/lv_font_cjk_20.c
     app/driver/eeprom.cpp
     app/driver/display.cpp
     app/driver/display_s31.cpp

@@ -27,3 +27,4 @@ web-flasher/manifest-*.json
 web-flasher/index.html
 .claude/settings.json
 web-flasher.tgz
+scripts/cache/

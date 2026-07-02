@@ -13,6 +13,7 @@
 #include "../../services/music_playlist.h"
 #include "../../services/storage_service.h"
 #include "external_radio.h"
+#include "fonts/lv_font_cjk.h"
 #include "s31_i2c.h"
 #include "status_io.h"
 
@@ -176,6 +177,12 @@ bool s_shown_music_playing = false;
 CoverBitmap s_music_cover_bmp = {};
 lv_image_dsc_t s_music_cover_dsc = {};
 constexpr uint16_t kMusicCoverDim = 152;
+
+// Montserrat with the generated CJK font as fallback: ASCII keeps the Latin
+// design, Chinese tags/filenames render from lv_font_cjk_*. Initialised in
+// Display_Init (lv_font_montserrat_* are const, so mutable copies).
+lv_font_t s_font_music_16;
+lv_font_t s_font_music_20;
 
 char s_shown_caption[24] = {};
 char s_shown_callsign[16] = {};
@@ -1135,19 +1142,19 @@ void buildMusic()
         lv_obj_add_flag(s_lbl_music_icon, LV_OBJ_FLAG_HIDDEN);
     }
 
-    s_lbl_music_title = label(card, &lv_font_montserrat_20, kColorText);
+    s_lbl_music_title = label(card, &s_font_music_20, kColorText);
     lv_obj_set_width(s_lbl_music_title, 270);
     lv_obj_align(s_lbl_music_title, LV_ALIGN_TOP_LEFT, 0, 162);
     lv_label_set_long_mode(s_lbl_music_title, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_music_title, "--");
 
-    s_lbl_music_artist = label(card, &lv_font_montserrat_16, kColorSub);
+    s_lbl_music_artist = label(card, &s_font_music_16, kColorSub);
     lv_obj_set_width(s_lbl_music_artist, 270);
     lv_obj_align(s_lbl_music_artist, LV_ALIGN_TOP_LEFT, 0, 196);
     lv_label_set_long_mode(s_lbl_music_artist, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_music_artist, "");
 
-    s_lbl_music_album = label(card, &lv_font_montserrat_16, kColorDim);
+    s_lbl_music_album = label(card, &s_font_music_16, kColorDim);
     lv_obj_set_width(s_lbl_music_album, 270);
     lv_obj_align(s_lbl_music_album, LV_ALIGN_TOP_LEFT, 0, 222);
     lv_label_set_long_mode(s_lbl_music_album, LV_LABEL_LONG_DOT);
@@ -1163,6 +1170,7 @@ void buildMusic()
     lv_obj_set_size(s_list_music, 436, 274);
     lv_obj_set_style_bg_color(s_list_music, lv_color_hex(kColorPanel), 0);
     lv_obj_set_style_border_color(s_list_music, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_text_font(s_list_music, &s_font_music_16, 0);
     populateMusicList();
 
     button(scr, 24, 372, 150, 76, "Back", Action::Config);
@@ -1999,6 +2007,12 @@ extern "C" void Display_Init(void)
     if (!initPanel() || !initLvgl()) {
         return;
     }
+    // Music-page fonts: Montserrat primary with the generated CJK fallback
+    // so Chinese track tags render (lv_font_montserrat_* are const).
+    s_font_music_16 = lv_font_montserrat_16;
+    s_font_music_16.fallback = &lv_font_cjk_16;
+    s_font_music_20 = lv_font_montserrat_20;
+    s_font_music_20.fallback = &lv_font_cjk_20;
     initTouch();
     buildHome();
     refresh();
