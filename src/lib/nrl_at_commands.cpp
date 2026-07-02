@@ -9,6 +9,7 @@
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
 #include "services/music_player.h"
+#include "services/music_playlist.h"
 #include "driver/sci_serial.h"
 
 #include <esp_log.h>
@@ -846,6 +847,31 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     if (stringEqualsIgnoreCase(command.command, "STOP")) {
         MUSIC_Stop();
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "STOP", "OK");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "NEXT") ||
+        stringEqualsIgnoreCase(command.command, "PREV")) {
+        const bool ok = stringEqualsIgnoreCase(command.command, "NEXT") ? PLAYLIST_Next() : PLAYLIST_Prev();
+        if (!ok) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "PLAYLIST_EMPTY");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "PLAY", MUSIC_CurrentPath());
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "PLAYLIST")) {
+        if (is_query) {
+            char count_line[16];
+            snprintf(count_line, sizeof(count_line), "%u", static_cast<unsigned>(PLAYLIST_Count()));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "TRACKS", count_line);
+            return;
+        }
+        const size_t found = PLAYLIST_Scan();
+        char count_line[16];
+        snprintf(count_line, sizeof(count_line), "%u", static_cast<unsigned>(found));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "TRACKS", count_line);
         return;
     }
 

@@ -42,6 +42,8 @@ static bool ensure_stereo_capacity(const size_t bytes)
     return true;
 }
 
+static volatile MusicTrackEndCb_t s_track_end_cb = nullptr;
+
 static void player_task(void *)
 {
     // Tags first (cheap header/tail reads), so the UI has title/cover as
@@ -49,6 +51,7 @@ static void player_task(void *)
     (void)MEDIA_META_Read(s_current_path, &s_track_info, true);
 
     bool hifi_acquired = false;
+    bool reached_end = false;
     MediaDecoder *decoder = MEDIA_DECODER_Open(s_current_path);
 
     while (decoder != nullptr && !s_stop_requested) {
@@ -58,6 +61,8 @@ static void player_task(void *)
         if (rc <= 0) {
             if (rc < 0) {
                 ESP_LOGE(TAG, "decode failed: %s", s_current_path);
+            } else {
+                reached_end = hifi_acquired;
             }
             break;
         }
@@ -119,6 +124,15 @@ static void player_task(void *)
 
     s_playing = false;
     s_player_task = nullptr;
+
+    // Auto-advance hook: the codec is released and s_player_task cleared, so
+    // the callback may call MUSIC_PlayFile (it spawns a fresh task) while
+    // this one is about to delete itself.
+    const MusicTrackEndCb_t end_cb = s_track_end_cb;
+    if (reached_end && !s_stop_requested && end_cb != nullptr) {
+        end_cb();
+    }
+
     vTaskDelete(nullptr);
 }
 
@@ -195,4 +209,9 @@ extern "C" const char *MUSIC_CurrentPath(void)
 extern "C" const MediaTrackInfo *MUSIC_GetTrackInfo(void)
 {
     return &s_track_info;
+}
+
+extern "C" void MUSIC_SetTrackEndCallback(MusicTrackEndCb_t callback)
+{
+    s_track_end_cb = callback;
 }

@@ -8,6 +8,9 @@
 #include "../../lib/nrl_bt_hfp.h"
 #include "../../lib/nrl_net_compat.h"
 #include "../../lib/nrl_wifi.h"
+#include "../../services/music_player.h"
+#include "../../services/music_playlist.h"
+#include "../../services/storage_service.h"
 #include "external_radio.h"
 #include "s31_i2c.h"
 #include "status_io.h"
@@ -68,6 +71,7 @@ enum class Page : uint8_t {
     Station,
     Audio,
     Bt,
+    Music,
 };
 
 enum class Action : intptr_t {
@@ -88,6 +92,11 @@ enum class Action : intptr_t {
     SaveStation,
     SaveAudio,
     ResetAudio,
+    Music,
+    MusicToggle,
+    MusicNext,
+    MusicPrev,
+    MusicRescan,
 };
 
 enum class AudioControl : intptr_t {
@@ -146,6 +155,17 @@ lv_obj_t *s_sw_mic_hpf = nullptr;
 lv_obj_t *s_sw_bt = nullptr;
 lv_obj_t *s_lbl_bt_status = nullptr;
 lv_obj_t *s_keyboard = nullptr;
+
+// Music player page widgets. The list is rebuilt on page entry / rescan;
+// the now-playing labels update from refresh().
+lv_obj_t *s_lbl_music_title = nullptr;
+lv_obj_t *s_lbl_music_artist = nullptr;
+lv_obj_t *s_lbl_music_album = nullptr;
+lv_obj_t *s_lbl_music_state = nullptr;
+lv_obj_t *s_btn_music_toggle_label = nullptr;
+lv_obj_t *s_list_music = nullptr;
+char s_shown_music_path[128] = {};
+bool s_shown_music_playing = false;
 
 char s_shown_caption[24] = {};
 char s_shown_callsign[16] = {};
@@ -616,6 +636,14 @@ void clearScreen()
     s_sw_bt = nullptr;
     s_lbl_bt_status = nullptr;
     s_keyboard = nullptr;
+    s_lbl_music_title = nullptr;
+    s_lbl_music_artist = nullptr;
+    s_lbl_music_album = nullptr;
+    s_lbl_music_state = nullptr;
+    s_btn_music_toggle_label = nullptr;
+    s_list_music = nullptr;
+    s_shown_music_path[0] = '\0';
+    s_shown_music_playing = false;
 }
 
 void topBar(lv_obj_t *scr)
@@ -744,10 +772,11 @@ void buildConfig()
     s_page = Page::Config;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    button(scr, 24, 84, 172, 132, "WiFi", Action::Wifi);
-    button(scr, 214, 84, 172, 132, "Station", Action::Station);
-    button(scr, 404, 84, 172, 132, "Audio", Action::Audio);
-    button(scr, 594, 84, 172, 132, "Bluetooth", Action::Bt);
+    button(scr, 24, 84, 136, 132, "WiFi", Action::Wifi);
+    button(scr, 176, 84, 136, 132, "Station", Action::Station);
+    button(scr, 328, 84, 136, 132, "Audio", Action::Audio);
+    button(scr, 480, 84, 136, 132, "BT", Action::Bt);
+    button(scr, 632, 84, 142, 132, "Music", Action::Music);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
 
     lv_obj_t *info = label(scr, &lv_font_montserrat_20, kColorSub);
@@ -952,6 +981,157 @@ void buildAudio()
     button(scr, 24, 372, 230, 76, "Back", Action::Config);
     button(scr, 284, 372, 230, 76, "Reset", Action::ResetAudio);
     button(scr, 544, 372, 230, 76, "Save", Action::SaveAudio);
+}
+
+const char *musicBasename(const char *path)
+{
+    if (path == nullptr) {
+        return "";
+    }
+    const char *slash = strrchr(path, '/');
+    return (slash != nullptr) ? slash + 1 : path;
+}
+
+void musicListEvent(lv_event_t *event)
+{
+    const size_t index = static_cast<size_t>(
+        reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
+    (void)PLAYLIST_PlayIndex(index);
+    s_last_refresh_ms = 0;
+}
+
+void populateMusicList()
+{
+    if (s_list_music == nullptr) {
+        return;
+    }
+    lv_obj_clean(s_list_music);
+    const size_t count = PLAYLIST_Count();
+    if (count == 0u) {
+        lv_obj_t *empty = lv_list_add_text(s_list_music,
+                                           STORAGE_SdMounted()
+                                               ? "No tracks. Put files in /sdcard/music and Rescan."
+                                               : "No TF card mounted.");
+        lv_obj_set_style_text_color(empty, lv_color_hex(kColorSub), 0);
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        lv_obj_t *btn = lv_list_add_button(s_list_music, LV_SYMBOL_AUDIO,
+                                           musicBasename(PLAYLIST_GetPath(i)));
+        lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel2), 0);
+        lv_obj_set_style_text_color(btn, lv_color_hex(kColorText), 0);
+        lv_obj_add_event_cb(btn, musicListEvent, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+    }
+}
+
+void refreshMusic()
+{
+    const bool playing = MUSIC_IsPlaying();
+    const char *path = MUSIC_CurrentPath();
+    const bool track_changed = strncmp(path, s_shown_music_path, sizeof(s_shown_music_path)) != 0;
+    if (!track_changed && playing == s_shown_music_playing) {
+        return;
+    }
+    strncpy(s_shown_music_path, path, sizeof(s_shown_music_path) - 1u);
+    s_shown_music_path[sizeof(s_shown_music_path) - 1u] = '\0';
+    s_shown_music_playing = playing;
+
+    const MediaTrackInfo *track = MUSIC_GetTrackInfo();
+    if (s_lbl_music_title != nullptr) {
+        const char *title = (track != nullptr && track->title[0] != '\0')
+                                ? track->title
+                                : musicBasename(path);
+        lv_label_set_text(s_lbl_music_title, (title[0] != '\0') ? title : "--");
+    }
+    if (s_lbl_music_artist != nullptr) {
+        lv_label_set_text(s_lbl_music_artist,
+                          (track != nullptr && track->artist[0] != '\0') ? track->artist : "");
+    }
+    if (s_lbl_music_album != nullptr) {
+        lv_label_set_text(s_lbl_music_album,
+                          (track != nullptr && track->album[0] != '\0') ? track->album : "");
+    }
+    if (s_lbl_music_state != nullptr) {
+        lv_label_set_text(s_lbl_music_state, playing ? "Playing" : "Stopped");
+        lv_obj_set_style_text_color(s_lbl_music_state,
+                                    lv_color_hex(playing ? kColorGood : kColorSub), 0);
+    }
+    if (s_btn_music_toggle_label != nullptr) {
+        lv_label_set_text(s_btn_music_toggle_label, playing ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY);
+    }
+}
+
+void buildMusic()
+{
+    clearScreen();
+    s_page = Page::Music;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    // Left: now-playing card (cover art render arrives with the JPEG
+    // decoder hookup; the box doubles as its placeholder).
+    lv_obj_t *card = panel(scr, 24, 78, 300, 274);
+    lv_obj_t *icon = label(card, &lv_font_montserrat_48, kColorDim);
+    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 18);
+    lv_label_set_text(icon, LV_SYMBOL_AUDIO);
+
+    s_lbl_music_title = label(card, &lv_font_montserrat_20, kColorText);
+    lv_obj_set_width(s_lbl_music_title, 270);
+    lv_obj_align(s_lbl_music_title, LV_ALIGN_TOP_LEFT, 0, 104);
+    lv_label_set_long_mode(s_lbl_music_title, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_music_title, "--");
+
+    s_lbl_music_artist = label(card, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_music_artist, 270);
+    lv_obj_align(s_lbl_music_artist, LV_ALIGN_TOP_LEFT, 0, 140);
+    lv_label_set_long_mode(s_lbl_music_artist, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_music_artist, "");
+
+    s_lbl_music_album = label(card, &lv_font_montserrat_16, kColorDim);
+    lv_obj_set_width(s_lbl_music_album, 270);
+    lv_obj_align(s_lbl_music_album, LV_ALIGN_TOP_LEFT, 0, 168);
+    lv_label_set_long_mode(s_lbl_music_album, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_music_album, "");
+
+    s_lbl_music_state = label(card, &lv_font_montserrat_16, kColorSub);
+    lv_obj_align(s_lbl_music_state, LV_ALIGN_BOTTOM_LEFT, 0, -4);
+    lv_label_set_text(s_lbl_music_state, "Stopped");
+
+    // Right: scrollable track list.
+    s_list_music = lv_list_create(scr);
+    lv_obj_set_pos(s_list_music, 340, 78);
+    lv_obj_set_size(s_list_music, 436, 274);
+    lv_obj_set_style_bg_color(s_list_music, lv_color_hex(kColorPanel), 0);
+    lv_obj_set_style_border_color(s_list_music, lv_color_hex(kColorBorder), 0);
+    populateMusicList();
+
+    button(scr, 24, 372, 150, 76, "Back", Action::Config);
+    button(scr, 190, 372, 120, 76, LV_SYMBOL_PREV, Action::MusicPrev);
+    lv_obj_t *toggle = button(scr, 326, 372, 120, 76,
+                              MUSIC_IsPlaying() ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY,
+                              Action::MusicToggle);
+    s_btn_music_toggle_label = lv_obj_get_child(toggle, 0);
+    button(scr, 462, 372, 120, 76, LV_SYMBOL_NEXT, Action::MusicNext);
+    button(scr, 598, 372, 178, 76, "Rescan", Action::MusicRescan);
+
+    // Prime the now-playing card.
+    s_shown_music_path[0] = '\1'; // force refreshMusic to repaint
+    refreshMusic();
+}
+
+void musicToggle()
+{
+    if (MUSIC_IsPlaying()) {
+        MUSIC_Stop();
+        return;
+    }
+    const int current = PLAYLIST_CurrentIndex();
+    if (current >= 0) {
+        (void)PLAYLIST_PlayIndex(static_cast<size_t>(current));
+    } else {
+        (void)PLAYLIST_Next();
+    }
 }
 
 void updateAudioValueLabels()
@@ -1425,6 +1605,14 @@ void action(lv_event_t *event)
         case Action::SaveStation: saveStationForm(); break;
         case Action::SaveAudio: saveAudioForm(); break;
         case Action::ResetAudio: resetAudioForm(); break;
+        case Action::Music: buildMusic(); break;
+        case Action::MusicToggle: musicToggle(); break;
+        case Action::MusicNext: (void)PLAYLIST_Next(); break;
+        case Action::MusicPrev: (void)PLAYLIST_Prev(); break;
+        case Action::MusicRescan:
+            (void)PLAYLIST_Scan();
+            populateMusicList();
+            break;
     }
     s_last_refresh_ms = 0;
 }
@@ -1736,6 +1924,9 @@ void refresh()
     refreshBtTop();
     if (s_page == Page::Bt) {
         refreshBtPage();
+    }
+    if (s_page == Page::Music) {
+        refreshMusic();
     }
 }
 

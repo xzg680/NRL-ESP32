@@ -7,6 +7,7 @@ set(app_sources
     media/media_decoder.cpp
     media/media_metadata.cpp
     services/music_player.cpp
+    services/music_playlist.cpp
     services/storage_service.cpp
     app/driver/audio_passthrough.cpp
     app/driver/eeprom.cpp

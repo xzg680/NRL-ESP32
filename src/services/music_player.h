@@ -40,6 +40,12 @@ const char *MUSIC_CurrentPath(void);
 // MUSIC_PlayFile; UI consumers should render promptly after a track change.
 const MediaTrackInfo *MUSIC_GetTrackInfo(void);
 
+// Called when a track finishes decoding to the end (NOT on MUSIC_Stop,
+// voice interrupt, or decode error). Fired from the player task after it
+// has released the codec, so the callback may start the next track.
+typedef void (*MusicTrackEndCb_t)(void);
+void MUSIC_SetTrackEndCallback(MusicTrackEndCb_t callback);
+
 #ifdef __cplusplus
 }
 #endif
