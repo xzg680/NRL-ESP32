@@ -12,6 +12,8 @@
 
 #include <stdbool.h>
 
+#include "media/media_metadata.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,6 +34,11 @@ bool MUSIC_IsPlaying(void);
 
 // Path of the current (or last) track; empty string when none.
 const char *MUSIC_CurrentPath(void);
+
+// Tags/cover of the current track (parsed when playback starts). The
+// returned pointer -- including cover_data -- stays valid until the next
+// MUSIC_PlayFile; UI consumers should render promptly after a track change.
+const MediaTrackInfo *MUSIC_GetTrackInfo(void);
 
 #ifdef __cplusplus
 }

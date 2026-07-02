@@ -827,6 +827,12 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         if (is_query) {
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "PLAY",
                                MUSIC_IsPlaying() ? MUSIC_CurrentPath() : "(idle)");
+            const MediaTrackInfo *track = MUSIC_GetTrackInfo();
+            if (MUSIC_IsPlaying() && track != nullptr && track->title[0] != '\0') {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "TITLE", track->title);
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ARTIST", track->artist);
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ALBUM", track->album);
+            }
             return;
         }
         if (!MUSIC_PlayFile(command.value)) {

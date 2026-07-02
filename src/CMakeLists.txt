@@ -5,6 +5,7 @@ set(app_sources
     audio/audio_focus.cpp
     audio/audio_router.cpp
     media/media_decoder.cpp
+    media/media_metadata.cpp
     services/music_player.cpp
     services/storage_service.cpp
     app/driver/audio_passthrough.cpp

@@ -21,6 +21,7 @@ static TaskHandle_t s_player_task = nullptr;
 static volatile bool s_stop_requested = false;
 static volatile bool s_playing = false;
 static char s_current_path[kMaxPathLen] = {};
+static MediaTrackInfo s_track_info = {};
 
 // Mono tracks are expanded to stereo before the codec: always opening the
 // I2S/codec 2-channel avoids per-format bring-up risk on the slot config.
@@ -43,6 +44,10 @@ static bool ensure_stereo_capacity(const size_t bytes)
 
 static void player_task(void *)
 {
+    // Tags first (cheap header/tail reads), so the UI has title/cover as
+    // soon as -- or before -- the first PCM reaches the speaker.
+    (void)MEDIA_META_Read(s_current_path, &s_track_info, true);
+
     bool hifi_acquired = false;
     MediaDecoder *decoder = MEDIA_DECODER_Open(s_current_path);
 
@@ -150,6 +155,9 @@ extern "C" bool MUSIC_PlayFile(const char *path)
         return false;
     }
 
+    MEDIA_META_Free(&s_track_info);
+    memset(&s_track_info, 0, sizeof(s_track_info));
+
     strncpy(s_current_path, path, sizeof(s_current_path) - 1u);
     s_current_path[sizeof(s_current_path) - 1u] = '\0';
     s_stop_requested = false;
@@ -182,4 +190,9 @@ extern "C" bool MUSIC_IsPlaying(void)
 extern "C" const char *MUSIC_CurrentPath(void)
 {
     return s_current_path;
+}
+
+extern "C" const MediaTrackInfo *MUSIC_GetTrackInfo(void)
+{
+    return &s_track_info;
 }
