@@ -10,6 +10,7 @@ set(app_sources
     media/media_metadata.cpp
     services/music_player.cpp
     services/music_playlist.cpp
+    services/nanny.cpp
     services/smb_vfs.cpp
     services/storage_service.cpp
     app/driver/audio_passthrough.cpp

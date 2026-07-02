@@ -11,6 +11,7 @@
 #include "../lib/ble_config.h"
 #include "../services/music_player.h"
 #include "../services/music_playlist.h"
+#include "../services/nanny.h"
 #include "../services/storage_service.h"
 #include "../lib/nrl_audio_bridge.h"
 #include "../lib/nrl_bt_hfp.h"
@@ -124,6 +125,7 @@ static void initApp()
     STORAGE_Init();
     MUSIC_Init();
     PLAYLIST_Init();
+    NANNY_Init();
     if (STORAGE_SdMounted()) {
         PLAYLIST_Scan();
     }

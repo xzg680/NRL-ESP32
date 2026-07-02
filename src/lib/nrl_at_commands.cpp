@@ -10,6 +10,7 @@
 #include "driver/external_radio.h"
 #include "services/music_player.h"
 #include "services/music_playlist.h"
+#include "services/nanny.h"
 #include "services/storage_service.h"
 #include "driver/sci_serial.h"
 
@@ -848,6 +849,44 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     if (stringEqualsIgnoreCase(command.command, "STOP")) {
         MUSIC_Stop();
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "STOP", "OK");
+        return;
+    }
+
+    // Nanny beacon: AT+BEACON=/sdcard/beacon/id.wav,30 (path, minutes),
+    // AT+BEACON=OFF, AT+BEACON=?.
+    if (stringEqualsIgnoreCase(command.command, "BEACON")) {
+        char path[128];
+        uint32_t interval = 0;
+        if (is_query) {
+            if (NANNY_GetBeacon(path, sizeof(path), &interval)) {
+                char status[160];
+                snprintf(status, sizeof(status), "%s,%lu", path, static_cast<unsigned long>(interval));
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "BEACON", status);
+            } else {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "BEACON", "OFF");
+            }
+            return;
+        }
+        if (stringEqualsIgnoreCase(command.value, "OFF")) {
+            NANNY_DisableBeacon();
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "BEACON", "OFF");
+            return;
+        }
+        char parse[160];
+        snprintf(parse, sizeof(parse), "%s", command.value);
+        char *comma = strrchr(parse, ',');
+        unsigned long minutes = 0;
+        if (comma == nullptr) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "BEACON");
+            return;
+        }
+        *comma++ = '\0';
+        if (!parseUnsignedValue(comma, &minutes) ||
+            !NANNY_SetBeacon(parse, static_cast<uint32_t>(minutes))) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "BEACON");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "BEACON", command.value);
         return;
     }
 
