@@ -9,6 +9,7 @@
 #include "nrl_wifi.h"
 #include "wifi_config_portal.h"
 
+#include "audio/audio_router.h"
 #include "driver/audio_passthrough.h"
 #include "driver/board_pins.h"
 #include "driver/es8311.h"
@@ -45,7 +46,6 @@ constexpr uint8_t kNrlTypeServerVoice = 9u;
 constexpr uint8_t kNrlTypeAtCommand = 11u;
 constexpr uint8_t kNrlTypeSciTransparent = 12u;
 constexpr size_t kAudioCodecFrameSamples = 80u;
-constexpr size_t kAudioCapture16kFrameSamples = kAudioCodecFrameSamples * 2u;
 // Minimum / maximum G.711 A-law payload bytes per outbound voice packet. The
 // runtime value comes from ExternalRadioConfig::voice_payload_bytes and is
 // clamped into this range; the accumulator and stack packet buffer below are
@@ -439,44 +439,32 @@ static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
     }
 }
 
-static size_t downsample16kTo8kForG711(const int16_t *pcm16k,
-                                       const size_t sample_count,
-                                       int16_t *pcm8k,
-                                       const size_t pcm8k_capacity)
-{
-    if (pcm16k == nullptr || pcm8k == nullptr || pcm8k_capacity == 0u) {
-        return 0u;
-    }
-    const size_t pairs = sample_count / 2u;
-    const size_t out_count = (pairs < pcm8k_capacity) ? pairs : pcm8k_capacity;
-    for (size_t i = 0; i < out_count; ++i) {
-        const int32_t a = pcm16k[i * 2u];
-        const int32_t b = pcm16k[i * 2u + 1u];
-        pcm8k[i] = static_cast<int16_t>((a + b) / 2);
-    }
-    return out_count;
-}
-
-static void es8311FrameHook(const int16_t *samples,
+// Router sink for the NRL uplink. Frames arrive already at 8 kHz (the router
+// downsamples the 16 kHz raw-mic pushes; AFE and BT-mic pushes are 8 kHz
+// natively). PTT/SQL gating, tail suppression and G.711 packetisation all
+// stay in sendVoiceFrame.
+static void uplinkSinkWrite(const uint8_t source_id,
+                            const int16_t *samples,
                             const size_t sample_count,
-                            AUDIO_Mode_t mode,
                             void *)
 {
-    if (mode != AUDIO_MODE_RECEIVE) {
-        return;
-    }
     // When a Bluetooth headset is connected, its mic is the uplink source;
     // ignore the onboard mic so audio isn't double-captured.
-    if (NRL_BtHfp_IsConnected()) {
-        return;
-    }
-    if (sample_count == kAudioCapture16kFrameSamples) {
-        int16_t pcm8k[kAudioCodecFrameSamples];
-        const size_t out_count = downsample16kTo8kForG711(samples, sample_count, pcm8k, kAudioCodecFrameSamples);
-        sendVoiceFrame(pcm8k, out_count);
+    if (source_id == AUDIO_SRC_MIC && NRL_BtHfp_IsConnected()) {
         return;
     }
     sendVoiceFrame(samples, sample_count);
+}
+
+// Router sink for the Bluetooth headset speaker (8 kHz SCO). Pushing while
+// merely connected (not just while SCO is already up) lets the buffer fill
+// and signals nrl_bt_hfp to open the SCO on demand.
+static void btHfpSinkWrite(const uint8_t /*source_id*/,
+                           const int16_t *samples,
+                           const size_t sample_count,
+                           void *)
+{
+    NRL_BtHfp_PushPlayback(samples, sample_count);
 }
 
 static bool ensureWifiAndUdp(void)
@@ -709,6 +697,13 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
     s_last_rx_packet_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     logIncomingVoicePacket(payload_size);
 
+    // Route the downlink to the Bluetooth headset whenever one is connected;
+    // otherwise play it out the onboard codec. Exactly one of the two sinks
+    // is active at a time (the router does not mix yet -- see audio_router.h).
+    const bool bt_route = NRL_BtHfp_IsConnected();
+    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_SPEAKER, !bt_route);
+    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_BT_HFP, bt_route);
+
     size_t offset = 0u;
     while (offset < payload_size) {
         const size_t chunk = ((payload_size - offset) < kG711RxPayloadMaxBytes)
@@ -734,15 +729,7 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
         s_voice_decode_sample_total += static_cast<uint32_t>(chunk);
         ++s_voice_decode_chunks;
         if (chunk > 0u) {
-            // Route the downlink to the Bluetooth headset whenever one is
-            // connected; otherwise play it out the onboard codec. Pushing while
-            // merely connected (not just while SCO is already up) lets the buffer
-            // fill and signals nrl_bt_hfp to open the SCO on demand.
-            if (NRL_BtHfp_IsConnected()) {
-                NRL_BtHfp_PushPlayback(s_downlink_pcm_buffer, chunk);
-            } else {
-                AUDIO_QueueOutputSamples(s_downlink_pcm_buffer, chunk);
-            }
+            AudioRouter_PushFrame(AUDIO_SRC_NRL_DOWNLINK, 8000u, s_downlink_pcm_buffer, chunk);
         }
         offset += chunk;
     }
@@ -997,10 +984,10 @@ static void bridgeTask(void *)
 
 void NRLAudioBridge_FeedExternalMic(const short *pcm8k, size_t sample_count)
 {
-    // The Bluetooth headset mic already delivers PCM16 mono at 8 kHz, the same
-    // rate sendVoiceFrame expects -- feed it straight in (PTT gating and G.711
-    // packetisation are reused unchanged).
-    sendVoiceFrame(pcm8k, sample_count);
+    // The Bluetooth headset mic delivers PCM16 mono at 8 kHz. Push it through
+    // the router as its own source so the uplink sink can tell it apart from
+    // the onboard mic (PTT gating and G.711 packetisation reused unchanged).
+    AudioRouter_PushFrame(AUDIO_SRC_BT_HFP_MIC, 8000u, pcm8k, sample_count);
 }
 
 bool NRLAudioBridge_Init(void)
@@ -1022,7 +1009,14 @@ bool NRLAudioBridge_Init(void)
         }
     }
 
-    AUDIO_SetFrameHook(es8311FrameHook, nullptr);
+    // Wire the NRL voice paths into the audio router: both mic flavours feed
+    // the uplink; the downlink starts on the onboard speaker (flipped to the
+    // BT sink per-packet in handleIncomingVoicePayload when a headset is up).
+    AudioRouter_RegisterSink(AUDIO_SINK_NRL_UPLINK, 8000u, uplinkSinkWrite, nullptr);
+    AudioRouter_RegisterSink(AUDIO_SINK_BT_HFP, 8000u, btHfpSinkWrite, nullptr);
+    AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_NRL_UPLINK, true);
+    AudioRouter_SetRoute(AUDIO_SRC_BT_HFP_MIC, AUDIO_SINK_NRL_UPLINK, true);
+    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_SPEAKER, true);
 
     // Pin to core 0 so RX recvfrom() / heartbeat / AT replies share the WiFi
     // and lwIP cores; voice TX from the audio task on core 1 still hits the

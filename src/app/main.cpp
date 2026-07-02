@@ -128,9 +128,9 @@ static void initApp()
     // internal SRAM heap; if the bridge task's 8 KB stack hasn't been
     // allocated by then there's no contiguous block left and xTaskCreate
     // fails -- which silently kills STA reconnect (the bridge owns the
-    // WiFi state machine). NRLAudioBridge_Init only registers a frame hook
-    // via AUDIO_SetFrameHook(); the hook is invoked later once ES8311
-    // starts its passthrough task, so the ordering swap is safe.
+    // WiFi state machine). NRLAudioBridge_Init only registers its audio
+    // router sinks/routes; frames only flow once ES8311 starts its
+    // passthrough task, so the ordering swap is safe.
     if (!NRLAudioBridge_Init()) {
         ESP_LOGE(TAG, "NRL audio bridge init failed.");
     }

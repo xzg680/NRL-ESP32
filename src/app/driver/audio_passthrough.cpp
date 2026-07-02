@@ -1,5 +1,6 @@
 #include "driver/audio_passthrough.h"
 
+#include "audio/audio_router.h"
 #include "driver/board_pins.h"
 
 #include <driver/i2s_common.h>
@@ -64,8 +65,7 @@ static i2s_chan_handle_t s_i2s_rx = nullptr;
 static TaskHandle_t s_passthrough_task = nullptr;
 static volatile bool s_passthrough_running = false;
 static AUDIO_Mode_t s_audio_mode = AUDIO_MODE_RECEIVE;
-static AUDIO_FrameHook_t s_frame_hook = nullptr;
-static void *s_frame_hook_user_data = nullptr;
+static bool s_speaker_sink_registered = false;
 
 constexpr size_t kOutputQueueSamples = kNetworkFrameSamples * 64u;
 static int16_t s_output_queue[kOutputQueueSamples];
@@ -556,12 +556,30 @@ static void audio_log_mic_frame_stats(const int16_t *frame) {
 #endif
 }
 
+// The playback queue doubles as the router's speaker sink; whichever source
+// is routed here (NRL downlink today, media/beacon later) lands in the same
+// 8 kHz queue the passthrough task drains to the DAC.
+static void speaker_sink_write(uint8_t /*source_id*/,
+                               const int16_t *samples,
+                               size_t sample_count,
+                               void *) {
+    (void)AUDIO_QueueOutputSamples(samples, sample_count);
+}
+
+static void ensure_speaker_sink_registered(void) {
+    if (!s_speaker_sink_registered) {
+        s_speaker_sink_registered =
+            AudioRouter_RegisterSink(AUDIO_SINK_SPEAKER, 8000u, speaker_sink_write, nullptr);
+    }
+}
+
 #if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
-// Sink for echo-cancelled audio from the AEC processor: forward it to the
-// registered frame hook, exactly as raw mic capture would have been.
+// Sink for echo-cancelled audio from the AEC processor: push it to the audio
+// router exactly as raw mic capture would have been. The AFE outputs 8 kHz
+// frames (it downsamples internally); the raw path pushes 16 kHz.
 static void audio_aec_output(const int16_t *clean, size_t count, void *) {
-    if (AEC_IsRuntimeActive() && s_frame_hook != nullptr) {
-        s_frame_hook(clean, count, s_audio_mode, s_frame_hook_user_data);
+    if (AEC_IsRuntimeActive()) {
+        AudioRouter_PushFrame(AUDIO_SRC_MIC, 8000u, clean, count);
     }
 }
 #endif
@@ -572,8 +590,6 @@ static void audio_passthrough_task(void *) {
     static int16_t playback_frame[kFrameSamples];
 
     while (s_passthrough_running) {
-        const AUDIO_Mode_t mode = s_audio_mode;
-
 #if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
         static int16_t ref_frame[kFrameSamples];
         static int16_t network_ref_frame[kFrameSamples];
@@ -615,8 +631,8 @@ static void audio_passthrough_task(void *) {
             }
             AEC_SubmitCapture(frame, ref, kFrameSamples);
         }
-        if (!processed_route && s_frame_hook != nullptr) {
-            s_frame_hook(frame, kFrameSamples, mode, s_frame_hook_user_data);
+        if (!processed_route) {
+            AudioRouter_PushFrame(AUDIO_SRC_MIC, 16000u, frame, kFrameSamples);
         }
 #else
         if (!i2s_read_frame(frame)) {
@@ -628,9 +644,7 @@ static void audio_passthrough_task(void *) {
         audio_log_mic_frame_stats(frame);
         mic_hpf_apply(frame, kFrameSamples);
 
-        if (s_frame_hook != nullptr) {
-            s_frame_hook(frame, kFrameSamples, mode, s_frame_hook_user_data);
-        }
+        AudioRouter_PushFrame(AUDIO_SRC_MIC, 16000u, frame, kFrameSamples);
 #endif
 
         // RX mode: DAC plays whatever is in the output queue (NRL downlink).
@@ -654,6 +668,7 @@ static void audio_passthrough_task(void *) {
 } // namespace
 
 extern "C" bool AUDIO_SetupI2S(void) {
+    ensure_speaker_sink_registered();
     return i2s_setup();
 }
 
@@ -675,6 +690,7 @@ extern "C" bool AUDIO_IsPassthroughRunning(void) {
 }
 
 extern "C" bool AUDIO_StartPassthrough(void) {
+    ensure_speaker_sink_registered();
     if (!s_i2s_ready && !i2s_setup()) {
         return false;
     }
@@ -763,11 +779,6 @@ extern "C" void AUDIO_SetMode(const AUDIO_Mode_t mode) {
 
 extern "C" AUDIO_Mode_t AUDIO_GetMode(void) {
     return s_audio_mode;
-}
-
-extern "C" void AUDIO_SetFrameHook(AUDIO_FrameHook_t hook, void *user_data) {
-    s_frame_hook = hook;
-    s_frame_hook_user_data = user_data;
 }
 
 extern "C" size_t AUDIO_QueueOutputSamples(const int16_t *samples, size_t sample_count) {

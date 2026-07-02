@@ -2,6 +2,7 @@ set(app_sources
     app/main.cpp
     app/aec/aec_processor.cpp
     app/aec/esp_sr_probe.cpp
+    audio/audio_router.cpp
     app/driver/audio_passthrough.cpp
     app/driver/eeprom.cpp
     app/driver/display.cpp
@@ -74,6 +75,7 @@ endif()
 idf_component_register(
     SRCS ${app_sources}
     INCLUDE_DIRS
+        .
         app
         app/driver
     PRIV_REQUIRES ${app_priv_requires}

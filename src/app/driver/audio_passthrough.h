@@ -4,8 +4,9 @@
 // Board-neutral audio capture/playback pipeline that owns the I2S bus, the
 // downlink output queue, the optional AEC reference buffer, the software mic
 // high-pass filter, and the FreeRTOS passthrough task that pulls mic frames
-// from I2S, hands them to AEC / the frame hook, and writes DAC samples back
-// to I2S.
+// from I2S, hands them to AEC / the audio router (AUDIO_SRC_MIC), and writes
+// DAC samples back to I2S. The playback queue is exposed to the router as
+// AUDIO_SINK_SPEAKER; see src/audio/audio_router.h.
 //
 // The ADC behind I2S DIN differs per board:
 //   bh4tdv  -> ES8311 (codec + ADC + DAC in one chip)
@@ -27,11 +28,6 @@ typedef enum {
     AUDIO_MODE_RECEIVE = 0,   // Full-duplex bridge: ADC captures MIC, DAC plays NRL downlink.
 } AUDIO_Mode_t;
 
-typedef void (*AUDIO_FrameHook_t)(const int16_t *samples,
-                                  size_t sample_count,
-                                  AUDIO_Mode_t mode,
-                                  void *user_data);
-
 // Pipeline lifecycle. The codec init path needs I2S running (for MCLK) before
 // it can talk to the codec, so the codec driver calls AUDIO_SetupI2S() first
 // and then AUDIO_StartPassthrough() once register config has completed.
@@ -47,11 +43,9 @@ bool AUDIO_GetI2SHandles(i2s_chan_handle_t *tx_handle, i2s_chan_handle_t *rx_han
 void AUDIO_SetMode(AUDIO_Mode_t mode);
 AUDIO_Mode_t AUDIO_GetMode(void);
 
-// Hook into the captured mic stream. Hook is invoked at the configured I2S
-// frame rate (16 kHz raw, or 8 kHz when AFE is processing).
-void AUDIO_SetFrameHook(AUDIO_FrameHook_t hook, void *user_data);
-
-// Queue PCM16 mono samples (8 kHz) for DAC playback.
+// Queue PCM16 mono samples (8 kHz) for DAC playback. This is the backend of
+// the router's AUDIO_SINK_SPEAKER; producers should route through the audio
+// router rather than calling it directly.
 size_t AUDIO_QueueOutputSamples(const int16_t *samples, size_t sample_count);
 void AUDIO_ClearOutputQueue(void);
 
