@@ -58,6 +58,15 @@ if(IDF_TARGET STREQUAL "esp32s31")
     if(bt_lib)
         target_compile_definitions(${bt_lib} PRIVATE BTM_SEC_MAX_SERVICE_RECORDS=16)
     endif()
+
+    # LVGL's vendored ESP cmake only REQUIRES esp_timer; its FreeType binding
+    # (CONFIG_LV_USE_FREETYPE, S31 only) needs the freetype component's headers
+    # and library, so wire them up here instead of patching the vendored tree.
+    idf_component_get_property(lvgl_lib lvgl COMPONENT_LIB)
+    idf_component_get_property(freetype_lib espressif__freetype COMPONENT_LIB)
+    if(lvgl_lib AND freetype_lib)
+        target_link_libraries(${lvgl_lib} PUBLIC ${freetype_lib})
+    endif()
 endif()
 
 if(TARGET ${CMAKE_PROJECT_NAME}.elf)

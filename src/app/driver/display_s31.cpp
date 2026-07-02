@@ -178,11 +178,21 @@ CoverBitmap s_music_cover_bmp = {};
 lv_image_dsc_t s_music_cover_dsc = {};
 constexpr uint16_t kMusicCoverDim = 152;
 
-// Montserrat with the generated CJK font as fallback: ASCII keeps the Latin
-// design, Chinese tags/filenames render from lv_font_cjk_*. Initialised in
+// Montserrat with a CJK font as fallback: ASCII keeps the Latin design,
+// Chinese tags/filenames render from the CJK engine. Initialised in
 // Display_Init (lv_font_montserrat_* are const, so mutable copies).
+// The fallback is switchable at runtime between the built-in bitmap subset
+// (lv_font_cjk_*) and FreeType vector rendering from a TTF on the TF card,
+// for side-by-side comparison (Display_SetCjkFontEngine).
 lv_font_t s_font_music_16;
 lv_font_t s_font_music_20;
+int s_cjk_font_engine = DISPLAY_CJK_FONT_BITMAP;
+#if LV_USE_FREETYPE
+constexpr const char *kCjkTtfPath = "/sdcard/fonts/cjk.ttf";
+bool s_freetype_inited = false;
+lv_font_t *s_ft_font_16 = nullptr;
+lv_font_t *s_ft_font_20 = nullptr;
+#endif
 
 char s_shown_caption[24] = {};
 char s_shown_callsign[16] = {};
@@ -1997,6 +2007,62 @@ void refresh()
     }
 }
 
+// Rebuild the active page so a font-engine switch takes effect on every
+// label immediately (LVGL caches glyph layout per label).
+void rebuildCurrentPage()
+{
+    switch (s_page) {
+        case Page::Home: buildHome(); break;
+        case Page::Config: buildConfig(); break;
+        case Page::Wifi: buildWifi(); break;
+        case Page::Station: buildStation(); break;
+        case Page::Audio: buildAudio(); break;
+        case Page::Bt: buildBt(); break;
+        case Page::Music: buildMusic(); break;
+    }
+    s_last_refresh_ms = 0;
+}
+
+#if LV_USE_FREETYPE
+// Lazily bring up FreeType and create the two vector font sizes from the
+// TTF on the TF card. Kept out of Display_Init so boots without the file
+// (or without a card) pay nothing.
+bool ensureFreetypeFonts()
+{
+    if (s_ft_font_16 != nullptr && s_ft_font_20 != nullptr) {
+        return true;
+    }
+    FILE *probe = fopen(kCjkTtfPath, "rb");
+    if (probe == nullptr) {
+        ESP_LOGW(TAG, "no TTF at %s", kCjkTtfPath);
+        return false;
+    }
+    fclose(probe);
+
+    if (!s_freetype_inited) {
+        if (lv_freetype_init(LV_FREETYPE_CACHE_FT_GLYPH_CNT) != LV_RESULT_OK) {
+            ESP_LOGE(TAG, "FreeType init failed");
+            return false;
+        }
+        s_freetype_inited = true;
+    }
+    if (s_ft_font_16 == nullptr) {
+        s_ft_font_16 = lv_freetype_font_create(kCjkTtfPath, LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
+                                               16, LV_FREETYPE_FONT_STYLE_NORMAL);
+    }
+    if (s_ft_font_20 == nullptr) {
+        s_ft_font_20 = lv_freetype_font_create(kCjkTtfPath, LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
+                                               20, LV_FREETYPE_FONT_STYLE_NORMAL);
+    }
+    if (s_ft_font_16 == nullptr || s_ft_font_20 == nullptr) {
+        ESP_LOGE(TAG, "FreeType font create failed (%s)", kCjkTtfPath);
+        return false;
+    }
+    ESP_LOGI(TAG, "FreeType fonts ready from %s", kCjkTtfPath);
+    return true;
+}
+#endif
+
 } // namespace
 
 extern "C" void Display_Init(void)
@@ -2051,6 +2117,40 @@ extern "C" int Display_GetBatteryRawMv(void)
 extern "C" int Display_GetBatteryCalibratedMv(void)
 {
     return 0;
+}
+
+extern "C" bool Display_SetCjkFontEngine(const int engine)
+{
+    if (!s_ready) {
+        return false;
+    }
+    if (engine == DISPLAY_CJK_FONT_BITMAP) {
+        s_font_music_16.fallback = &lv_font_cjk_16;
+        s_font_music_20.fallback = &lv_font_cjk_20;
+        s_cjk_font_engine = DISPLAY_CJK_FONT_BITMAP;
+        rebuildCurrentPage();
+        return true;
+    }
+    if (engine == DISPLAY_CJK_FONT_FREETYPE) {
+#if LV_USE_FREETYPE
+        if (!ensureFreetypeFonts()) {
+            return false;
+        }
+        s_font_music_16.fallback = s_ft_font_16;
+        s_font_music_20.fallback = s_ft_font_20;
+        s_cjk_font_engine = DISPLAY_CJK_FONT_FREETYPE;
+        rebuildCurrentPage();
+        return true;
+#else
+        return false;
+#endif
+    }
+    return false;
+}
+
+extern "C" int Display_GetCjkFontEngine(void)
+{
+    return s_cjk_font_engine;
 }
 
 #endif

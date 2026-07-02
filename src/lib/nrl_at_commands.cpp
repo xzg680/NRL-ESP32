@@ -861,6 +861,29 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    // CJK font engine on the S31 LCD: AT+FONT=BMP (built-in bitmap subset)
+    // or AT+FONT=FT (FreeType vector from /sdcard/fonts/cjk.ttf).
+    if (stringEqualsIgnoreCase(command.command, "FONT")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "FONT",
+                               (Display_GetCjkFontEngine() == DISPLAY_CJK_FONT_FREETYPE) ? "FT" : "BMP");
+            return;
+        }
+        int engine = -1;
+        if (stringEqualsIgnoreCase(command.value, "BMP")) {
+            engine = DISPLAY_CJK_FONT_BITMAP;
+        } else if (stringEqualsIgnoreCase(command.value, "FT")) {
+            engine = DISPLAY_CJK_FONT_FREETYPE;
+        }
+        if (engine < 0 || !Display_SetCjkFontEngine(engine)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "FONT");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "FONT",
+                           (engine == DISPLAY_CJK_FONT_FREETYPE) ? "FT" : "BMP");
+        return;
+    }
+
     if (stringEqualsIgnoreCase(command.command, "PLAYLIST")) {
         if (is_query) {
             char count_line[16];

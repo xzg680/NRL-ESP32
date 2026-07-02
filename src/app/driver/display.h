@@ -6,6 +6,8 @@
 // a display these calls are compiled to no-ops, so callers may invoke them
 // unconditionally or behind `#if NRL_HAS_DISPLAY`.
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -27,6 +29,15 @@ void Display_Poll(void);
 // Display_Poll() refresh.
 int Display_GetBatteryRawMv(void);
 int Display_GetBatteryCalibratedMv(void);
+
+// CJK font engine on the S31 LCD (no-ops elsewhere; the setter returns
+// false). 0 = built-in bitmap subset (GB2312 level-1), 1 = FreeType vector
+// rendering from the TTF at /sdcard/fonts/cjk.ttf. Runtime-switchable for
+// comparison; the active page is rebuilt on switch.
+#define DISPLAY_CJK_FONT_BITMAP   0
+#define DISPLAY_CJK_FONT_FREETYPE 1
+bool Display_SetCjkFontEngine(int engine);
+int Display_GetCjkFontEngine(void);
 
 #ifdef __cplusplus
 }

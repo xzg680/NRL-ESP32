@@ -1032,11 +1032,17 @@ extern "C" int Display_GetBatteryCalibratedMv(void)
     return applyBatteryCalibration(readBatteryRawMv());
 }
 
+// CJK font engine switching exists only on the S31 800x480 panel.
+extern "C" bool Display_SetCjkFontEngine(int) { return false; }
+extern "C" int Display_GetCjkFontEngine(void) { return DISPLAY_CJK_FONT_BITMAP; }
+
 #elif NRL_BOARD != NRL_BOARD_S31_KORVO
 
 extern "C" void Display_Init(void) {}
 extern "C" void Display_Poll(void) {}
 extern "C" int Display_GetBatteryRawMv(void) { return 0; }
 extern "C" int Display_GetBatteryCalibratedMv(void) { return 0; }
+extern "C" bool Display_SetCjkFontEngine(int) { return false; }
+extern "C" int Display_GetCjkFontEngine(void) { return DISPLAY_CJK_FONT_BITMAP; }
 
 #endif
