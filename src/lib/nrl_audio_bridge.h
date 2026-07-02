@@ -25,6 +25,14 @@ void NRLAudioBridge_ApplyConfig(bool restart_wifi, bool restart_udp);
 // so a headset mic's audio is transmitted. Subject to the same PTT gating.
 void NRLAudioBridge_FeedExternalMic(const short *pcm8k, size_t sample_count);
 
+// Media uplink for the nanny feature (docs/architecture.md 功能2): streams
+// decoded music/beacon audio (PCM16 mono 8 kHz) to the NRL server as a
+// deliberate transmission -- no squelch gating, no tail suppression. While
+// active (Set...true), captured mic/BT audio is dropped so the G.711
+// accumulator carries exactly one producer.
+void NRLAudioBridge_SetMediaUplinkActive(bool active);
+void NRLAudioBridge_SendMediaUplink(const short *pcm8k, size_t sample_count);
+
 // Poll the USB debug serial for AT commands typed by the user. Lines are
 // terminated by CR/LF; e.g. "AT" lists commands, "AT+WIFI_SSID=MyNet" sets it.
 void NRLAudioBridge_PollSerialConsole(void);

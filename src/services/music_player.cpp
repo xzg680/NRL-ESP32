@@ -1,11 +1,14 @@
 #include "services/music_player.h"
 
 #include "audio/audio_focus.h"
+#include "audio/voice_resampler.h"
 #include "driver/es8389.h"
+#include "lib/nrl_audio_bridge.h"
 #include "media/media_decoder.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -27,6 +30,11 @@ static MediaTrackInfo s_track_info = {};
 // I2S/codec 2-channel avoids per-format bring-up risk on the slot config.
 static int16_t *s_stereo_buffer = nullptr;
 static size_t s_stereo_capacity = 0;
+static volatile int s_target = MUSIC_TARGET_LOCAL;
+
+// 8 kHz mono scratch for the network branch of the fan-out.
+static int16_t *s_net_buffer = nullptr;
+static size_t s_net_capacity = 0;
 
 static bool ensure_stereo_capacity(const size_t bytes)
 {
@@ -42,6 +50,21 @@ static bool ensure_stereo_capacity(const size_t bytes)
     return true;
 }
 
+static bool ensure_net_capacity(const size_t samples)
+{
+    if (s_net_capacity >= samples) {
+        return true;
+    }
+    int16_t *grown = static_cast<int16_t *>(
+        heap_caps_realloc(s_net_buffer, samples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (grown == nullptr) {
+        return false;
+    }
+    s_net_buffer = grown;
+    s_net_capacity = samples;
+    return true;
+}
+
 static volatile MusicTrackEndCb_t s_track_end_cb = nullptr;
 
 static void player_task(void *)
@@ -50,9 +73,26 @@ static void player_task(void *)
     // soon as -- or before -- the first PCM reaches the speaker.
     (void)MEDIA_META_Read(s_current_path, &s_track_info, true);
 
+    // Playback target is latched per track (docs/architecture.md nanny
+    // 三档切换): local hi-fi, NRL network uplink, or a fan-out of both --
+    // one decode, two consumers.
+    const int target = s_target;
+    const bool to_local = (target != MUSIC_TARGET_NET);
+    const bool to_net = (target != MUSIC_TARGET_LOCAL);
+
     bool hifi_acquired = false;
+    bool format_ready = false;
     bool reached_end = false;
+    VoiceResampler resampler = {};
+    // Pacing for the net-only case: without the I2S DMA back-pressure the
+    // decode loop would free-run; throttle to real time by the 8 kHz clock.
+    int64_t net_start_us = 0;
+    uint64_t net_sent_samples = 0;
     MediaDecoder *decoder = MEDIA_DECODER_Open(s_current_path);
+
+    if (to_net && decoder != nullptr) {
+        NRLAudioBridge_SetMediaUplinkActive(true);
+    }
 
     while (decoder != nullptr && !s_stop_requested) {
         const uint8_t *pcm = nullptr;
@@ -62,13 +102,13 @@ static void player_task(void *)
             if (rc < 0) {
                 ESP_LOGE(TAG, "decode failed: %s", s_current_path);
             } else {
-                reached_end = hifi_acquired;
+                reached_end = format_ready;
             }
             break;
         }
 
         MediaDecoderInfo info = {};
-        if (!hifi_acquired) {
+        if (!format_ready) {
             if (!MEDIA_DECODER_GetInfo(decoder, &info)) {
                 ESP_LOGE(TAG, "no format info from decoder");
                 break;
@@ -79,42 +119,86 @@ static void player_task(void *)
                          static_cast<unsigned>(info.channels));
                 break;
             }
-            if (!ES8389_HifiAcquire(info.sample_rate_hz, 16u, 2u)) {
-                ESP_LOGE(TAG, "hi-fi speaker unavailable (wrong board, or voice busy)");
-                break;
+            if (to_local) {
+                if (!ES8389_HifiAcquire(info.sample_rate_hz, 16u, 2u)) {
+                    ESP_LOGE(TAG, "hi-fi speaker unavailable (wrong board, or voice busy)");
+                    break;
+                }
+                hifi_acquired = true;
             }
-            hifi_acquired = true;
-            ESP_LOGI(TAG, "playing %s: %luHz %ubit %uch",
+            if (to_net) {
+                if (!VOICE_RESAMPLER_Init(&resampler, info.sample_rate_hz, info.channels)) {
+                    ESP_LOGE(TAG, "resampler init failed (%luHz)",
+                             static_cast<unsigned long>(info.sample_rate_hz));
+                    break;
+                }
+                net_start_us = esp_timer_get_time();
+            }
+            format_ready = true;
+            ESP_LOGI(TAG, "playing %s: %luHz %ubit %uch target=%s",
                      s_current_path,
                      static_cast<unsigned long>(info.sample_rate_hz),
                      static_cast<unsigned>(info.bits_per_sample),
-                     static_cast<unsigned>(info.channels));
+                     static_cast<unsigned>(info.channels),
+                     (target == MUSIC_TARGET_BOTH) ? "both"
+                                                   : (to_net ? "net" : "local"));
         }
 
         (void)MEDIA_DECODER_GetInfo(decoder, &info);
-        if (info.channels == 2u) {
-            if (!ES8389_HifiWrite(pcm, bytes)) {
+
+        if (to_net) {
+            const size_t in_frames = bytes / (sizeof(int16_t) * info.channels);
+            const size_t out_max = (in_frames * 8000u) / info.sample_rate_hz + 8u;
+            if (!ensure_net_capacity(out_max)) {
+                ESP_LOGE(TAG, "net buffer alloc failed");
                 break;
             }
-        } else {
-            const size_t samples = bytes / sizeof(int16_t);
-            if (!ensure_stereo_capacity(samples * 2u * sizeof(int16_t))) {
-                ESP_LOGE(TAG, "stereo buffer alloc failed");
-                break;
+            const size_t out_n = VOICE_RESAMPLER_Process(
+                &resampler, reinterpret_cast<const int16_t *>(pcm), in_frames,
+                s_net_buffer, s_net_capacity);
+            if (out_n > 0u) {
+                NRLAudioBridge_SendMediaUplink(s_net_buffer, out_n);
+                net_sent_samples += out_n;
             }
-            const int16_t *mono = reinterpret_cast<const int16_t *>(pcm);
-            for (size_t i = 0; i < samples; ++i) {
-                s_stereo_buffer[i * 2u] = mono[i];
-                s_stereo_buffer[i * 2u + 1u] = mono[i];
+            if (!to_local) {
+                // Throttle to real time: stay ~100 ms ahead of the 8 kHz clock.
+                const int64_t audio_us = static_cast<int64_t>(net_sent_samples) * 1000000LL / 8000LL;
+                const int64_t elapsed_us = esp_timer_get_time() - net_start_us;
+                const int64_t lead_us = audio_us - elapsed_us - 100000LL;
+                if (lead_us > 20000LL) {
+                    vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(lead_us / 1000LL)));
+                }
             }
-            if (!ES8389_HifiWrite(s_stereo_buffer, samples * 2u * sizeof(int16_t))) {
-                break;
+        }
+
+        if (to_local) {
+            if (info.channels == 2u) {
+                if (!ES8389_HifiWrite(pcm, bytes)) {
+                    break;
+                }
+            } else {
+                const size_t samples = bytes / sizeof(int16_t);
+                if (!ensure_stereo_capacity(samples * 2u * sizeof(int16_t))) {
+                    ESP_LOGE(TAG, "stereo buffer alloc failed");
+                    break;
+                }
+                const int16_t *mono = reinterpret_cast<const int16_t *>(pcm);
+                for (size_t i = 0; i < samples; ++i) {
+                    s_stereo_buffer[i * 2u] = mono[i];
+                    s_stereo_buffer[i * 2u + 1u] = mono[i];
+                }
+                if (!ES8389_HifiWrite(s_stereo_buffer, samples * 2u * sizeof(int16_t))) {
+                    break;
+                }
             }
         }
     }
 
     ESP_LOGI(TAG, "%s: %s", s_current_path, s_stop_requested ? "stopped" : "finished");
 
+    if (to_net) {
+        NRLAudioBridge_SetMediaUplinkActive(false);
+    }
     if (decoder != nullptr) {
         MEDIA_DECODER_Close(decoder);
     }
@@ -214,4 +298,16 @@ extern "C" const MediaTrackInfo *MUSIC_GetTrackInfo(void)
 extern "C" void MUSIC_SetTrackEndCallback(MusicTrackEndCb_t callback)
 {
     s_track_end_cb = callback;
+}
+
+extern "C" void MUSIC_SetTarget(const int target)
+{
+    if (target >= MUSIC_TARGET_LOCAL && target <= MUSIC_TARGET_BOTH) {
+        s_target = target;
+    }
+}
+
+extern "C" int MUSIC_GetTarget(void)
+{
+    return s_target;
 }

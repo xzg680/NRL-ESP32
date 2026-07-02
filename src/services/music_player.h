@@ -18,6 +18,18 @@
 extern "C" {
 #endif
 
+// Playback target (nanny feature, docs/architecture.md 功能2): local
+// speaker, the NRL network uplink (resampled to 8 kHz G.711), or both
+// simultaneously (one decode, two consumers). Applies from the next track.
+typedef enum {
+    MUSIC_TARGET_LOCAL = 0,
+    MUSIC_TARGET_NET = 1,
+    MUSIC_TARGET_BOTH = 2,
+} MusicTarget_t;
+
+void MUSIC_SetTarget(int target);
+int MUSIC_GetTarget(void);
+
 // Register the voice-interrupt hook. Safe to call on every board.
 void MUSIC_Init(void);
 

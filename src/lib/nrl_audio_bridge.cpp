@@ -388,25 +388,33 @@ static size_t currentVoicePayloadBytes(void)
     return configured;
 }
 
-static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
+// True while a media stream (nanny music / beacon) owns the network uplink;
+// mic frames are dropped for the duration so the G.711 accumulator carries
+// exactly one producer at a time.
+static volatile bool s_media_uplink_active = false;
+
+static void sendVoiceFrameInternal(const int16_t *pcm8k, const size_t sample_count, const bool gated)
 {
     if (pcm8k == nullptr || sample_count == 0u) {
         return;
     }
-    if (!STATUS_IO_IsSqlActive()) {
-        return;
-    }
-
-    // Tail-audio suppression: for a configured window after the device finishes
-    // playing a network voice stream out to the radio, drop captured radio audio
-    // so a repeater's echo response is not bounced back onto the network (which
-    // would mutually re-trigger two or more networked devices).
-    if (s_tail_suppress_until_ms != 0u) {
-        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
-        if (static_cast<int32_t>(now - s_tail_suppress_until_ms) < 0) {
+    if (gated) {
+        if (!STATUS_IO_IsSqlActive()) {
             return;
         }
-        s_tail_suppress_until_ms = 0u;
+
+        // Tail-audio suppression: for a configured window after the device
+        // finishes playing a network voice stream out to the radio, drop
+        // captured radio audio so a repeater's echo response is not bounced
+        // back onto the network (which would mutually re-trigger two or more
+        // networked devices). Media uplink is not radio echo, so ungated.
+        if (s_tail_suppress_until_ms != 0u) {
+            const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+            if (static_cast<int32_t>(now - s_tail_suppress_until_ms) < 0) {
+                return;
+            }
+            s_tail_suppress_until_ms = 0u;
+        }
     }
 
     static uint8_t alaw_accumulator[kG711PayloadMaxBytes];
@@ -419,7 +427,7 @@ static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
         alaw_accumulator_count = 0u;
     }
 
-    const size_t used_samples = (sample_count < kAudioCodecFrameSamples) ? sample_count : kAudioCodecFrameSamples;
+    const size_t used_samples = sample_count;
     for (size_t i = 0; i < used_samples; ++i) {
         if (alaw_accumulator_count < target_bytes) {
             alaw_accumulator[alaw_accumulator_count++] = NRL_G711_EncodeALaw(pcm8k[i]);
@@ -440,6 +448,11 @@ static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
     }
 }
 
+static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
+{
+    sendVoiceFrameInternal(pcm8k, sample_count, true);
+}
+
 // Router sink for the NRL uplink. Frames arrive already at 8 kHz (the router
 // downsamples the 16 kHz raw-mic pushes; AFE and BT-mic pushes are 8 kHz
 // natively). PTT/SQL gating, tail suppression and G.711 packetisation all
@@ -449,6 +462,11 @@ static void uplinkSinkWrite(const uint8_t source_id,
                             const size_t sample_count,
                             void *)
 {
+    // A media stream (nanny/beacon) owns the uplink exclusively while
+    // active: captured audio would garble the G.711 accumulator.
+    if (s_media_uplink_active) {
+        return;
+    }
     // When a Bluetooth headset is connected, its mic is the uplink source;
     // ignore the onboard mic so audio isn't double-captured.
     if (source_id == AUDIO_SRC_MIC && NRL_BtHfp_IsConnected()) {
@@ -986,6 +1004,18 @@ static void bridgeTask(void *)
 }
 
 } // namespace
+
+void NRLAudioBridge_SetMediaUplinkActive(bool active)
+{
+    s_media_uplink_active = active;
+}
+
+void NRLAudioBridge_SendMediaUplink(const short *pcm8k, size_t sample_count)
+{
+    // Media (nanny music / beacon) streams to the NRL server regardless of
+    // the radio squelch: it's a deliberate transmission, not captured audio.
+    sendVoiceFrameInternal(pcm8k, sample_count, false);
+}
 
 void NRLAudioBridge_FeedExternalMic(const short *pcm8k, size_t sample_count)
 {

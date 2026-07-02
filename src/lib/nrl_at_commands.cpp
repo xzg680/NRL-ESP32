@@ -851,6 +851,36 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    // Music playback target (nanny 三档切换): AT+TARGET=LOCAL|NET|BOTH.
+    // LOCAL = speaker only; NET = stream to the NRL server (8k G.711, mic
+    // muted while streaming); BOTH = fan-out to both. Applies to the next
+    // track started.
+    if (stringEqualsIgnoreCase(command.command, "TARGET")) {
+        static const char *kTargetNames[] = {"LOCAL", "NET", "BOTH"};
+        if (is_query) {
+            const int t = MUSIC_GetTarget();
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "TARGET",
+                               (t >= 0 && t <= 2) ? kTargetNames[t] : "?");
+            return;
+        }
+        int target = -1;
+        if (stringEqualsIgnoreCase(command.value, "LOCAL")) {
+            target = MUSIC_TARGET_LOCAL;
+        } else if (stringEqualsIgnoreCase(command.value, "NET")) {
+            target = MUSIC_TARGET_NET;
+        } else if (stringEqualsIgnoreCase(command.value, "BOTH")) {
+            target = MUSIC_TARGET_BOTH;
+        }
+        if (target < 0) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "TARGET");
+            return;
+        }
+        MUSIC_SetTarget(target);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "TARGET",
+                           kTargetNames[target]);
+        return;
+    }
+
     if (stringEqualsIgnoreCase(command.command, "NEXT") ||
         stringEqualsIgnoreCase(command.command, "PREV")) {
         const bool ok = stringEqualsIgnoreCase(command.command, "NEXT") ? PLAYLIST_Next() : PLAYLIST_Prev();
