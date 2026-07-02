@@ -4,6 +4,7 @@ set(app_sources
     app/aec/esp_sr_probe.cpp
     audio/audio_focus.cpp
     audio/audio_router.cpp
+    media/cover_decoder.cpp
     media/media_decoder.cpp
     media/media_metadata.cpp
     services/music_player.cpp
@@ -45,6 +46,7 @@ set(app_priv_requires
     esp_adc
     espressif__esp_audio_codec
     espressif__esp_codec_dev
+    espressif__esp_new_jpeg
     esp_coex
     esp_driver_gpio
     esp_driver_i2c

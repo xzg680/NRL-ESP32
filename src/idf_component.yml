@@ -12,6 +12,11 @@ dependencies:
   # PCM + format info out.
   espressif/esp_audio_codec:
     version: "^2.3.0"
+  # JPEG decoder for embedded album art (media_metadata cover bytes ->
+  # RGB565 for LVGL). Chosen over esp_lv_decoder because the latter's
+  # component dependency on registry lvgl conflicts with our vendored LVGL.
+  espressif/esp_new_jpeg:
+    version: "^1.0.2"
   # esp-nimble-cpp: pure-IDF C++ wrapper around the NimBLE host stack used by
   # src/lib/ble_config.cpp. Requires CONFIG_BT_NIMBLE_ENABLED=y (set in
   # sdkconfig.defaults); Bluedroid must be off (mutually exclusive stacks).

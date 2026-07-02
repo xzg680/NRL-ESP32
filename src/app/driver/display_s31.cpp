@@ -8,6 +8,7 @@
 #include "../../lib/nrl_bt_hfp.h"
 #include "../../lib/nrl_net_compat.h"
 #include "../../lib/nrl_wifi.h"
+#include "../../media/cover_decoder.h"
 #include "../../services/music_player.h"
 #include "../../services/music_playlist.h"
 #include "../../services/storage_service.h"
@@ -164,8 +165,17 @@ lv_obj_t *s_lbl_music_album = nullptr;
 lv_obj_t *s_lbl_music_state = nullptr;
 lv_obj_t *s_btn_music_toggle_label = nullptr;
 lv_obj_t *s_list_music = nullptr;
+lv_obj_t *s_img_music_cover = nullptr;
+lv_obj_t *s_lbl_music_icon = nullptr;
 char s_shown_music_path[128] = {};
 bool s_shown_music_playing = false;
+
+// Decoded album art for the now-playing card. The bitmap and its LVGL
+// descriptor outlive page rebuilds (the widget re-attaches to them);
+// replaced on track change in refreshMusic.
+CoverBitmap s_music_cover_bmp = {};
+lv_image_dsc_t s_music_cover_dsc = {};
+constexpr uint16_t kMusicCoverDim = 152;
 
 char s_shown_caption[24] = {};
 char s_shown_callsign[16] = {};
@@ -642,6 +652,8 @@ void clearScreen()
     s_lbl_music_state = nullptr;
     s_btn_music_toggle_label = nullptr;
     s_list_music = nullptr;
+    s_img_music_cover = nullptr;
+    s_lbl_music_icon = nullptr;
     s_shown_music_path[0] = '\0';
     s_shown_music_playing = false;
 }
@@ -1025,6 +1037,40 @@ void populateMusicList()
     }
 }
 
+void refreshMusicCover(const MediaTrackInfo *track)
+{
+    if (s_img_music_cover == nullptr || s_lbl_music_icon == nullptr) {
+        return;
+    }
+
+    // Detach the widget before releasing the old bitmap it may reference.
+    lv_image_set_src(s_img_music_cover, nullptr);
+    lv_obj_add_flag(s_img_music_cover, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_lbl_music_icon, LV_OBJ_FLAG_HIDDEN);
+    COVER_Free(&s_music_cover_bmp);
+
+    if (track == nullptr || track->cover_type != MEDIA_COVER_JPEG ||
+        track->cover_data == nullptr || track->cover_size == 0u) {
+        return; // PNG or no art: keep the placeholder icon
+    }
+    if (!COVER_DecodeJpeg(track->cover_data, track->cover_size, kMusicCoverDim, &s_music_cover_bmp)) {
+        return;
+    }
+
+    memset(&s_music_cover_dsc, 0, sizeof(s_music_cover_dsc));
+    s_music_cover_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    s_music_cover_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    s_music_cover_dsc.header.w = s_music_cover_bmp.width;
+    s_music_cover_dsc.header.h = s_music_cover_bmp.height;
+    s_music_cover_dsc.header.stride = static_cast<uint32_t>(s_music_cover_bmp.width) * 2u;
+    s_music_cover_dsc.data = s_music_cover_bmp.rgb565;
+    s_music_cover_dsc.data_size = s_music_cover_bmp.bytes;
+
+    lv_image_set_src(s_img_music_cover, &s_music_cover_dsc);
+    lv_obj_remove_flag(s_img_music_cover, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_music_icon, LV_OBJ_FLAG_HIDDEN);
+}
+
 void refreshMusic()
 {
     const bool playing = MUSIC_IsPlaying();
@@ -1038,6 +1084,9 @@ void refreshMusic()
     s_shown_music_playing = playing;
 
     const MediaTrackInfo *track = MUSIC_GetTrackInfo();
+    if (track_changed) {
+        refreshMusicCover(track);
+    }
     if (s_lbl_music_title != nullptr) {
         const char *title = (track != nullptr && track->title[0] != '\0')
                                 ? track->title
@@ -1069,33 +1118,43 @@ void buildMusic()
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
 
-    // Left: now-playing card (cover art render arrives with the JPEG
-    // decoder hookup; the box doubles as its placeholder).
+    // Left: now-playing card -- cover art (or placeholder icon) on top,
+    // track labels underneath.
     lv_obj_t *card = panel(scr, 24, 78, 300, 274);
-    lv_obj_t *icon = label(card, &lv_font_montserrat_48, kColorDim);
-    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 18);
-    lv_label_set_text(icon, LV_SYMBOL_AUDIO);
+    s_lbl_music_icon = label(card, &lv_font_montserrat_48, kColorDim);
+    lv_obj_align(s_lbl_music_icon, LV_ALIGN_TOP_MID, 0, 48);
+    lv_label_set_text(s_lbl_music_icon, LV_SYMBOL_AUDIO);
+
+    s_img_music_cover = lv_image_create(card);
+    lv_obj_align(s_img_music_cover, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_add_flag(s_img_music_cover, LV_OBJ_FLAG_HIDDEN);
+    if (s_music_cover_bmp.rgb565 != nullptr) {
+        // Returning to the page mid-track: re-attach the existing bitmap.
+        lv_image_set_src(s_img_music_cover, &s_music_cover_dsc);
+        lv_obj_remove_flag(s_img_music_cover, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_music_icon, LV_OBJ_FLAG_HIDDEN);
+    }
 
     s_lbl_music_title = label(card, &lv_font_montserrat_20, kColorText);
     lv_obj_set_width(s_lbl_music_title, 270);
-    lv_obj_align(s_lbl_music_title, LV_ALIGN_TOP_LEFT, 0, 104);
+    lv_obj_align(s_lbl_music_title, LV_ALIGN_TOP_LEFT, 0, 162);
     lv_label_set_long_mode(s_lbl_music_title, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_music_title, "--");
 
     s_lbl_music_artist = label(card, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_music_artist, 270);
-    lv_obj_align(s_lbl_music_artist, LV_ALIGN_TOP_LEFT, 0, 140);
+    lv_obj_align(s_lbl_music_artist, LV_ALIGN_TOP_LEFT, 0, 196);
     lv_label_set_long_mode(s_lbl_music_artist, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_music_artist, "");
 
     s_lbl_music_album = label(card, &lv_font_montserrat_16, kColorDim);
     lv_obj_set_width(s_lbl_music_album, 270);
-    lv_obj_align(s_lbl_music_album, LV_ALIGN_TOP_LEFT, 0, 168);
+    lv_obj_align(s_lbl_music_album, LV_ALIGN_TOP_LEFT, 0, 222);
     lv_label_set_long_mode(s_lbl_music_album, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_lbl_music_album, "");
 
     s_lbl_music_state = label(card, &lv_font_montserrat_16, kColorSub);
-    lv_obj_align(s_lbl_music_state, LV_ALIGN_BOTTOM_LEFT, 0, -4);
+    lv_obj_align(s_lbl_music_state, LV_ALIGN_BOTTOM_LEFT, 0, -2);
     lv_label_set_text(s_lbl_music_state, "Stopped");
 
     // Right: scrollable track list.
