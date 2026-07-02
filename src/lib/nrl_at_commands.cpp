@@ -377,53 +377,6 @@ static bool startAtReply(NrlAtCommandResult *result)
            appendReplyBytes(result->payload, sizeof(result->payload), &result->payload_size, kBanner, sizeof(kBanner) - 1u);
 }
 
-static bool appendAllConfigLines(NrlAtCommandResult *result)
-{
-    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
-    char sci_config[32];
-    formatSciConfig(config->sci, sci_config, sizeof(sci_config));
-    char wifi_pass[32];
-    formatMaskedSecret(config->wifi_password, wifi_pass, sizeof(wifi_pass));
-    char wifi_ip[16];
-    char wifi_mask[16];
-    char wifi_gw[16];
-    char wifi_dns[16];
-    const bool show_dhcp_values = config->wifi_dhcp_enabled && nrlWifiStaConnected();
-    ipText(currentWifiIpValue(config->wifi_ip, nrlWifiStaIp(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
-    ipText(currentWifiIpValue(config->wifi_netmask, nrlWifiStaNetmask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
-    ipText(currentWifiIpValue(config->wifi_gateway, nrlWifiStaGateway(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
-    ipText(currentWifiIpValue(config->wifi_dns, nrlWifiStaDns(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
-    return appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_SSID", config->wifi_ssid) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_PASS", wifi_pass) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_DHCP", config->wifi_dhcp_enabled ? 1u : 0u) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_IP", wifi_ip) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_MASK", wifi_mask) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_GW", wifi_gw) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "WIFI_DNS", wifi_dns) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SCI", sci_config) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "CH", config->channel) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "D_IP", config->server_host) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "D_PORT", config->server_port) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "L_PORT", config->local_port) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "CALL", config->callsign) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "SSID", config->callsign_ssid) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "PTT_TIMEOUT", config->ptt_timeout_s) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOICE_BYTES", config->voice_payload_bytes) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "TAIL_SUPPRESS", config->tail_suppress_ms) &&
-#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT", static_cast<unsigned>(Display_GetBatteryCalibratedMv())) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT_RAW", static_cast<unsigned>(Display_GetBatteryRawMv())) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "BATT_CAL", config->battery_cal_milli) &&
-#endif
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", config->mic_volume) &&
-           appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "VOLUME", config->line_out_volume) &&
-           appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "HP_DRIVE", config->hp_drive_enabled ? "ON" : "OFF")
-#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
-           && appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AEC", config->aec_enabled ? "ON" : "OFF")
-#endif
-           ;
-}
-
 static bool applyCurrentAudioConfig(void)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
