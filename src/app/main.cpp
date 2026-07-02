@@ -9,6 +9,7 @@
 #include <nvs_flash.h>
 
 #include "../lib/ble_config.h"
+#include "../services/espnow_link.h"
 #include "../services/music_player.h"
 #include "../services/music_playlist.h"
 #include "../services/nanny.h"
@@ -156,6 +157,10 @@ static void initApp()
     if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
         NRL_BtHfp_SetEnabled(config->bt_enabled);
     }
+
+    // ESP-NOW off-grid voice link: restores its persisted enable state,
+    // waiting for the bridge task to start WiFi if needed.
+    ESPNOW_LINK_Init();
 
 #if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (ES8311_Init()) {

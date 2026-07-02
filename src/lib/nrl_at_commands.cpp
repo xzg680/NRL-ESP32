@@ -8,6 +8,7 @@
 #include "driver/es8311.h"
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
+#include "services/espnow_link.h"
 #include "services/music_player.h"
 #include "services/music_playlist.h"
 #include "services/nanny.h"
@@ -849,6 +850,30 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     if (stringEqualsIgnoreCase(command.command, "STOP")) {
         MUSIC_Stop();
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "STOP", "OK");
+        return;
+    }
+
+    // ESP-NOW off-grid voice link: AT+ESPNOW=ON|OFF|? (broadcast intercom
+    // between NRL-ESP32 devices on the same WiFi channel, no server).
+    if (stringEqualsIgnoreCase(command.command, "ESPNOW")) {
+        if (is_query) {
+            char peer[16] = {};
+            ESPNOW_LINK_GetLastPeer(peer, sizeof(peer));
+            char status[48];
+            snprintf(status, sizeof(status), "%s%s%s",
+                     ESPNOW_LINK_IsEnabled() ? "ON" : "OFF",
+                     peer[0] != '\0' ? " last=" : "",
+                     peer);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ESPNOW", status);
+            return;
+        }
+        bool enabled = false;
+        if (!parseBoolValue(command.value, &enabled) || !ESPNOW_LINK_SetEnabled(enabled)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "ESPNOW");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ESPNOW",
+                           enabled ? "ON" : "OFF");
         return;
     }
 
