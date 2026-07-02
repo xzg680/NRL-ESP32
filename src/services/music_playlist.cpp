@@ -96,7 +96,7 @@ extern "C" size_t PLAYLIST_Scan(void)
     s_count = 0;
     s_current = -1;
     scan_dir(STORAGE_SdMountPoint());
-    // USB drive mount joins here once MSC hot-plug lands.
+    scan_dir(STORAGE_UsbMountPoint());
 
     if (s_count > 1u) {
         qsort(s_paths, s_count, kMaxPathLen, compare_paths);

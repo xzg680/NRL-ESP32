@@ -25,6 +25,14 @@ bool STORAGE_SdMounted(void);
 // Mount point of the TF card ("/sdcard"), or NULL when not mounted.
 const char *STORAGE_SdMountPoint(void);
 
+// USB flash drive state (USB-OTG Host MSC, hot-pluggable). On insertion the
+// drive is mounted at /usb and the playlist rescans; on removal any track
+// playing from it is stopped first.
+bool STORAGE_UsbMounted(void);
+
+// Mount point of the USB drive ("/usb"), or NULL when not mounted.
+const char *STORAGE_UsbMountPoint(void);
+
 #ifdef __cplusplus
 }
 #endif

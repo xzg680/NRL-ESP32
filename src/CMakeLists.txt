@@ -82,6 +82,11 @@ endif()
 if(IDF_TARGET STREQUAL "esp32s31" AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../vendor/esp32_s31_korvo/CMakeLists.txt")
     list(APPEND app_priv_requires esp32_s31_korvo)
 endif()
+# USB flash drive (storage_service USB backend) -- the usb_host_msc component
+# dependency itself is target-gated in idf_component.yml.
+if(IDF_TARGET STREQUAL "esp32s31")
+    list(APPEND app_priv_requires usb espressif__usb_host_msc fatfs)
+endif()
 
 idf_component_register(
     SRCS ${app_sources}
