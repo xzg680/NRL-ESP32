@@ -60,7 +60,9 @@ set(app_priv_requires
     esp_driver_uart
     esp_driver_usb_serial_jtag
     esp_event
+    esp_http_client
     esp_http_server
+    mbedtls
     esp_lcd
     esp_netif
     esp_ringbuf

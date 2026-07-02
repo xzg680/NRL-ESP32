@@ -2,7 +2,9 @@
 
 #include <esp_audio_simple_dec.h>
 #include <esp_audio_simple_dec_default.h>
+#include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
+#include <esp_http_client.h>
 #include <esp_log.h>
 
 #include <stdio.h>
@@ -23,7 +25,8 @@ static bool s_default_registered = false;
 } // namespace
 
 struct MediaDecoder {
-    FILE *file;
+    FILE *file;                      // local file source, or...
+    esp_http_client_handle_t http;   // ...HTTP(S) stream source (net radio)
     esp_audio_simple_dec_handle_t handle;
     uint8_t *raw_buffer;
     uint8_t *out_buffer;
@@ -33,16 +36,40 @@ struct MediaDecoder {
     bool eof;
     bool info_valid;
     MediaDecoderInfo info;
+    // Sniffed leading bytes for format detection on non-seekable HTTP
+    // streams; replayed ahead of further source reads.
+    uint8_t sniff[16];
+    size_t sniff_len;
+    size_t sniff_off;
 };
 
 namespace {
 
-static esp_audio_simple_dec_type_t detect_type(FILE *file, const char *path)
+// Read from whichever source backs the decoder, serving sniffed bytes first.
+static size_t read_source(MediaDecoder *d, uint8_t *dst, const size_t size)
 {
-    uint8_t header[12] = {};
-    const size_t got = fread(header, 1, sizeof(header), file);
-    (void)fseek(file, 0, SEEK_SET);
+    size_t total = 0;
+    while (total < size && d->sniff_off < d->sniff_len) {
+        dst[total++] = d->sniff[d->sniff_off++];
+    }
+    if (total == size) {
+        return total;
+    }
+    if (d->file != nullptr) {
+        return total + fread(dst + total, 1, size - total, d->file);
+    }
+    if (d->http != nullptr) {
+        const int got = esp_http_client_read(d->http, reinterpret_cast<char *>(dst) + total,
+                                             static_cast<int>(size - total));
+        return total + ((got > 0) ? static_cast<size_t>(got) : 0u);
+    }
+    return total;
+}
 
+static esp_audio_simple_dec_type_t detect_type_from_header(const uint8_t *header,
+                                                           const size_t got,
+                                                           const char *path)
+{
     if (got >= 12u && memcmp(header, "RIFF", 4) == 0 && memcmp(header + 8, "WAVE", 4) == 0) {
         return ESP_AUDIO_SIMPLE_DEC_TYPE_WAV;
     }
@@ -62,7 +89,8 @@ static esp_audio_simple_dec_type_t detect_type(FILE *file, const char *path)
         return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3; // bare MPEG frame sync
     }
 
-    // Fall back to the extension (e.g. MP3s that open with junk bytes).
+    // Fall back to the extension / URL suffix (e.g. MP3s that open with
+    // junk bytes, or typeless radio streams).
     const char *dot = strrchr(path, '.');
     if (dot != nullptr) {
         if (strcasecmp(dot, ".mp3") == 0) {
@@ -115,25 +143,70 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
         s_default_registered = true;
     }
 
-    FILE *file = fopen(path, "rb");
-    if (file == nullptr) {
-        ESP_LOGE(TAG, "open failed: %s", path);
-        return nullptr;
-    }
-
-    const esp_audio_simple_dec_type_t type = detect_type(file, path);
-    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE) {
-        ESP_LOGE(TAG, "unsupported format: %s", path);
-        fclose(file);
-        return nullptr;
-    }
+    const bool is_http = strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0;
 
     MediaDecoder *d = static_cast<MediaDecoder *>(heap_caps_calloc(1, sizeof(MediaDecoder), MALLOC_CAP_SPIRAM));
     if (d == nullptr) {
-        fclose(file);
         return nullptr;
     }
-    d->file = file;
+
+    if (is_http) {
+        // Net-radio stream: open the connection, then sniff the first bytes
+        // for format detection (the stream is not seekable, so the sniffed
+        // bytes are replayed ahead of the decoder's reads).
+        esp_http_client_config_t http_cfg = {};
+        http_cfg.url = path;
+        http_cfg.timeout_ms = 10000;
+        http_cfg.buffer_size = 4096;
+        http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        d->http = esp_http_client_init(&http_cfg);
+        if (d->http == nullptr ||
+            esp_http_client_open(d->http, 0) != ESP_OK) {
+            ESP_LOGE(TAG, "stream open failed: %s", path);
+            MEDIA_DECODER_Close(d);
+            return nullptr;
+        }
+        (void)esp_http_client_fetch_headers(d->http);
+        const int status = esp_http_client_get_status_code(d->http);
+        if (status != 200) {
+            ESP_LOGE(TAG, "stream HTTP %d: %s", status, path);
+            MEDIA_DECODER_Close(d);
+            return nullptr;
+        }
+        int sniffed = 0;
+        while (sniffed < static_cast<int>(sizeof(d->sniff))) {
+            const int got = esp_http_client_read(d->http,
+                                                 reinterpret_cast<char *>(d->sniff) + sniffed,
+                                                 static_cast<int>(sizeof(d->sniff)) - sniffed);
+            if (got <= 0) {
+                break;
+            }
+            sniffed += got;
+        }
+        d->sniff_len = static_cast<size_t>(sniffed);
+    } else {
+        d->file = fopen(path, "rb");
+        if (d->file == nullptr) {
+            ESP_LOGE(TAG, "open failed: %s", path);
+            MEDIA_DECODER_Close(d);
+            return nullptr;
+        }
+        d->sniff_len = fread(d->sniff, 1, sizeof(d->sniff), d->file);
+        (void)fseek(d->file, 0, SEEK_SET);
+        d->sniff_off = d->sniff_len; // file rewound: nothing to replay
+    }
+
+    esp_audio_simple_dec_type_t type = detect_type_from_header(d->sniff, d->sniff_len, path);
+    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE && is_http) {
+        // Typeless radio URL: MP3 is the de-facto webradio default.
+        type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+    }
+    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE) {
+        ESP_LOGE(TAG, "unsupported format: %s", path);
+        MEDIA_DECODER_Close(d);
+        return nullptr;
+    }
+
     d->raw_buffer = static_cast<uint8_t *>(heap_caps_malloc(kRawBufferBytes, MALLOC_CAP_SPIRAM));
     d->out_buffer = static_cast<uint8_t *>(heap_caps_malloc(kInitialOutBufferBytes, MALLOC_CAP_SPIRAM));
     d->out_capacity = kInitialOutBufferBytes;
@@ -147,7 +220,8 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
         return nullptr;
     }
 
-    ESP_LOGI(TAG, "decoding %s as %s", path, esp_audio_simple_dec_get_name(type));
+    ESP_LOGI(TAG, "decoding %s as %s%s", path, esp_audio_simple_dec_get_name(type),
+             is_http ? " (stream)" : "");
     return d;
 }
 
@@ -163,14 +237,17 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
             if (d->eof) {
                 return 0;
             }
-            d->raw_fill = fread(d->raw_buffer, 1, kRawBufferBytes, d->file);
+            d->raw_fill = read_source(d, d->raw_buffer, kRawBufferBytes);
             d->raw_offset = 0;
             if (d->raw_fill == 0u) {
                 d->eof = true;
                 return 0;
             }
-            if (d->raw_fill < kRawBufferBytes) {
-                d->eof = true; // last chunk; flag eos so FLAC flushes its tail
+            // Live HTTP streams legitimately return short reads; only local
+            // files treat one as end-of-stream (FLAC needs the eos flag to
+            // flush its tail).
+            if (d->file != nullptr && d->raw_fill < kRawBufferBytes) {
+                d->eof = true;
             }
         }
 
@@ -219,13 +296,13 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
         if (raw.consumed == 0u && d->raw_offset < d->raw_fill) {
             const size_t remain = d->raw_fill - d->raw_offset;
             memmove(d->raw_buffer, d->raw_buffer + d->raw_offset, remain);
-            const size_t extra = d->eof ? 0u : fread(d->raw_buffer + remain, 1, kRawBufferBytes - remain, d->file);
+            const size_t extra = d->eof ? 0u : read_source(d, d->raw_buffer + remain, kRawBufferBytes - remain);
             if (extra == 0u) {
                 if (d->eof) {
                     return 0;
                 }
                 d->eof = true;
-            } else if (remain + extra < kRawBufferBytes) {
+            } else if (d->file != nullptr && remain + extra < kRawBufferBytes) {
                 d->eof = true;
             }
             d->raw_fill = remain + extra;
@@ -253,6 +330,10 @@ extern "C" void MEDIA_DECODER_Close(MediaDecoder *d)
     }
     if (d->file != nullptr) {
         fclose(d->file);
+    }
+    if (d->http != nullptr) {
+        (void)esp_http_client_close(d->http);
+        (void)esp_http_client_cleanup(d->http);
     }
     if (d->raw_buffer != nullptr) {
         heap_caps_free(d->raw_buffer);

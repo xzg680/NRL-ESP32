@@ -18,7 +18,7 @@ static const char *TAG = "MUSIC";
 
 namespace {
 
-constexpr size_t kMaxPathLen = 128;
+constexpr size_t kMaxPathLen = 256; // long enough for net-radio URLs
 
 static TaskHandle_t s_player_task = nullptr;
 static volatile bool s_stop_requested = false;
