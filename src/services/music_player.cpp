@@ -2,25 +2,19 @@
 
 #include "audio/audio_focus.h"
 #include "driver/es8389.h"
-#include "media/wav_reader.h"
+#include "media/media_decoder.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "MUSIC";
 
 namespace {
 
-// One read/write block. 16 KB ~= 46 ms of 44.1k/16/2 audio, 4 blocks in
-// flight through the I2S DMA keeps the TF-card read jitter inaudible while
-// staying tiny next to the 192k worst case (16 KB = ~10 ms there, still
-// fine because SDMMC reads far outpace 9.2 Mbit/s).
-constexpr size_t kReadBlockBytes = 16 * 1024;
 constexpr size_t kMaxPathLen = 128;
 
 static TaskHandle_t s_player_task = nullptr;
@@ -28,92 +22,91 @@ static volatile bool s_stop_requested = false;
 static volatile bool s_playing = false;
 static char s_current_path[kMaxPathLen] = {};
 
+// Mono tracks are expanded to stereo before the codec: always opening the
+// I2S/codec 2-channel avoids per-format bring-up risk on the slot config.
+static int16_t *s_stereo_buffer = nullptr;
+static size_t s_stereo_capacity = 0;
+
+static bool ensure_stereo_capacity(const size_t bytes)
+{
+    if (s_stereo_capacity >= bytes) {
+        return true;
+    }
+    int16_t *grown = static_cast<int16_t *>(heap_caps_realloc(s_stereo_buffer, bytes, MALLOC_CAP_SPIRAM));
+    if (grown == nullptr) {
+        return false;
+    }
+    s_stereo_buffer = grown;
+    s_stereo_capacity = bytes;
+    return true;
+}
+
 static void player_task(void *)
 {
     bool hifi_acquired = false;
-    FILE *file = fopen(s_current_path, "rb");
-    uint8_t *block = nullptr;
-    int16_t *stereo = nullptr;
+    MediaDecoder *decoder = MEDIA_DECODER_Open(s_current_path);
 
-    do {
-        if (file == nullptr) {
-            ESP_LOGE(TAG, "open failed: %s", s_current_path);
+    while (decoder != nullptr && !s_stop_requested) {
+        const uint8_t *pcm = nullptr;
+        size_t bytes = 0;
+        const int rc = MEDIA_DECODER_Decode(decoder, &pcm, &bytes);
+        if (rc <= 0) {
+            if (rc < 0) {
+                ESP_LOGE(TAG, "decode failed: %s", s_current_path);
+            }
             break;
         }
 
-        WavInfo info = {};
-        if (!WAV_ReadHeader(file, &info)) {
-            ESP_LOGE(TAG, "not a supported WAV: %s", s_current_path);
-            break;
-        }
-        if (info.bits_per_sample != 16u || (info.channels != 1u && info.channels != 2u)) {
-            ESP_LOGE(TAG, "unsupported WAV format: %ubit %uch (16-bit 1/2ch only for now)",
-                     static_cast<unsigned>(info.bits_per_sample),
-                     static_cast<unsigned>(info.channels));
-            break;
-        }
-
-        block = static_cast<uint8_t *>(heap_caps_malloc(kReadBlockBytes, MALLOC_CAP_SPIRAM));
-        // Mono tracks are expanded to stereo here; always opening the codec
-        // 2-channel avoids per-format bring-up risk on the I2S slot config.
-        if (info.channels == 1u) {
-            stereo = static_cast<int16_t *>(heap_caps_malloc(kReadBlockBytes * 2u, MALLOC_CAP_SPIRAM));
-        }
-        if (block == nullptr || (info.channels == 1u && stereo == nullptr)) {
-            ESP_LOGE(TAG, "buffer alloc failed");
-            break;
-        }
-
-        if (!ES8389_HifiAcquire(info.sample_rate_hz, 16u, 2u)) {
-            ESP_LOGE(TAG, "hi-fi speaker unavailable (wrong board, or voice busy)");
-            break;
-        }
-        hifi_acquired = true;
-
-        ESP_LOGI(TAG, "playing %s: %luHz %ubit %uch %lu bytes",
-                 s_current_path,
-                 static_cast<unsigned long>(info.sample_rate_hz),
-                 static_cast<unsigned>(info.bits_per_sample),
-                 static_cast<unsigned>(info.channels),
-                 static_cast<unsigned long>(info.data_bytes));
-
-        uint32_t remaining = info.data_bytes;
-        while (remaining > 0u && !s_stop_requested) {
-            const size_t want = (remaining < kReadBlockBytes) ? remaining : kReadBlockBytes;
-            const size_t got = fread(block, 1, want, file);
-            if (got == 0u) {
+        MediaDecoderInfo info = {};
+        if (!hifi_acquired) {
+            if (!MEDIA_DECODER_GetInfo(decoder, &info)) {
+                ESP_LOGE(TAG, "no format info from decoder");
                 break;
             }
-            remaining -= got;
-
-            if (info.channels == 2u) {
-                if (!ES8389_HifiWrite(block, got)) {
-                    break;
-                }
-            } else {
-                const size_t samples = got / sizeof(int16_t);
-                const int16_t *mono = reinterpret_cast<const int16_t *>(block);
-                for (size_t i = 0; i < samples; ++i) {
-                    stereo[i * 2u] = mono[i];
-                    stereo[i * 2u + 1u] = mono[i];
-                }
-                if (!ES8389_HifiWrite(stereo, samples * 2u * sizeof(int16_t))) {
-                    break;
-                }
+            if (info.bits_per_sample != 16u || (info.channels != 1u && info.channels != 2u)) {
+                ESP_LOGE(TAG, "unsupported PCM: %ubit %uch (16-bit 1/2ch only for now)",
+                         static_cast<unsigned>(info.bits_per_sample),
+                         static_cast<unsigned>(info.channels));
+                break;
             }
+            if (!ES8389_HifiAcquire(info.sample_rate_hz, 16u, 2u)) {
+                ESP_LOGE(TAG, "hi-fi speaker unavailable (wrong board, or voice busy)");
+                break;
+            }
+            hifi_acquired = true;
+            ESP_LOGI(TAG, "playing %s: %luHz %ubit %uch",
+                     s_current_path,
+                     static_cast<unsigned long>(info.sample_rate_hz),
+                     static_cast<unsigned>(info.bits_per_sample),
+                     static_cast<unsigned>(info.channels));
         }
 
-        ESP_LOGI(TAG, "%s: %s", s_current_path, s_stop_requested ? "stopped" : "finished");
-    } while (false);
+        (void)MEDIA_DECODER_GetInfo(decoder, &info);
+        if (info.channels == 2u) {
+            if (!ES8389_HifiWrite(pcm, bytes)) {
+                break;
+            }
+        } else {
+            const size_t samples = bytes / sizeof(int16_t);
+            if (!ensure_stereo_capacity(samples * 2u * sizeof(int16_t))) {
+                ESP_LOGE(TAG, "stereo buffer alloc failed");
+                break;
+            }
+            const int16_t *mono = reinterpret_cast<const int16_t *>(pcm);
+            for (size_t i = 0; i < samples; ++i) {
+                s_stereo_buffer[i * 2u] = mono[i];
+                s_stereo_buffer[i * 2u + 1u] = mono[i];
+            }
+            if (!ES8389_HifiWrite(s_stereo_buffer, samples * 2u * sizeof(int16_t))) {
+                break;
+            }
+        }
+    }
 
-    if (file != nullptr) {
-        fclose(file);
-    }
-    if (block != nullptr) {
-        heap_caps_free(block);
-    }
-    if (stereo != nullptr) {
-        heap_caps_free(stereo);
+    ESP_LOGI(TAG, "%s: %s", s_current_path, s_stop_requested ? "stopped" : "finished");
+
+    if (decoder != nullptr) {
+        MEDIA_DECODER_Close(decoder);
     }
     if (hifi_acquired) {
         ES8389_HifiRelease();
@@ -162,10 +155,10 @@ extern "C" bool MUSIC_PlayFile(const char *path)
     s_stop_requested = false;
     s_playing = true;
 
-    // Priority below the voice passthrough task (10): file reads and I2S
-    // writes are throughput work, not latency-critical. Internal-RAM stack:
-    // stdio/FatFS/SDMMC may run with flash cache paused.
-    if (xTaskCreatePinnedToCore(player_task, "music_player", 6144, nullptr, 5, &s_player_task, 1) != pdPASS) {
+    // Priority below the voice passthrough task (10): file reads, decode and
+    // I2S writes are throughput work, not latency-critical. Internal-RAM
+    // stack: stdio/FatFS/SDMMC may run with flash cache paused.
+    if (xTaskCreatePinnedToCore(player_task, "music_player", 8192, nullptr, 5, &s_player_task, 1) != pdPASS) {
         s_playing = false;
         s_player_task = nullptr;
         ESP_LOGE(TAG, "player task create failed");

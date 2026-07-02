@@ -6,6 +6,12 @@ dependencies:
   # gezipai/bh4tdv (no BSP) resolve it as well.
   espressif/esp_codec_dev:
     version: "^1.5.9"
+  # Audio decoders (MP3/FLAC/AAC...) for the media player
+  # (docs/architecture.md 3.3). The simple-decoder API also parses the
+  # container/frame sync, so the player streams raw file bytes in and gets
+  # PCM + format info out.
+  espressif/esp_audio_codec:
+    version: "^2.3.0"
   # esp-nimble-cpp: pure-IDF C++ wrapper around the NimBLE host stack used by
   # src/lib/ble_config.cpp. Requires CONFIG_BT_NIMBLE_ENABLED=y (set in
   # sdkconfig.defaults); Bluedroid must be off (mutually exclusive stacks).
