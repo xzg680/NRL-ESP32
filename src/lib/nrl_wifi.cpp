@@ -688,10 +688,8 @@ bool nrlWifiScanStartBlocking(uint32_t timeout_ms)
         {
             continue;
         }
-        strncpy(s_scan_cache[s_scan_count].ssid,
-                reinterpret_cast<const char *>(records[i].ssid),
-                sizeof(s_scan_cache[s_scan_count].ssid) - 1);
-        s_scan_cache[s_scan_count].ssid[sizeof(s_scan_cache[s_scan_count].ssid) - 1] = '\0';
+        snprintf(s_scan_cache[s_scan_count].ssid, sizeof(s_scan_cache[s_scan_count].ssid),
+                 "%s", reinterpret_cast<const char *>(records[i].ssid));
         s_scan_cache[s_scan_count].rssi = records[i].rssi;
         ++s_scan_count;
     }
@@ -888,8 +886,8 @@ namespace
                 }
                 if (out_status != nullptr && out_status_size > 0)
                 {
-                    strncpy(out_status, buf, out_status_size - 1);
-                    out_status[out_status_size - 1] = '\0';
+                    snprintf(out_status, out_status_size, "%.*s",
+                             static_cast<int>(out_status_size - 1), buf);
                 }
                 out_ms = nowMs() - t0;
                 close(fd);

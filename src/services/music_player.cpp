@@ -422,8 +422,7 @@ extern "C" bool MUSIC_PlayFile(const char *path)
     MEDIA_META_Free(&s_track_info);
     memset(&s_track_info, 0, sizeof(s_track_info));
 
-    strncpy(s_current_path, path, sizeof(s_current_path) - 1u);
-    s_current_path[sizeof(s_current_path) - 1u] = '\0';
+    snprintf(s_current_path, sizeof(s_current_path), "%s", path);
     s_stop_requested = false;
     s_playing = true;
 

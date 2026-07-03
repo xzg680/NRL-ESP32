@@ -220,7 +220,7 @@ static struct dirent *vfs_readdir(DIR *pdir)
             continue;
         }
         memset(&dir->entry, 0, sizeof(dir->entry));
-        strncpy(dir->entry.d_name, ent->name, sizeof(dir->entry.d_name) - 1u);
+        snprintf(dir->entry.d_name, sizeof(dir->entry.d_name), "%s", ent->name);
         dir->entry.d_type = (ent->st.smb2_type == SMB2_TYPE_DIRECTORY) ? DT_DIR : DT_REG;
         return &dir->entry;
     }

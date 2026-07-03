@@ -732,8 +732,7 @@ bool setLabel(lv_obj_t *label, char *cache, size_t cache_size, const char *text)
     if (strncmp(cache, text, cache_size) == 0) {
         return false;
     }
-    strncpy(cache, text, cache_size - 1u);
-    cache[cache_size - 1u] = '\0';
+    snprintf(cache, cache_size, "%.*s", static_cast<int>(cache_size - 1u), text);
     lv_label_set_text(label, text);
     return true;
 }
@@ -1036,6 +1035,9 @@ extern "C" int Display_GetBatteryCalibratedMv(void)
 extern "C" bool Display_SetCjkFontEngine(int) { return false; }
 extern "C" int Display_GetCjkFontEngine(void) { return DISPLAY_CJK_FONT_BITMAP; }
 
+// Framebuffer benchmark exists only on the S31 RGB panel.
+extern "C" long Display_FramebufferBenchMBps(void) { return -1; }
+
 #elif NRL_BOARD != NRL_BOARD_S31_KORVO
 
 extern "C" void Display_Init(void) {}
@@ -1044,5 +1046,6 @@ extern "C" int Display_GetBatteryRawMv(void) { return 0; }
 extern "C" int Display_GetBatteryCalibratedMv(void) { return 0; }
 extern "C" bool Display_SetCjkFontEngine(int) { return false; }
 extern "C" int Display_GetCjkFontEngine(void) { return DISPLAY_CJK_FONT_BITMAP; }
+extern "C" long Display_FramebufferBenchMBps(void) { return -1; }
 
 #endif

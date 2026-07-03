@@ -40,6 +40,7 @@
 #include <esp_timer.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
 #include <freertos/task.h>
 #include <lvgl.h>
 
@@ -198,6 +199,11 @@ lv_obj_t *s_ta_radio_url = nullptr;
 lv_obj_t *s_dd_music_target = nullptr;
 lv_obj_t *s_sw_espnow = nullptr;
 lv_obj_t *s_lbl_espnow_status = nullptr;
+lv_obj_t *s_lbl_cpu = nullptr;
+char s_shown_cpu[16] = {};
+uint32_t s_clr_cpu = 0xFFFFFFFFu;
+void *s_fb_bench = nullptr;                       // fb0, for the FB benchmark
+volatile bool s_force_invalidate = false;         // repaint after the benchmark
 char s_shown_espnow_status[128] = {};
 // Whether the Home page was built with the split (NRL + ESP-NOW) PTT; when
 // the ESP-NOW enable state changes, refreshHome rebuilds the page.
@@ -364,9 +370,41 @@ void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     // previous frame's dirty areas. Rendering touches only the back buffer, so the
     // partial-write-into-the-live-framebuffer drift FULL mode avoided stays avoided.
     if (lv_display_flush_is_last(disp)) {
+        const int64_t t0 = esp_timer_get_time();
         esp_lcd_panel_draw_bitmap(panel, 0, 0, kWidth, kHeight, px_map);
+        const uint32_t present_ms =
+            static_cast<uint32_t>((esp_timer_get_time() - t0) / 1000);
+        if (present_ms > 50u) {
+            // Telemetry: splits "software render slow" from "panel present
+            // blocked" inside the lv_timer_handler duration numbers.
+            ESP_LOGW(TAG, "panel present took %lums", static_cast<unsigned long>(present_ms));
+        }
     }
     lv_display_flush_ready(disp);
+}
+
+// Telemetry: DIRECT render mode should only redraw small dirty areas, yet
+// ~140 ms full-screen-sized render passes keep showing up. Log any
+// invalidation covering >1/4 of the screen so the offending widget's
+// coordinates give it away.
+void invalidateProbe(lv_event_t *e)
+{
+    const lv_area_t *a = static_cast<const lv_area_t *>(lv_event_get_param(e));
+    if (a == nullptr) {
+        return;
+    }
+    const int32_t w = a->x2 - a->x1 + 1;
+    const int32_t h = a->y2 - a->y1 + 1;
+    if (static_cast<int64_t>(w) * h >= (static_cast<int64_t>(kWidth) * kHeight) / 4) {
+        static uint32_t s_last_log_ms = 0;
+        const uint32_t now = millis();
+        if (now - s_last_log_ms > 1000u) {
+            s_last_log_ms = now;
+            ESP_LOGW(TAG, "big invalidate %ldx%ld @(%ld,%ld)",
+                     static_cast<long>(w), static_cast<long>(h),
+                     static_cast<long>(a->x1), static_cast<long>(a->y1));
+        }
+    }
 }
 
 bool initLvgl()
@@ -387,6 +425,7 @@ bool initLvgl()
         ESP_LOGE(TAG, "get frame buffers failed");
         return false;
     }
+    s_fb_bench = fb0;
 
     s_disp = lv_display_create(kWidth, kHeight);
     if (s_disp == nullptr) {
@@ -398,6 +437,7 @@ bool initLvgl()
     lv_display_set_flush_cb(s_disp, lvglFlush);
     const size_t fb_bytes = static_cast<size_t>(kWidth) * kHeight * 2u;
     lv_display_set_buffers(s_disp, fb0, fb1, fb_bytes, LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_display_add_event_cb(s_disp, invalidateProbe, LV_EVENT_INVALIDATE_AREA, nullptr);
     lv_tick_set_cb(lvglTick);
     return true;
 }
@@ -411,7 +451,14 @@ void touchRead(lv_indev_t *, lv_indev_data_t *data)
     uint16_t y = 0;
     uint16_t strength = 0;
     uint8_t count = 0;
+    const int64_t t0 = esp_timer_get_time();
     esp_lcd_touch_read_data(s_touch);
+    const uint32_t dt_ms = static_cast<uint32_t>((esp_timer_get_time() - t0) / 1000);
+    if (dt_ms > 30u) {
+        // Telemetry: the GT1151 shares the I2C bus with the audio codec; a
+        // long read here means another task parked on the bus mutex.
+        ESP_LOGW(TAG, "touch read blocked %lums", static_cast<unsigned long>(dt_ms));
+    }
     const bool pressed = esp_lcd_touch_get_coordinates(s_touch, &x, &y, &strength, &count, 1);
     if (pressed && count > 0) {
         data->point.x = static_cast<int16_t>(x);
@@ -635,8 +682,7 @@ bool setLabel(lv_obj_t *obj, char *cache, size_t cache_size, const char *text)
     if (obj == nullptr || strncmp(cache, text, cache_size) == 0) {
         return false;
     }
-    strncpy(cache, text, cache_size - 1u);
-    cache[cache_size - 1u] = '\0';
+    snprintf(cache, cache_size, "%.*s", static_cast<int>(cache_size - 1u), text);
     lv_label_set_text(obj, text);
     return true;
 }
@@ -751,6 +797,9 @@ void clearScreen()
     s_sw_espnow = nullptr;
     s_lbl_espnow_status = nullptr;
     memset(s_shown_espnow_status, 0, sizeof(s_shown_espnow_status));
+    s_lbl_cpu = nullptr;
+    memset(s_shown_cpu, 0, sizeof(s_shown_cpu));
+    s_clr_cpu = kColorUnset;
     s_lbl_music_title = nullptr;
     s_lbl_music_artist = nullptr;
     s_lbl_music_album = nullptr;
@@ -769,20 +818,22 @@ void clearScreen()
 void topBar(lv_obj_t *scr)
 {
     constexpr int kTopLeft = 20;
-    constexpr int kTopGap = 22;
-    constexpr int kTopTimeW = 128;
-    constexpr int kTopStationW = 150;
-    constexpr int kTopVolW = 94;
-    constexpr int kTopWifiW = 104;
-    constexpr int kTopBtW = 52;
+    constexpr int kTopGap = 14;
+    constexpr int kTopTimeW = 108;
+    constexpr int kTopStationW = 140;
+    constexpr int kTopVolW = 82;
+    constexpr int kTopWifiW = 88;
+    constexpr int kTopBtW = 40;
+    constexpr int kTopCpuW = 96;
     // Order, left to right: local callsign-SSID, time, incoming caller, volume,
-    // WiFi signal, Bluetooth.
+    // WiFi signal, Bluetooth, per-core CPU load.
     constexpr int kTopLocalX = kTopLeft;
     constexpr int kTopTimeX = kTopLocalX + kTopStationW + kTopGap;
     constexpr int kTopRemoteX = kTopTimeX + kTopTimeW + kTopGap;
     constexpr int kTopVolX = kTopRemoteX + kTopStationW + kTopGap;
     constexpr int kTopWifiX = kTopVolX + kTopVolW + kTopGap;
     constexpr int kTopBtX = kTopWifiX + kTopWifiW + 8;
+    constexpr int kTopCpuX = kTopBtX + kTopBtW + 8;
 
     lv_obj_t *bar = panel(scr, 0, 0, kWidth, 56);
     lv_obj_set_style_radius(bar, 0, 0);
@@ -831,6 +882,13 @@ void topBar(lv_obj_t *scr)
     lv_obj_align(s_lbl_bt_top, LV_ALIGN_LEFT_MID, kTopBtX, 0);
     lv_obj_set_style_text_align(s_lbl_bt_top, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_lbl_bt_top, "");
+
+    // Per-core CPU load ("cpu0/cpu1"), updated by refreshCpu().
+    s_lbl_cpu = label(bar, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_cpu, kTopCpuW);
+    lv_obj_align(s_lbl_cpu, LV_ALIGN_LEFT_MID, kTopCpuX, 0);
+    lv_obj_set_style_text_align(s_lbl_cpu, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_lbl_cpu, "--/--");
 }
 
 void buildHome()
@@ -1427,8 +1485,7 @@ void refreshMusic()
     if (!track_changed && playing == s_shown_music_playing) {
         return;
     }
-    strncpy(s_shown_music_path, path, sizeof(s_shown_music_path) - 1u);
-    s_shown_music_path[sizeof(s_shown_music_path) - 1u] = '\0';
+    snprintf(s_shown_music_path, sizeof(s_shown_music_path), "%s", path);
     s_shown_music_playing = playing;
 
     const MediaTrackInfo *track = MUSIC_GetTrackInfo();
@@ -1632,6 +1689,9 @@ void buildGame()
     clearScreen();
     s_page = Page::Game;
     lv_obj_t *scr = lv_screen_active();
+    // Keep the shared status bar (clock / caller / volume / CPU) visible in
+    // the game too; the board layout starts at y=56, right below it.
+    topBar(scr);
     GAME_TETRIS_Build(scr, gameExit);
 }
 
@@ -2618,6 +2678,52 @@ void refreshHome()
     setLabelColor(s_lbl_server, s_clr_server, server_color);
 }
 
+// Per-core CPU load from the FreeRTOS idle-task runtime counters (delta over
+// the ~500 ms refresh tick). Repaints only on a >=3% move: every label change
+// forces a full-screen re-render in FULL mode.
+void refreshCpu()
+{
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    if (s_lbl_cpu == nullptr) {
+        return;
+    }
+    static uint32_t s_last_idle[2] = {};
+    static uint32_t s_last_us = 0;
+    static int s_pct_shown[2] = {-100, -100};
+    const uint32_t now_us = static_cast<uint32_t>(esp_timer_get_time());
+    const uint32_t idle[2] = {
+        static_cast<uint32_t>(ulTaskGetIdleRunTimeCounterForCore(0)),
+        static_cast<uint32_t>(ulTaskGetIdleRunTimeCounterForCore(1)),
+    };
+    const uint32_t dt = now_us - s_last_us; // wrap-safe unsigned math
+    if (s_last_us != 0u && dt > 0u) {
+        int pct[2];
+        for (int core = 0; core < 2; ++core) {
+            const uint32_t di = idle[core] - s_last_idle[core];
+            const uint64_t idle_pct = static_cast<uint64_t>(di) * 100u / dt;
+            long load = 100 - static_cast<long>(idle_pct);
+            if (load < 0) load = 0;
+            if (load > 100) load = 100;
+            pct[core] = static_cast<int>(load);
+        }
+        const int d0 = pct[0] - s_pct_shown[0];
+        const int d1 = pct[1] - s_pct_shown[1];
+        if (d0 >= 3 || d0 <= -3 || d1 >= 3 || d1 <= -3) {
+            s_pct_shown[0] = pct[0];
+            s_pct_shown[1] = pct[1];
+            char text[16];
+            snprintf(text, sizeof(text), "%d/%d", pct[0], pct[1]);
+            setLabel(s_lbl_cpu, s_shown_cpu, sizeof(s_shown_cpu), text);
+            setLabelColor(s_lbl_cpu, s_clr_cpu,
+                          (pct[0] > 85 || pct[1] > 85) ? kColorWarn : kColorSub);
+        }
+    }
+    s_last_us = now_us;
+    s_last_idle[0] = idle[0];
+    s_last_idle[1] = idle[1];
+#endif
+}
+
 // Volume now lives in the shared top bar, so refresh it on every page.
 void refreshVolume()
 {
@@ -2705,6 +2811,7 @@ void refresh()
     refreshClock();
     refreshWifiBadge();
     refreshVolume();
+    refreshCpu();
     refreshStationBadges();
     if (s_page == Page::Home) {
         refreshHome();
@@ -2819,6 +2926,10 @@ extern "C" void Display_Poll(void)
         return;
     }
     const uint32_t now = millis();
+    if (s_force_invalidate) {
+        s_force_invalidate = false;
+        lv_obj_invalidate(lv_screen_active()); // repaint after the FB benchmark
+    }
     pollWifiScan();
     // Update the top-bar volume every poll (~20 ms) so a physical volume key held
     // down shows each 1% step live, matching the soft buttons. setLabel no-ops
@@ -2840,12 +2951,72 @@ extern "C" void Display_Poll(void)
         // page isn't pointlessly rebuilt half a second later.
         s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
     }
+    // UI-latency telemetry: everything LVGL does (touch read, layout, full
+    // render) runs inside this call, so its duration IS the felt lag. Warn
+    // on single slow passes and print a 10 s max/count digest while hunting
+    // responsiveness regressions.
+    const int64_t lv_t0 = esp_timer_get_time();
+#if defined(CONFIG_FREERTOS_USE_TRACE_FACILITY) && CONFIG_FREERTOS_USE_TRACE_FACILITY
+    TaskStatus_t lv_ts0;
+    vTaskGetInfo(nullptr, &lv_ts0, pdFALSE, eRunning);
+#endif
     lv_timer_handler();
+    const uint32_t lv_ms = static_cast<uint32_t>((esp_timer_get_time() - lv_t0) / 1000);
+#if defined(CONFIG_FREERTOS_USE_TRACE_FACILITY) && CONFIG_FREERTOS_USE_TRACE_FACILITY
+    // CPU time this task actually consumed inside the handler: splits
+    // "render is computing" from "render is blocked/preempted".
+    TaskStatus_t lv_ts1;
+    vTaskGetInfo(nullptr, &lv_ts1, pdFALSE, eRunning);
+    const uint32_t lv_cpu_ms =
+        (lv_ts1.ulRunTimeCounter - lv_ts0.ulRunTimeCounter) / 1000u;
+#else
+    const uint32_t lv_cpu_ms = 0;
+#endif
+    static uint32_t s_lv_max_ms = 0;
+    static uint32_t s_lv_slow_count = 0;
+    static uint32_t s_lv_report_ms = 0;
+    if (lv_ms > s_lv_max_ms) {
+        s_lv_max_ms = lv_ms;
+    }
+    if (lv_ms > 150u) {
+        ESP_LOGW(TAG, "lv_timer_handler took %lums (cpu %lums)",
+                 static_cast<unsigned long>(lv_ms),
+                 static_cast<unsigned long>(lv_cpu_ms));
+    }
+    if (lv_ms > 60u) {
+        ++s_lv_slow_count;
+    }
+    if (now - s_lv_report_ms >= 10000u) {
+        s_lv_report_ms = now;
+        if (s_lv_max_ms > 60u) {
+            ESP_LOGI(TAG, "lv 10s digest: max=%lums slow(>60ms)=%lu",
+                     static_cast<unsigned long>(s_lv_max_ms),
+                     static_cast<unsigned long>(s_lv_slow_count));
+        }
+        s_lv_max_ms = 0;
+        s_lv_slow_count = 0;
+    }
 }
 
 extern "C" int Display_GetBatteryRawMv(void)
 {
     return 0;
+}
+
+extern "C" long Display_FramebufferBenchMBps(void)
+{
+    if (s_fb_bench == nullptr) {
+        return -1;
+    }
+    const size_t bytes = static_cast<size_t>(kWidth) * kHeight * 2u;
+    const int64_t t0 = esp_timer_get_time();
+    memset(s_fb_bench, 0, bytes);
+    const int64_t us = esp_timer_get_time() - t0;
+    s_force_invalidate = true; // repaint the smear from the display task
+    if (us <= 0) {
+        return -1;
+    }
+    return static_cast<long>(static_cast<int64_t>(bytes) * 1000000 / us / 1048576);
 }
 
 extern "C" int Display_GetBatteryCalibratedMv(void)

@@ -30,6 +30,12 @@ void Display_Poll(void);
 int Display_GetBatteryRawMv(void);
 int Display_GetBatteryCalibratedMv(void);
 
+// Diagnostics (S31 only; -1 elsewhere): memset throughput of the RGB
+// panel's framebuffer in MB/s. Distinguishes "framebuffer memory is slow /
+// uncached" from "the renderer is slow". Briefly corrupts the screen, then
+// repaints.
+long Display_FramebufferBenchMBps(void);
+
 // CJK font engine on the S31 LCD (no-ops elsewhere; the setter returns
 // false). 0 = built-in bitmap subset (GB2312 level-1), 1 = FreeType vector
 // rendering from the TTF at /sdcard/fonts/cjk.ttf. Runtime-switchable for

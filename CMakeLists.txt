@@ -57,6 +57,10 @@ if(IDF_TARGET STREQUAL "esp32s31")
     idf_component_get_property(bt_lib bt COMPONENT_LIB)
     if(bt_lib)
         target_compile_definitions(${bt_lib} PRIVATE BTM_SEC_MAX_SERVICE_RECORDS=16)
+        # The S31 builds at -O2 (UI render speed); gcc's deeper analysis then
+        # trips stringop-truncation inside Bluedroid's own BD_NAME strncpy
+        # (bt_types.h). IDF code, not ours -- demote it for this component.
+        target_compile_options(${bt_lib} PRIVATE -Wno-error=stringop-truncation)
     endif()
 
     # LVGL's vendored ESP cmake only REQUIRES esp_timer; its FreeType binding

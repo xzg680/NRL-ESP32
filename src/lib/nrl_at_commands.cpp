@@ -19,6 +19,10 @@
 #include "driver/sci_serial.h"
 
 #include <esp_log.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
+#include <freertos/task.h>
 #include <lwip/sockets.h>
 
 #include <ctype.h>
@@ -246,10 +250,10 @@ static bool decodeAtCommand(const uint8_t *payload, const size_t payload_size, A
     }
 
     *separator = '\0';
-    strncpy(out_cmd->command, buffer, sizeof(out_cmd->command) - 1u);
-    out_cmd->command[sizeof(out_cmd->command) - 1u] = '\0';
-    strncpy(out_cmd->value, separator + 1, sizeof(out_cmd->value) - 1u);
-    out_cmd->value[sizeof(out_cmd->value) - 1u] = '\0';
+    snprintf(out_cmd->command, sizeof(out_cmd->command), "%.*s",
+             static_cast<int>(sizeof(out_cmd->command) - 1u), buffer);
+    snprintf(out_cmd->value, sizeof(out_cmd->value), "%.*s",
+             static_cast<int>(sizeof(out_cmd->value) - 1u), separator + 1);
 
     trimText(out_cmd->command);
     trimText(out_cmd->value);
@@ -322,8 +326,7 @@ static bool parseSciConfigValue(const char *text,
     }
 
     char buffer[80];
-    strncpy(buffer, text, sizeof(buffer) - 1u);
-    buffer[sizeof(buffer) - 1u] = '\0';
+    snprintf(buffer, sizeof(buffer), "%.*s", static_cast<int>(sizeof(buffer) - 1u), text);
 
     char *parts[4] = {};
     char *cursor = buffer;
@@ -1142,6 +1145,115 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         STORAGE_SmbDescribe(status, sizeof(status));
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SMB", status);
         return;
+    }
+
+    // Memory bandwidth microbenchmark: AT+MEMBENCH=1. Times memset/memcpy on
+    // PSRAM and internal RAM so render-throughput problems can be split into
+    // "PSRAM path is slow" vs "the drawing code is slow".
+    if (stringEqualsIgnoreCase(command.command, "MEMBENCH")) {
+        constexpr size_t kBench = 256 * 1024;
+        uint8_t *ps = static_cast<uint8_t *>(heap_caps_malloc(kBench, MALLOC_CAP_SPIRAM));
+        uint8_t *in = static_cast<uint8_t *>(heap_caps_malloc(32 * 1024, MALLOC_CAP_INTERNAL));
+        char line[64];
+        if (ps != nullptr) {
+            int64_t t0 = esp_timer_get_time();
+            for (int i = 0; i < 4; ++i) {
+                memset(ps, i, kBench);
+            }
+            int64_t us = esp_timer_get_time() - t0;
+            snprintf(line, sizeof(line), "psram memset %lld MB/s",
+                     static_cast<long long>(4LL * kBench * 1000000LL / us / 1048576LL));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "MEM", line);
+
+            t0 = esp_timer_get_time();
+            for (int i = 0; i < 4; ++i) {
+                memcpy(ps, ps + kBench / 2, kBench / 2);
+            }
+            us = esp_timer_get_time() - t0;
+            snprintf(line, sizeof(line), "psram memcpy %lld MB/s",
+                     static_cast<long long>(4LL * (kBench / 2) * 1000000LL / us / 1048576LL));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "MEM", line);
+            heap_caps_free(ps);
+        }
+        if (in != nullptr) {
+            const int64_t t0 = esp_timer_get_time();
+            for (int i = 0; i < 32; ++i) {
+                memset(in, i, 32 * 1024);
+            }
+            const int64_t us = esp_timer_get_time() - t0;
+            snprintf(line, sizeof(line), "iram memset %lld MB/s",
+                     static_cast<long long>(32LL * 32768LL * 1000000LL / us / 1048576LL));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "MEM", line);
+            heap_caps_free(in);
+        }
+        const long fb_mbps = Display_FramebufferBenchMBps();
+        snprintf(line, sizeof(line), "framebuffer memset %ld MB/s", fb_mbps);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "MEM", line);
+        return;
+    }
+
+    // Per-task CPU usage over a 500 ms window, top consumers first:
+    // AT+TOP=1. Debug tool for hunting UI-latency / CPU-contention issues.
+    if (stringEqualsIgnoreCase(command.command, "TOP")) {
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+        constexpr UBaseType_t kMaxTasks = 40;
+        // Static: two snapshots are ~4 KB, too big for this task's stack.
+        static TaskStatus_t s_snap_a[kMaxTasks];
+        static TaskStatus_t s_snap_b[kMaxTasks];
+        const UBaseType_t n_a = uxTaskGetSystemState(s_snap_a, kMaxTasks, nullptr);
+        const int64_t t0 = esp_timer_get_time();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        const UBaseType_t n_b = uxTaskGetSystemState(s_snap_b, kMaxTasks, nullptr);
+        const uint32_t window_us = static_cast<uint32_t>(esp_timer_get_time() - t0);
+
+        struct Row {
+            const TaskStatus_t *task;
+            uint32_t delta;
+        };
+        Row rows[kMaxTasks];
+        UBaseType_t rows_n = 0;
+        for (UBaseType_t i = 0; i < n_b; ++i) {
+            uint32_t before = 0;
+            for (UBaseType_t j = 0; j < n_a; ++j) {
+                if (s_snap_a[j].xHandle == s_snap_b[i].xHandle) {
+                    before = s_snap_a[j].ulRunTimeCounter;
+                    break;
+                }
+            }
+            rows[rows_n].task = &s_snap_b[i];
+            rows[rows_n].delta = s_snap_b[i].ulRunTimeCounter - before;
+            ++rows_n;
+        }
+        for (UBaseType_t i = 1; i < rows_n; ++i) { // insertion sort, desc
+            const Row key = rows[i];
+            UBaseType_t j = i;
+            while (j > 0 && rows[j - 1].delta < key.delta) {
+                rows[j] = rows[j - 1];
+                --j;
+            }
+            rows[j] = key;
+        }
+        const UBaseType_t show = (rows_n < 12u) ? rows_n : 12u;
+        for (UBaseType_t i = 0; i < show; ++i) {
+            // Percent of ONE core over the window, one decimal.
+            const unsigned pct10 = (window_us != 0u)
+                ? static_cast<unsigned>(static_cast<uint64_t>(rows[i].delta) * 1000u / window_us)
+                : 0u;
+            char core_ch = '*';
+#if defined(CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID) && CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID
+            if (rows[i].task->xCoreID == 0) core_ch = '0';
+            else if (rows[i].task->xCoreID == 1) core_ch = '1';
+#endif
+            char line[64];
+            snprintf(line, sizeof(line), "%-16s c%c %u.%u%%",
+                     rows[i].task->pcTaskName, core_ch, pct10 / 10u, pct10 % 10u);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "TOP", line);
+        }
+        return;
+#else
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "TOP");
+        return;
+#endif
     }
 
     if (stringEqualsIgnoreCase(command.command, "PLAYLIST")) {

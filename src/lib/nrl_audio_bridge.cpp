@@ -201,7 +201,9 @@ static size_t buildNrlPacket(const uint8_t packet_type,
     const char *callsign = (config != nullptr) ? config->callsign : NRL_AUDIO_CALLSIGN;
     const uint8_t callsign_ssid = (config != nullptr) ? config->callsign_ssid : static_cast<uint8_t>(NRL_AUDIO_CALLSIGN_SSID);
     const uint8_t device_mode = (config != nullptr) ? config->device_mode : static_cast<uint8_t>(NRL_AUDIO_DEVICE_MODE);
-    strncpy(reinterpret_cast<char *>(out_packet + 24u), callsign, 6u);
+    // Fixed 6-byte callsign field, zero-padded by the memset above (no NUL
+    // terminator on the wire).
+    memcpy(out_packet + 24u, callsign, strnlen(callsign, 6u));
     out_packet[30] = callsign_ssid;
     out_packet[31] = device_mode;
 
@@ -1273,8 +1275,7 @@ bool NRLAudioBridge_GetRemoteIdentity(char *buffer, size_t buffer_size)
 bool NRLAudioBridge_GetRemoteCaller(char *callsign, size_t callsign_size, unsigned *ssid)
 {
     if (callsign != nullptr && callsign_size > 0u) {
-        strncpy(callsign, s_voice_callsign, callsign_size - 1u);
-        callsign[callsign_size - 1u] = '\0';
+        snprintf(callsign, callsign_size, "%s", s_voice_callsign);
     }
     if (ssid != nullptr) {
         *ssid = static_cast<unsigned>(s_voice_ssid);

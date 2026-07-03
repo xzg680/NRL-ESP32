@@ -499,9 +499,9 @@ void gapCb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
         break;
     case ESP_BT_GAP_AUTH_CMPL_EVT:
         if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
-            strncpy(s_peer_name, reinterpret_cast<const char *>(param->auth_cmpl.device_name),
-                    sizeof(s_peer_name) - 1u);
-            s_peer_name[sizeof(s_peer_name) - 1u] = '\0';
+            snprintf(s_peer_name, sizeof(s_peer_name), "%.*s",
+                     static_cast<int>(sizeof(s_peer_name) - 1u),
+                     reinterpret_cast<const char *>(param->auth_cmpl.device_name));
             ESP_LOGI(TAG, "paired with '%s'", s_peer_name);
             // Remember it so it auto-reconnects after a reboot.
             addSaved(param->auth_cmpl.bda, s_peer_name);

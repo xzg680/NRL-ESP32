@@ -28,3 +28,4 @@ web-flasher/index.html
 .claude/settings.json
 web-flasher.tgz
 scripts/cache/
+/sdkconfig.old

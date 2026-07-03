@@ -150,8 +150,9 @@ static void copyBounded(char *dst, const size_t dst_size, const char *src)
         return;
     }
 
-    strncpy(dst, src, dst_size - 1U);
-    dst[dst_size - 1U] = '\0';
+    // snprintf, not strncpy: always NUL-terminates and keeps gcc's -O2
+    // stringop-truncation analysis quiet about the intentional truncation.
+    snprintf(dst, dst_size, "%s", src);
 }
 
 static void trimTrailingWhitespace(char *text)

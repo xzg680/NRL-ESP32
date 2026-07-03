@@ -98,10 +98,34 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-s31.csv"
 CONFIG_PARTITION_TABLE_FILENAME="part-s31.csv"
 
-# --- LVGL FreeType binding (S31 only) ---
-# Vector CJK font engine for the music UI, runtime-switchable against the
-# built-in bitmap subset for comparison (AT+FONT=FT|BMP). Renders the TTF at
-# /sdcard/fonts/cjk.ttf; the freetype library comes from the espressif/freetype
-# component (linked into lvgl by the top-level CMakeLists).
-CONFIG_LV_USE_FREETYPE=y
-CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=256
+# --- Compiler optimization: -O2 (S31 only) ---
+# The shared defaults inherit the legacy "default" (-Og debug) level; LVGL's
+# software renderer and the audio decoders are 2-3x slower there, which reads
+# directly as UI latency on the 800x480 panel.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# --- FreeRTOS runtime stats (S31 only) ---
+# Powers the top-bar per-core CPU load readout and the AT+TOP per-task CPU
+# list used to hunt UI-latency regressions on this board.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+
+# --- LVGL parallel software rendering (S31 only) ---
+# A full-screen render of the 800x480 UI costs ~280 ms single-threaded while
+# core 1 sits idle; two SW draw units split the dirty areas across worker
+# threads (FreeRTOS scheduler puts the second one on core 1), roughly
+# halving page-transition latency. Thread priority 6 keeps the workers
+# above the poll loop (5) so the render they gate is never starved.
+CONFIG_LV_OS_FREERTOS=y
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
+CONFIG_LV_DRAW_THREAD_PRIO=6
+
+# --- LVGL FreeType binding: disabled (S31) ---
+# The FreeType vector CJK engine was a comparison experiment (AT+FONT=FT);
+# in practice the bitmap GB2312 subset is what renders (no TTF on card).
+# FreeType would force 32 KB stacks on BOTH parallel draw threads (64 KB of
+# scarce internal RAM), so it yields to dual-core rendering. Re-enable by
+# restoring CONFIG_LV_USE_FREETYPE=y + CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT
+# and bumping CONFIG_LV_DRAW_THREAD_STACK_SIZE to 32768.
+# CONFIG_LV_USE_FREETYPE is not set

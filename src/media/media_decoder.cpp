@@ -572,7 +572,10 @@ static void ring_start(MediaDecoder *d)
     d->ring_stop = false;
     d->ring_running = true;
     d->ring_wait_full = (d->file != nullptr);
-    if (xTaskCreatePinnedToCore(ring_filler_task, "mdec_fill", 10240, d, 5, nullptr, 0) != pdPASS) {
+    // 8 KB stack (same as the player task, enough for lwIP + TLS): internal
+    // RAM is tight since the Phase-4 features landed and a 10 KB stack no
+    // longer reliably allocates.
+    if (xTaskCreatePinnedToCore(ring_filler_task, "mdec_fill", 8192, d, 5, nullptr, 0) != pdPASS) {
         ESP_LOGW(TAG, "read-ahead task create failed; using direct reads");
         d->ring_running = false;
         heap_caps_free(d->ring);

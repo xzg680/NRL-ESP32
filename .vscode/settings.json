@@ -1,4 +1,7 @@
 {
   "idf.customExtraVars": {},
-  "idf.currentSetup": "C:\\esp\\esp-idf"
+  "idf.currentSetup": "C:\\esp\\esp-idf",
+  "idf.openOcdConfigs": [
+    "board/esp32s31-builtin.cfg"
+  ]
 }

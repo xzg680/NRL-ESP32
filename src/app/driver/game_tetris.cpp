@@ -54,6 +54,11 @@ constexpr uint32_t kColorGrid = 0x0B1220;
 uint8_t s_board[kRows][kCols];
 lv_obj_t *s_tiles[kRows][kCols];
 lv_obj_t *s_preview[4][4];
+// Colors currently painted on each tile: redraw() skips unchanged tiles, so a
+// piece step repaints <10 tiles instead of restyling all 216 (each style set
+// costs an LVGL style-refresh walk even when the render itself is batched).
+uint32_t s_tile_shown[kRows][kCols];
+uint32_t s_preview_shown[4][4];
 lv_obj_t *s_lbl_score = nullptr;
 lv_obj_t *s_lbl_over = nullptr;
 lv_timer_t *s_timer = nullptr;
@@ -79,46 +84,65 @@ bool cellFree(const int px, const int py, const int rot, const int piece)
     return true;
 }
 
-void paintTile(lv_obj_t *tile, const uint32_t color)
+void paintTile(lv_obj_t *tile, uint32_t *shown, const uint32_t color)
 {
+    if (*shown == color) {
+        return;
+    }
+    *shown = color;
     lv_obj_set_style_bg_color(tile, lv_color_hex(color), 0);
 }
 
 void redraw()
 {
-    // Settled cells...
+    // Desired board colors: settled cells plus the falling piece.
+    uint32_t want[kRows][kCols];
     for (int y = 0; y < kRows; ++y) {
         for (int x = 0; x < kCols; ++x) {
             const uint8_t v = s_board[y][x];
-            paintTile(s_tiles[y][x], (v != 0u) ? kPieces[v - 1u].color : kColorEmpty);
+            want[y][x] = (v != 0u) ? kPieces[v - 1u].color : kColorEmpty;
         }
     }
-    // ...plus the falling piece.
     if (!s_game_over) {
         for (int i = 0; i < 4; ++i) {
             const int x = s_x + kPieces[s_cur].cells[s_rot][i][0];
             const int y = s_y + kPieces[s_cur].cells[s_rot][i][1];
             if (y >= 0) {
-                paintTile(s_tiles[y][x], kPieces[s_cur].color);
+                want[y][x] = kPieces[s_cur].color;
             }
         }
     }
+    for (int y = 0; y < kRows; ++y) {
+        for (int x = 0; x < kCols; ++x) {
+            paintTile(s_tiles[y][x], &s_tile_shown[y][x], want[y][x]);
+        }
+    }
     // Next-piece preview.
+    uint32_t preview_want[4][4];
     for (int y = 0; y < 4; ++y) {
         for (int x = 0; x < 4; ++x) {
-            paintTile(s_preview[y][x], kColorGrid);
+            preview_want[y][x] = kColorGrid;
         }
     }
     for (int i = 0; i < 4; ++i) {
         const int x = kPieces[s_next].cells[0][i][0];
         const int y = kPieces[s_next].cells[0][i][1];
-        paintTile(s_preview[y][x], kPieces[s_next].color);
+        preview_want[y][x] = kPieces[s_next].color;
+    }
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            paintTile(s_preview[y][x], &s_preview_shown[y][x], preview_want[y][x]);
+        }
     }
     if (s_lbl_score != nullptr) {
-        char text[48];
-        snprintf(text, sizeof(text), "Score %lu\nLines %lu",
-                 static_cast<unsigned long>(s_score), static_cast<unsigned long>(s_lines));
-        lv_label_set_text(s_lbl_score, text);
+        static uint32_t s_shown_score = 0xFFFFFFFFu;
+        if (s_shown_score != s_score) {
+            s_shown_score = s_score;
+            char text[48];
+            snprintf(text, sizeof(text), "Score %lu\nLines %lu",
+                     static_cast<unsigned long>(s_score), static_cast<unsigned long>(s_lines));
+            lv_label_set_text(s_lbl_score, text);
+        }
     }
 }
 
@@ -275,8 +299,13 @@ lv_obj_t *gameButton(lv_obj_t *parent, int x, int y, int w, int h, const char *t
     lv_obj_set_style_bg_color(btn, lv_color_hex(0x1D4E63), LV_STATE_PRESSED);
     lv_obj_set_style_border_color(btn, lv_color_hex(0x24364D), 0);
     lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_add_event_cb(btn, controlEvent, LV_EVENT_CLICKED,
-                        reinterpret_cast<void *>(static_cast<intptr_t>(id)));
+    // React on touch-down, not on release (CLICKED): release-triggered moves
+    // feel like input lag in a game. Movement keys also auto-repeat on hold.
+    void *user_data = reinterpret_cast<void *>(static_cast<intptr_t>(id));
+    lv_obj_add_event_cb(btn, controlEvent, LV_EVENT_PRESSED, user_data);
+    if (id == Ctl::Left || id == Ctl::Right || id == Ctl::Down) {
+        lv_obj_add_event_cb(btn, controlEvent, LV_EVENT_LONG_PRESSED_REPEAT, user_data);
+    }
     lv_obj_t *lbl = lv_label_create(btn);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl, lv_color_hex(0xE6EDF3), 0);
@@ -311,6 +340,7 @@ extern "C" void GAME_TETRIS_Build(lv_obj_t *screen, void (*exit_cb)(void))
             lv_obj_set_style_bg_color(tile, lv_color_hex(kColorEmpty), 0);
             lv_obj_remove_flag(tile, LV_OBJ_FLAG_CLICKABLE);
             s_tiles[y][x] = tile;
+            s_tile_shown[y][x] = kColorEmpty;
         }
     }
 
@@ -333,6 +363,7 @@ extern "C" void GAME_TETRIS_Build(lv_obj_t *screen, void (*exit_cb)(void))
             lv_obj_set_style_bg_color(tile, lv_color_hex(kColorGrid), 0);
             lv_obj_remove_flag(tile, LV_OBJ_FLAG_CLICKABLE);
             s_preview[y][x] = tile;
+            s_preview_shown[y][x] = kColorGrid;
         }
     }
 

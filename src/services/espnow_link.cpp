@@ -127,7 +127,9 @@ static void fill_tx_header(void)
     memset(s_tx_packet + 5, 0, 7);
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     if (config != nullptr) {
-        strncpy(reinterpret_cast<char *>(s_tx_packet + 5), config->callsign, 6);
+        // Fixed 6-byte callsign field, zero-padded by the memset above (no
+        // NUL terminator on the wire).
+        memcpy(s_tx_packet + 5, config->callsign, strnlen(config->callsign, 6));
         s_tx_packet[11] = config->callsign_ssid;
     }
 }
