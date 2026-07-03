@@ -18,6 +18,7 @@
 #include "../../services/video_call.h"
 #include "external_radio.h"
 #include "fonts/lv_font_cjk.h"
+#include "game_tetris.h"
 #include "s31_i2c.h"
 #include "status_io.h"
 
@@ -84,6 +85,7 @@ enum class Page : uint8_t {
     Smb,
     EspNow,
     Video,
+    Game,
 };
 
 enum class Action : intptr_t {
@@ -123,6 +125,7 @@ enum class Action : intptr_t {
     RadioStop,
     Video,
     VideoTx,
+    Game,
 };
 
 enum class AudioControl : intptr_t {
@@ -676,6 +679,8 @@ void clearScreen()
 {
     // A page (re)build renders current config; consume any pending change.
     s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
+    // Stop the game's lv_timer before its widgets are deleted below.
+    GAME_TETRIS_Teardown();
     lv_obj_t *scr = lv_screen_active();
     lv_obj_clean(scr);
     lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
@@ -909,10 +914,11 @@ void buildApps()
     s_page = Page::Apps;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    button(scr, 24, 84, 180, 120, "Music", Action::Music);
-    button(scr, 214, 84, 180, 120, "Radio", Action::Radio);
-    button(scr, 404, 84, 180, 120, "ESP-NOW", Action::EspNow);
-    button(scr, 594, 84, 180, 120, "Video", Action::Video);
+    button(scr, 24, 84, 144, 120, "Music", Action::Music);
+    button(scr, 180, 84, 144, 120, "Radio", Action::Radio);
+    button(scr, 336, 84, 144, 120, "ESP-NOW", Action::EspNow);
+    button(scr, 492, 84, 144, 120, "Video", Action::Video);
+    button(scr, 648, 84, 126, 120, "Tetris", Action::Game);
 
     // Shared playback target: one setting for everything the music player
     // outputs (music / nanny beacon / net radio), so it lives here next to
@@ -1599,6 +1605,23 @@ void videoTxToggle()
     s_last_refresh_ms = 0;
 }
 
+// ---- Games ------------------------------------------------------------------
+
+void gameExit()
+{
+    // Called by the game's Back button; return to the Apps page.
+    buildApps();
+    s_last_refresh_ms = 0;
+}
+
+void buildGame()
+{
+    clearScreen();
+    s_page = Page::Game;
+    lv_obj_t *scr = lv_screen_active();
+    GAME_TETRIS_Build(scr, gameExit);
+}
+
 void updateAudioValueLabels()
 {
     if (s_slider_speaker != nullptr && s_lbl_speaker_value != nullptr) {
@@ -2165,6 +2188,7 @@ void action(lv_event_t *event)
         case Action::EspNow: buildEspNow(); break;
         case Action::Video: buildVideo(); break;
         case Action::VideoTx: videoTxToggle(); break;
+        case Action::Game: buildGame(); break;
         case Action::SaveSmb: saveSmbForm(); break;
         case Action::ClearSmb: clearSmbForm(); break;
         case Action::SaveNanny: saveNannyForm(); break;
@@ -2691,6 +2715,7 @@ void rebuildCurrentPage()
         case Page::Apps: buildApps(); break;
         case Page::EspNow: buildEspNow(); break;
         case Page::Video: buildVideo(); break;
+        case Page::Game: buildGame(); break;
     }
     s_last_refresh_ms = 0;
 }

@@ -19,6 +19,7 @@ set(app_sources
     services/storage_service.cpp
     services/video_call.cpp
     app/driver/audio_passthrough.cpp
+    app/driver/game_tetris.cpp
     app/driver/fonts/lv_font_cjk_16.c
     app/driver/fonts/lv_font_cjk_20.c
     app/driver/eeprom.cpp
