@@ -9,6 +9,7 @@
 #include "driver/es8311.h"
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
+#include "services/ai_assistant.h"
 #include "services/espnow_link.h"
 #include "services/music_player.h"
 #include "services/music_playlist.h"
@@ -851,6 +852,57 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     if (stringEqualsIgnoreCase(command.command, "STOP")) {
         MUSIC_Stop();
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "STOP", "OK");
+        return;
+    }
+
+    // xiaozhi AI assistant: AT+AI=wss://server/xiaozhi/v1/,token (configure),
+    // AT+AI=ON|OFF, AT+AI=?; AT+AITALK=START|STOP for a push-to-talk turn.
+    if (stringEqualsIgnoreCase(command.command, "AI")) {
+        char status[224];
+        if (is_query) {
+            AI_Describe(status, sizeof(status));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AI", status);
+            return;
+        }
+        bool enabled = false;
+        if (parseBoolValue(command.value, &enabled)) {
+            if (!AI_SetEnabled(enabled)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "AI");
+                return;
+            }
+        } else {
+            char parse[224];
+            snprintf(parse, sizeof(parse), "%s", command.value);
+            char *token = strchr(parse, ',');
+            if (token != nullptr) {
+                *token++ = '\0';
+            }
+            if (!AI_Configure(parse, token)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "AI");
+                return;
+            }
+        }
+        AI_Describe(status, sizeof(status));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AI", status);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "AITALK")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AITALK",
+                               AI_IsListening() ? "LISTENING" : "IDLE");
+            return;
+        }
+        if (stringEqualsIgnoreCase(command.value, "START")) {
+            if (!AI_StartListen()) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "AITALK");
+                return;
+            }
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AITALK", "LISTENING");
+            return;
+        }
+        AI_StopListen();
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "AITALK", "IDLE");
         return;
     }
 

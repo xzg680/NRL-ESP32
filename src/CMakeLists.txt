@@ -9,6 +9,7 @@ set(app_sources
     media/media_decoder.cpp
     media/media_metadata.cpp
     media/opus_voice.cpp
+    services/ai_assistant.cpp
     services/config_notify.cpp
     services/espnow_link.cpp
     services/music_player.cpp
@@ -93,7 +94,8 @@ endif()
 # USB flash drive + SMB network share (storage_service backends) -- the
 # component dependencies themselves are target-gated in idf_component.yml.
 if(IDF_TARGET STREQUAL "esp32s31")
-    list(APPEND app_priv_requires usb espressif__usb_host_msc fatfs sahlberg__libsmb2 vfs)
+    list(APPEND app_priv_requires usb espressif__usb_host_msc fatfs sahlberg__libsmb2 vfs
+                                  espressif__esp_websocket_client espressif__cjson)
 endif()
 
 idf_component_register(
