@@ -5,6 +5,7 @@
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
 #include "lib/nrl_g711.h"
+#include "services/config_notify.h"
 
 #include <esp_log.h>
 #include <esp_now.h>
@@ -215,6 +216,7 @@ extern "C" bool ESPNOW_LINK_SetEnabled(const bool enabled)
         s_tx_fill = kHeaderBytes;
     }
     save_enabled(enabled);
+    CONFIG_NOTIFY_Bump();
     return true;
 }
 

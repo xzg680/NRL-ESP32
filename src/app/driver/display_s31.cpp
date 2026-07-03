@@ -9,6 +9,7 @@
 #include "../../lib/nrl_net_compat.h"
 #include "../../lib/nrl_wifi.h"
 #include "../../media/cover_decoder.h"
+#include "../../services/config_notify.h"
 #include "../../services/espnow_link.h"
 #include "../../services/music_player.h"
 #include "../../services/music_playlist.h"
@@ -193,6 +194,10 @@ char s_shown_espnow_status[128] = {};
 // Whether the Home page was built with the split (NRL + ESP-NOW) PTT; when
 // the ESP-NOW enable state changes, refreshHome rebuilds the page.
 bool s_home_espnow_split = false;
+// Config generation this UI last rendered/produced. When another config
+// writer (web portal, AT console) bumps CONFIG_NOTIFY past this, refresh()
+// rebuilds the visible form page so its widgets show the new values.
+uint32_t s_cfg_gen_seen = 0u;
 
 // Music player page widgets. The list is rebuilt on page entry / rescan;
 // the now-playing labels update from refresh().
@@ -237,7 +242,7 @@ char s_shown_time[16] = {};
 char s_shown_local_station[24] = {};
 char s_shown_wifi[32] = {};
 char s_shown_vol[16] = {};
-char s_shown_remote_station[24] = {};
+char s_shown_remote_station[160] = {};
 char s_shown_ip[96] = {};
 char s_shown_server[96] = {};
 char s_shown_detail[512] = {};
@@ -480,6 +485,7 @@ void audioSwitchEvent(lv_event_t *event);
 void musicTargetEvent(lv_event_t *event);
 void updateAudioValueLabels();
 void refresh();
+void rebuildCurrentPage();
 lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w);
 
 // Set the per-page form status line (no-op when the page has none).
@@ -654,6 +660,8 @@ void formatStationBadge(char *out, size_t out_size, const char *call, unsigned s
 
 void clearScreen()
 {
+    // A page (re)build renders current config; consume any pending change.
+    s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
     lv_obj_t *scr = lv_screen_active();
     lv_obj_clean(scr);
     lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
@@ -776,7 +784,9 @@ void topBar(lv_obj_t *scr)
     lv_obj_set_style_text_align(s_lbl_vol, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_lbl_vol, LV_SYMBOL_VOLUME_MID " --");
 
-    s_lbl_remote_station = label(bar, &lv_font_montserrat_20, kColorDim);
+    // Music font (CJK fallback): when idle this badge doubles as the
+    // now-playing ticker, which must render Chinese titles.
+    s_lbl_remote_station = label(bar, &s_font_music_20, kColorDim);
     lv_obj_set_width(s_lbl_remote_station, kTopStationW);
     lv_obj_align(s_lbl_remote_station, LV_ALIGN_LEFT_MID, kTopRemoteX, 0);
     lv_obj_set_style_text_align(s_lbl_remote_station, LV_TEXT_ALIGN_CENTER, 0);
@@ -2070,6 +2080,9 @@ void action(lv_event_t *event)
             formStatus("Stopped.", kColorSub);
             break;
     }
+    // Changes made from this UI are already on screen (with their status
+    // message); consume the bump so refresh() doesn't rebuild over them.
+    s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
     s_last_refresh_ms = 0;
 }
 
@@ -2159,6 +2172,7 @@ void audioSwitchEvent(lv_event_t *event)
                 }
                 formStatus("ESP-NOW enable failed (WiFi not started).", kColorBad);
             }
+            s_cfg_gen_seen = CONFIG_NOTIFY_Generation(); // own change
             return;
         default:
             break;
@@ -2166,12 +2180,13 @@ void audioSwitchEvent(lv_event_t *event)
     markAudioChanged();
 }
 
-// Playback-target dropdown (nanny page): applies + persists immediately.
+// Playback-target dropdown (Apps page): applies + persists immediately.
 void musicTargetEvent(lv_event_t *event)
 {
     lv_obj_t *dd = lv_event_get_target_obj(event);
     MUSIC_SetTarget(static_cast<int>(lv_dropdown_get_selected(dd)));
     formStatus("Playback target saved (applies from the next track).", kColorGood);
+    s_cfg_gen_seen = CONFIG_NOTIFY_Generation(); // own change
 }
 
 // The Home "network" panel doubles as a hold-to-talk soft PTT: pressing anywhere
@@ -2252,6 +2267,58 @@ void refreshWifiBadge()
     }
 }
 
+// UTF-8 helpers for the now-playing ticker (titles are valid UTF-8 after the
+// metadata GBK conversion).
+size_t utf8GlyphCount(const char *s)
+{
+    size_t n = 0;
+    for (size_t i = 0; s[i] != '\0'; ++i) {
+        if ((static_cast<uint8_t>(s[i]) & 0xC0u) != 0x80u) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+size_t utf8NextOffset(const char *s, size_t off)
+{
+    if (s[off] == '\0') {
+        return 0;
+    }
+    ++off;
+    while (s[off] != '\0' && (static_cast<uint8_t>(s[off]) & 0xC0u) == 0x80u) {
+        ++off;
+    }
+    return (s[off] == '\0') ? 0 : off;
+}
+
+// Copy `glyphs` UTF-8 characters starting at byte `start`, wrapping around.
+void tickerWindow(const char *src, size_t start, const size_t glyphs, char *out, const size_t cap)
+{
+    size_t pos = 0;
+    size_t off = start;
+    for (size_t g = 0; g < glyphs; ++g) {
+        if (src[off] == '\0') {
+            off = 0;
+            if (src[0] == '\0') {
+                break;
+            }
+        }
+        const uint8_t b = static_cast<uint8_t>(src[off]);
+        size_t clen = 1;
+        if ((b & 0xE0u) == 0xC0u) clen = 2;
+        else if ((b & 0xF0u) == 0xE0u) clen = 3;
+        else if ((b & 0xF8u) == 0xF0u) clen = 4;
+        if (pos + clen + 1u > cap) {
+            break;
+        }
+        for (size_t k = 0; k < clen && src[off] != '\0'; ++k) {
+            out[pos++] = src[off++];
+        }
+    }
+    out[pos] = '\0';
+}
+
 void refreshStationBadges()
 {
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
@@ -2264,11 +2331,44 @@ void refreshStationBadges()
     char voice_call[8] = {};
     unsigned voice_ssid = 0;
     const bool rx = NRLAudioBridge_GetRemoteCaller(voice_call, sizeof(voice_call), &voice_ssid);
-    char remote[24] = {};
-    formatStationBadge(remote, sizeof(remote), (rx && voice_call[0] != '\0') ? voice_call : nullptr,
-                       voice_ssid);
+    char remote[160] = {};
+    bool now_playing = false;
+    if (rx && voice_call[0] != '\0') {
+        // A caller always wins the badge.
+        formatStationBadge(remote, sizeof(remote), voice_call, voice_ssid);
+    } else if (MUSIC_IsPlaying()) {
+        // Idle badge doubles as a now-playing ticker (song / net radio /
+        // nanny beacon). Manual one-glyph-per-tick scroll: an LVGL circular
+        // scroll label would re-render the whole screen at animation rate in
+        // FULL mode.
+        constexpr size_t kTickerGlyphs = 7;
+        const MediaTrackInfo *track = MUSIC_GetTrackInfo();
+        const char *title = (track != nullptr && track->title[0] != '\0')
+                                ? track->title
+                                : musicBasename(MUSIC_CurrentPath());
+        static char s_ticker_src[136] = {};
+        static size_t s_ticker_off = 0;
+        char padded[136];
+        snprintf(padded, sizeof(padded), "%.100s | ", title);
+        if (strcmp(padded, s_ticker_src) != 0) {
+            snprintf(s_ticker_src, sizeof(s_ticker_src), "%s", padded);
+            s_ticker_off = 0;
+        }
+        if (utf8GlyphCount(title) <= kTickerGlyphs) {
+            snprintf(remote, sizeof(remote), LV_SYMBOL_AUDIO " %.100s", title);
+        } else {
+            char window[48];
+            tickerWindow(s_ticker_src, s_ticker_off, kTickerGlyphs, window, sizeof(window));
+            s_ticker_off = utf8NextOffset(s_ticker_src, s_ticker_off);
+            snprintf(remote, sizeof(remote), "%s", window);
+        }
+        now_playing = true;
+    } else {
+        formatStationBadge(remote, sizeof(remote), nullptr, 0);
+    }
     setLabel(s_lbl_remote_station, s_shown_remote_station, sizeof(s_shown_remote_station), remote);
-    setLabelColor(s_lbl_remote_station, s_clr_remote_station, rx ? kColorAccent : kColorDim);
+    setLabelColor(s_lbl_remote_station, s_clr_remote_station,
+                  rx ? kColorAccent : (now_playing ? kColorSub : kColorDim));
 }
 
 void refreshHome()
@@ -2433,6 +2533,26 @@ void refreshDetailPage()
 
 void refresh()
 {
+    // Config changed underneath us (web portal / AT console): rebuild the
+    // visible form page so its widgets show the new values. Pages without
+    // config-backed widgets just consume the bump; while the on-screen
+    // keyboard is open the rebuild is deferred so the user's edit survives.
+    const uint32_t cfg_gen = CONFIG_NOTIFY_Generation();
+    if (cfg_gen != s_cfg_gen_seen) {
+        const bool form_page = s_page == Page::Wifi || s_page == Page::Station ||
+                               s_page == Page::Audio || s_page == Page::Apps ||
+                               s_page == Page::Nanny || s_page == Page::Smb ||
+                               s_page == Page::Radio || s_page == Page::EspNow;
+        const bool keyboard_open =
+            s_keyboard != nullptr && !lv_obj_has_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
+        if (!form_page) {
+            s_cfg_gen_seen = cfg_gen;
+        } else if (!keyboard_open) {
+            rebuildCurrentPage(); // syncs s_cfg_gen_seen via clearScreen
+            formStatus("Settings updated from web/serial.", kColorWarn);
+        }
+    }
+
     refreshClock();
     refreshWifiBadge();
     refreshVolume();
@@ -2557,6 +2677,9 @@ extern "C" void Display_Poll(void)
     }
     if (s_volume_dirty && (now - s_volume_change_ms) >= kVolumeSaveDelayMs) {
         s_volume_dirty = !EXTERNAL_RADIO_SaveConfig();
+        // Deferred save of our own volume change: consume the bump so the
+        // page isn't pointlessly rebuilt half a second later.
+        s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
     }
     lv_timer_handler();
 }

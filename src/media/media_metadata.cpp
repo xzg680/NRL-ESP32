@@ -1,4 +1,5 @@
 #include "media/media_metadata.h"
+#include "media/gbk_unicode_table.generated.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -102,6 +103,113 @@ static void latin1_to_utf8(const uint8_t *data, size_t bytes, char *out, const s
     out[pos] = '\0';
 }
 
+// True when the (NUL-terminated portion of the) buffer is well-formed UTF-8
+// with at least the given strictness; pure ASCII also passes.
+static bool is_valid_utf8(const uint8_t *data, const size_t bytes)
+{
+    size_t i = 0;
+    while (i < bytes && data[i] != 0u) {
+        const uint8_t b = data[i];
+        size_t follow = 0;
+        if (b < 0x80u) {
+            follow = 0;
+        } else if ((b & 0xE0u) == 0xC0u && b >= 0xC2u) {
+            follow = 1;
+        } else if ((b & 0xF0u) == 0xE0u) {
+            follow = 2;
+        } else if ((b & 0xF8u) == 0xF0u && b <= 0xF4u) {
+            follow = 3;
+        } else {
+            return false;
+        }
+        if (i + follow >= bytes) {
+            return false;
+        }
+        for (size_t j = 1; j <= follow; ++j) {
+            if ((data[i + j] & 0xC0u) != 0x80u) {
+                return false;
+            }
+        }
+        i += follow + 1u;
+    }
+    return true;
+}
+
+// Unicode code point for a GBK two-byte sequence, or 0 when unassigned.
+static uint32_t gbk_lookup(const uint8_t lead, const uint8_t trail)
+{
+    if (lead < GBK_TABLE_LEAD_FIRST || lead > GBK_TABLE_LEAD_LAST ||
+        trail < GBK_TABLE_TRAIL_FIRST || trail > GBK_TABLE_TRAIL_LAST) {
+        return 0;
+    }
+    return kGbkToUnicode[(lead - GBK_TABLE_LEAD_FIRST) * GBK_TABLE_TRAIL_SPAN +
+                         (trail - GBK_TABLE_TRAIL_FIRST)];
+}
+
+// True when every non-ASCII byte forms a mapped GBK pair.
+static bool is_valid_gbk(const uint8_t *data, const size_t bytes)
+{
+    size_t i = 0;
+    bool any_pair = false;
+    while (i < bytes && data[i] != 0u) {
+        if (data[i] < 0x80u) {
+            ++i;
+            continue;
+        }
+        if (i + 1u >= bytes || data[i + 1u] == 0u || gbk_lookup(data[i], data[i + 1u]) == 0u) {
+            return false;
+        }
+        any_pair = true;
+        i += 2u;
+    }
+    return any_pair;
+}
+
+static void gbk_to_utf8(const uint8_t *data, const size_t bytes, char *out, const size_t cap)
+{
+    size_t pos = 0;
+    size_t i = 0;
+    while (i < bytes && data[i] != 0u) {
+        if (data[i] < 0x80u) {
+            utf8_append(out, &pos, cap, data[i]);
+            ++i;
+            continue;
+        }
+        const uint32_t cp = (i + 1u < bytes) ? gbk_lookup(data[i], data[i + 1u]) : 0u;
+        if (cp != 0u) {
+            utf8_append(out, &pos, cap, cp);
+            i += 2u;
+        } else {
+            utf8_append(out, &pos, cap, 0xFFFDu); // replacement char
+            ++i;
+        }
+    }
+    out[pos] = '\0';
+}
+
+// Decode 8-bit tag text of unknown real encoding. Old Chinese rips store GBK
+// while the tag claims ISO-8859-1 (or none at all, ID3v1), and some taggers
+// write UTF-8 regardless of the encoding byte. Order: ASCII/UTF-8 pass
+// through, valid GBK converts, anything else falls back to Latin-1.
+static void eightbit_text_to_utf8(const uint8_t *data, const size_t bytes,
+                                  char *out, const size_t cap)
+{
+    if (is_valid_utf8(data, bytes)) {
+        size_t copy = 0;
+        while (copy < bytes && data[copy] != 0u && copy < cap - 1u) {
+            out[copy] = static_cast<char>(data[copy]);
+            ++copy;
+        }
+        out[copy] = '\0';
+        return;
+    }
+    if (is_valid_gbk(data, bytes)) {
+        gbk_to_utf8(data, bytes, out, cap);
+        return;
+    }
+    latin1_to_utf8(data, bytes, out, cap);
+}
+
 // Decode an ID3v2 text frame payload (leading encoding byte) into UTF-8.
 static void id3_text_to_utf8(const uint8_t *payload, const size_t bytes, char *out, const size_t cap)
 {
@@ -113,8 +221,8 @@ static void id3_text_to_utf8(const uint8_t *payload, const size_t bytes, char *o
     const uint8_t *text = payload + 1u;
     size_t text_len = bytes - 1u;
     switch (enc) {
-        case 0u: // ISO-8859-1
-            latin1_to_utf8(text, text_len, out, cap);
+        case 0u: // ISO-8859-1 on paper; legacy Chinese rips put GBK here
+            eightbit_text_to_utf8(text, text_len, out, cap);
             break;
         case 1u: { // UTF-16 with BOM
             bool be = false;
@@ -132,12 +240,9 @@ static void id3_text_to_utf8(const uint8_t *payload, const size_t bytes, char *o
         case 2u: // UTF-16BE without BOM
             utf16_to_utf8(text, text_len, true, out, cap);
             break;
-        case 3u: { // UTF-8
-            const size_t copy = (text_len < cap - 1u) ? text_len : cap - 1u;
-            memcpy(out, text, copy);
-            out[copy] = '\0';
+        case 3u: // UTF-8 on paper; validate anyway (some taggers lie)
+            eightbit_text_to_utf8(text, text_len, out, cap);
             break;
-        }
         default:
             break;
     }
@@ -277,16 +382,15 @@ static bool parse_id3v1(FILE *f, MediaTrackInfo *info)
     if (!read_exact(f, tag, sizeof(tag)) || memcmp(tag, "TAG", 3) != 0) {
         return false;
     }
-    // Treat as latin1 -> UTF-8 (correct for ASCII; legacy GBK tags will show
-    // mojibake rather than corrupting the UI with invalid UTF-8 bytes).
+    // ID3v1 has no encoding marker; old Chinese rips are GBK, others ASCII.
     if (info->title[0] == '\0') {
-        latin1_to_utf8(tag + 3, 30, info->title, sizeof(info->title));
+        eightbit_text_to_utf8(tag + 3, 30, info->title, sizeof(info->title));
     }
     if (info->artist[0] == '\0') {
-        latin1_to_utf8(tag + 33, 30, info->artist, sizeof(info->artist));
+        eightbit_text_to_utf8(tag + 33, 30, info->artist, sizeof(info->artist));
     }
     if (info->album[0] == '\0') {
-        latin1_to_utf8(tag + 63, 30, info->album, sizeof(info->album));
+        eightbit_text_to_utf8(tag + 63, 30, info->album, sizeof(info->album));
     }
     return info->title[0] != '\0' || info->artist[0] != '\0' || info->album[0] != '\0';
 }

@@ -247,6 +247,7 @@ extern "C" const char *STORAGE_UsbMountPoint(void)
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
 
 #include "lib/nrl_net_compat.h"
+#include "services/config_notify.h"
 #include "services/music_playlist.h"
 #include "services/smb_vfs.h"
 
@@ -358,6 +359,7 @@ extern "C" bool STORAGE_SmbConfigure(const char *server, const char *share,
     }
     SMB_VFS_Unmount();
     smb_start_mount_task();
+    CONFIG_NOTIFY_Bump();
     return true;
 }
 
@@ -373,6 +375,7 @@ extern "C" void STORAGE_SmbClear(void)
         nvs_close(nvs);
     }
     (void)PLAYLIST_Scan();
+    CONFIG_NOTIFY_Bump();
 }
 
 extern "C" bool STORAGE_SmbMounted(void)

@@ -6,6 +6,7 @@
 #include "es8389.h"
 #include "../../lib/nrl_audio_config.h"
 #include "../../lib/nrl_bt_hfp.h"
+#include "../../services/config_notify.h"
 #if defined(NRL_ENABLE_AUDIO_AFE) && NRL_ENABLE_AUDIO_AFE
 #include "aec/aec_processor.h"
 #endif
@@ -796,6 +797,7 @@ static bool savePersistedConfig(void)
         ESP_LOGE(TAG, "config EEPROM verify failed");
         return false;
     }
+    CONFIG_NOTIFY_Bump(); // let the LCD UI refresh pages showing this config
     return true;
 }
 

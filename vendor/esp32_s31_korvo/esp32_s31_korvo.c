@@ -237,6 +237,15 @@ esp_err_t bsp_audio_init(const i2s_std_config_t *i2s_config)
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
+    /* Deep TX DMA buffering: the RGB panel + LVGL FULL-mode render bursts
+     * (~80-106 ms) saturate the PSRAM bus once a second (top-bar clock),
+     * and the default 6x240 frames (= 33 ms at 44.1 kHz) of I2S buffering
+     * underruns right through it -- audible as strictly periodic stutter
+     * during hi-fi playback. 8x735 frames = 133 ms at 44.1 kHz rides it
+     * out (~24 KB DMA RAM per direction). The voice path only queues
+     * real-time 20 ms chunks, so its latency is unaffected. */
+    chan_cfg.dma_desc_num = 8;
+    chan_cfg.dma_frame_num = 735;
     ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &s_audio_tx_chan, &s_audio_rx_chan),
                         TAG, "create I2S channels failed");
 

@@ -1,6 +1,7 @@
 #include "services/nanny.h"
 
 #include "lib/nrl_audio_bridge.h"
+#include "services/config_notify.h"
 #include "services/music_player.h"
 
 #include <esp_log.h>
@@ -122,6 +123,7 @@ extern "C" bool NANNY_SetBeacon(const char *path, const uint32_t interval_min)
         ESP_LOGW(TAG, "config persist failed (beacon still armed)");
     }
     ensure_task();
+    CONFIG_NOTIFY_Bump();
     return true;
 }
 
@@ -135,6 +137,7 @@ extern "C" void NANNY_DisableBeacon(void)
         (void)nvs_commit(nvs);
         nvs_close(nvs);
     }
+    CONFIG_NOTIFY_Bump();
 }
 
 extern "C" bool NANNY_GetBeacon(char *path_out, const size_t path_size, uint32_t *interval_min)

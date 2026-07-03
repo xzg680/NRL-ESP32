@@ -2,6 +2,7 @@
 
 #include "audio/audio_focus.h"
 #include "audio/voice_resampler.h"
+#include "services/config_notify.h"
 #include "driver/es8389.h"
 #include "lib/nrl_audio_bridge.h"
 #include "media/media_decoder.h"
@@ -72,6 +73,7 @@ static void media_config_save(void)
     (void)nvs_set_str(nvs, "radio_url", s_radio_url);
     (void)nvs_commit(nvs);
     nvs_close(nvs);
+    CONFIG_NOTIFY_Bump();
 }
 
 static bool ensure_stereo_capacity(const size_t bytes)

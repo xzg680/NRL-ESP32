@@ -8,6 +8,8 @@
 #include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -17,18 +19,52 @@ static const char *TAG = "MDEC";
 
 namespace {
 
-constexpr size_t kRawBufferBytes = 8 * 1024;
+// 32 KB: the TS demux (HLS) buffers considerably more input than the plain
+// frame parsers before reporting progress; at 8 KB it stalled with a full
+// buffer and playback ended after the first fraction of a second.
+constexpr size_t kRawBufferBytes = 32 * 1024;
 // FLAC blocks can decode to ~64 KB of PCM at hi-res; start smaller and grow
 // on ESP_AUDIO_ERR_BUFF_NOT_ENOUGH as the decoder reports its needed size.
 constexpr size_t kInitialOutBufferBytes = 32 * 1024;
+
+// Read-ahead ring for file sources (PSRAM). SMB reads are synchronous
+// round-trips (~1.2 KB per request, see smb_vfs.cpp), so network jitter fed
+// straight into the decode loop is audible as stutter. A filler task keeps
+// this ring topped up; the decoder then reads from memory and rides out
+// latency spikes (128 KB ~= 3 s of 320 kbps MP3).
+constexpr size_t kRingBytes = 128 * 1024;
+constexpr size_t kRingFillChunk = 8 * 1024;
+
+constexpr size_t kHlsMaxSegments = 8;
+constexpr size_t kHlsPlaylistBytes = 16 * 1024;
 
 static bool s_default_registered = false;
 
 } // namespace
 
+// HLS (m3u8) source: a media playlist of sequential segment URLs, reloaded
+// periodically for live streams. Segments are MPEG-TS or raw AAC/MP3; the
+// simple decoder handles all three, so this layer only concatenates them
+// into one byte stream.
+struct HlsStream {
+    char playlist_url[512];
+    esp_http_client_handle_t seg_http;  // current segment connection
+    char (*seg_urls)[512];              // queued segment URLs (kHlsMaxSegments)
+    size_t seg_count;
+    size_t seg_next;
+    uint64_t next_media_seq;            // first sequence not yet queued
+    uint32_t target_duration_s;
+    int64_t last_fetch_us;
+    size_t seg_bytes;                   // bytes read from the current segment
+    bool live;                          // no #EXT-X-ENDLIST seen
+    bool insecure;                      // TLS fallback engaged for this host
+    volatile bool *stop;                // owner's teardown flag
+};
+
 struct MediaDecoder {
     FILE *file;                      // local file source, or...
-    esp_http_client_handle_t http;   // ...HTTP(S) stream source (net radio)
+    esp_http_client_handle_t http;   // ...HTTP(S) stream source (net radio)...
+    HlsStream *hls;                  // ...or HLS (m3u8) segment stream
     esp_audio_simple_dec_handle_t handle;
     uint8_t *raw_buffer;
     uint8_t *out_buffer;
@@ -43,36 +79,55 @@ struct MediaDecoder {
     uint8_t sniff[16];
     size_t sniff_len;
     size_t sniff_off;
+    // Read-ahead ring (file + HLS sources): a filler task streams the source
+    // into PSRAM so SMB/segment latency spikes don't starve the decode loop.
+    uint8_t *ring;
+    volatile size_t ring_head;   // filler writes
+    volatile size_t ring_tail;   // consumer writes
+    volatile bool ring_eof;
+    volatile bool ring_stop;
+    volatile bool ring_running;
+    bool ring_wait_full;         // block for a full read (file semantics)
 };
 
 namespace {
 
-// Read from whichever source backs the decoder, serving sniffed bytes first.
+static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, size_t size);
+
+// Read for the decode loop: from the read-ahead ring when one is running,
+// otherwise straight from the source (sniffed bytes replay first either way).
 static size_t read_source(MediaDecoder *d, uint8_t *dst, const size_t size)
 {
-    size_t total = 0;
-    while (total < size && d->sniff_off < d->sniff_len) {
-        dst[total++] = d->sniff[d->sniff_off++];
+    if (d->ring == nullptr) {
+        return source_read_direct(d, dst, size);
     }
-    if (total == size) {
-        return total;
-    }
-    if (d->file != nullptr) {
-        const int64_t t0 = esp_timer_get_time();
-        const size_t got = fread(dst + total, 1, size - total, d->file);
-        const int64_t dt_ms = (esp_timer_get_time() - t0) / 1000;
-        if (dt_ms > 2000) {
-            ESP_LOGW(TAG, "slow source read: %u bytes in %lld ms",
-                     static_cast<unsigned>(got), static_cast<long long>(dt_ms));
+    size_t got = 0;
+    while (got < size) {
+        const size_t head = d->ring_head;
+        const size_t tail = d->ring_tail;
+        const size_t used = (head + kRingBytes - tail) % kRingBytes;
+        if (used == 0u) {
+            if (d->ring_eof || !d->ring_running) {
+                break; // true end of stream
+            }
+            if (!d->ring_wait_full && got > 0u) {
+                break; // live stream: hand over what we have
+            }
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
         }
-        return total + got;
+        size_t chunk = kRingBytes - tail; // contiguous run up to the wrap
+        if (chunk > used) {
+            chunk = used;
+        }
+        if (chunk > size - got) {
+            chunk = size - got;
+        }
+        memcpy(dst + got, d->ring + tail, chunk);
+        d->ring_tail = (tail + chunk) % kRingBytes;
+        got += chunk;
     }
-    if (d->http != nullptr) {
-        const int got = esp_http_client_read(d->http, reinterpret_cast<char *>(dst) + total,
-                                             static_cast<int>(size - total));
-        return total + ((got > 0) ? static_cast<size_t>(got) : 0u);
-    }
-    return total;
+    return got;
 }
 
 static esp_audio_simple_dec_type_t detect_type_from_header(const uint8_t *header,
@@ -96,6 +151,9 @@ static esp_audio_simple_dec_type_t detect_type_from_header(const uint8_t *header
     }
     if (got >= 2u && header[0] == 0xFFu && (header[1] & 0xE0u) == 0xE0u) {
         return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3; // bare MPEG frame sync
+    }
+    if (got >= 1u && header[0] == 0x47u) {
+        return ESP_AUDIO_SIMPLE_DEC_TYPE_TS; // MPEG-TS sync byte (HLS segments)
     }
 
     // Fall back to the extension / URL suffix (e.g. MP3s that open with
@@ -136,6 +194,411 @@ static bool grow_out_buffer(MediaDecoder *d, const size_t needed)
     return true;
 }
 
+// Open an HTTP(S) stream, verifying TLS against the cert bundle first; on
+// handshake failure retry once without verification. Net-radio CDNs commonly
+// serve incomplete cert chains (missing intermediate) that mbedtls cannot
+// repair -- these are public audio streams, so availability wins over
+// authenticity for the retry. Returns an OPENED client or nullptr.
+// `insecure_hint` (optional) remembers a stream that already needed the
+// fallback, so follow-up connections (HLS segments every ~10 s) skip the
+// doomed verified attempt instead of re-failing a handshake each time.
+static esp_http_client_handle_t http_open_stream(const char *url, const int timeout_ms,
+                                                 const int buffer_size,
+                                                 bool *insecure_hint = nullptr)
+{
+    const int first = (insecure_hint != nullptr && *insecure_hint) ? 1 : 0;
+    for (int insecure = first; insecure < 2; ++insecure) {
+        esp_http_client_config_t cfg = {};
+        cfg.url = url;
+        cfg.timeout_ms = timeout_ms;
+        cfg.buffer_size = buffer_size;
+        if (insecure == 0) {
+            cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        }
+        esp_http_client_handle_t http = esp_http_client_init(&cfg);
+        if (http == nullptr) {
+            return nullptr;
+        }
+        if (esp_http_client_open(http, 0) == ESP_OK) {
+            if (insecure != 0) {
+                if (insecure_hint == nullptr || !*insecure_hint) {
+                    ESP_LOGW(TAG, "TLS verification skipped for %s", url);
+                }
+                if (insecure_hint != nullptr) {
+                    *insecure_hint = true;
+                }
+            }
+            return http;
+        }
+        esp_http_client_cleanup(http);
+        if (strncmp(url, "https://", 8) != 0) {
+            return nullptr; // plain http can't be a TLS failure; don't retry
+        }
+    }
+    return nullptr;
+}
+
+// ---- HLS (m3u8) source ------------------------------------------------------
+
+// Resolve `ref` against `base` (RFC-lite: absolute, host-relative, relative).
+static void hls_resolve_url(const char *base, const char *ref, char *out, const size_t cap)
+{
+    if (strncmp(ref, "http://", 7) == 0 || strncmp(ref, "https://", 8) == 0) {
+        snprintf(out, cap, "%s", ref);
+        return;
+    }
+    if (ref[0] == '/') {
+        // scheme://host[:port] + ref
+        const char *scheme_end = strstr(base, "://");
+        const char *host_end = (scheme_end != nullptr) ? strchr(scheme_end + 3, '/') : nullptr;
+        const int host_len = (host_end != nullptr) ? static_cast<int>(host_end - base)
+                                                   : static_cast<int>(strlen(base));
+        snprintf(out, cap, "%.*s%s", host_len, base, ref);
+        return;
+    }
+    // Relative to the playlist's directory (strip any query string first).
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s", base);
+    char *query = strchr(dir, '?');
+    if (query != nullptr) {
+        *query = '\0';
+    }
+    char *slash = strrchr(dir, '/');
+    if (slash != nullptr && slash - dir > 7) { // don't chop the "https://"
+        slash[1] = '\0';
+    }
+    snprintf(out, cap, "%s%s", dir, ref);
+}
+
+// GET a small text resource (the playlist). Returns bytes read, 0 on error.
+static size_t hls_fetch_text(const char *url, char *out, const size_t cap, bool *insecure_hint)
+{
+    esp_http_client_handle_t http = http_open_stream(url, 8000, 2048, insecure_hint);
+    if (http == nullptr) {
+        ESP_LOGE(TAG, "hls: playlist open failed: %s", url);
+        out[0] = '\0';
+        return 0;
+    }
+    size_t got = 0;
+    (void)esp_http_client_fetch_headers(http);
+    const int status = esp_http_client_get_status_code(http);
+    if (status == 200) {
+        while (got + 1u < cap) {
+            const int n = esp_http_client_read(http, out + got,
+                                               static_cast<int>(cap - 1u - got));
+            if (n <= 0) {
+                break;
+            }
+            got += static_cast<size_t>(n);
+        }
+    } else {
+        ESP_LOGE(TAG, "hls: playlist HTTP %d: %s", status, url);
+    }
+    (void)esp_http_client_close(http);
+    (void)esp_http_client_cleanup(http);
+    out[got] = '\0';
+    return got;
+}
+
+// Fetch + parse the playlist; follows one master-playlist indirection (first
+// variant). Queues segments with sequence >= next_media_seq.
+static bool hls_load_playlist(HlsStream *h)
+{
+    char *text = static_cast<char *>(heap_caps_malloc(kHlsPlaylistBytes, MALLOC_CAP_SPIRAM));
+    if (text == nullptr) {
+        return false;
+    }
+    bool ok = false;
+    for (int depth = 0; depth < 3; ++depth) {
+        if (hls_fetch_text(h->playlist_url, text, kHlsPlaylistBytes, &h->insecure) == 0u) {
+            break;
+        }
+        const bool master = strstr(text, "#EXT-X-STREAM-INF") != nullptr;
+        uint64_t first_seq = 0;
+        size_t listed = 0;
+        bool endlist = false;
+        bool got_variant = false;
+        h->seg_count = 0;
+        h->seg_next = 0;
+
+        char *save = nullptr;
+        bool after_stream_inf = false;
+        for (char *line = strtok_r(text, "\n", &save); line != nullptr;
+             line = strtok_r(nullptr, "\n", &save)) {
+            const size_t len = strlen(line);
+            if (len > 0u && line[len - 1u] == '\r') {
+                line[len - 1u] = '\0';
+            }
+            if (line[0] == '\0') {
+                continue;
+            }
+            if (master) {
+                if (strncmp(line, "#EXT-X-STREAM-INF", 17) == 0) {
+                    after_stream_inf = true;
+                } else if (after_stream_inf && line[0] != '#') {
+                    // First variant: adopt it as the media playlist and refetch.
+                    char resolved[512];
+                    hls_resolve_url(h->playlist_url, line, resolved, sizeof(resolved));
+                    snprintf(h->playlist_url, sizeof(h->playlist_url), "%s", resolved);
+                    got_variant = true;
+                    break;
+                }
+                continue;
+            }
+            if (strncmp(line, "#EXT-X-MEDIA-SEQUENCE:", 22) == 0) {
+                first_seq = strtoull(line + 22, nullptr, 10);
+            } else if (strncmp(line, "#EXT-X-TARGETDURATION:", 22) == 0) {
+                const unsigned long v = strtoul(line + 22, nullptr, 10);
+                if (v > 0ul && v <= 60ul) {
+                    h->target_duration_s = static_cast<uint32_t>(v);
+                }
+            } else if (strcmp(line, "#EXT-X-ENDLIST") == 0) {
+                endlist = true;
+            } else if (line[0] != '#') {
+                const uint64_t seq = first_seq + listed;
+                ++listed;
+                if (seq >= h->next_media_seq && h->seg_count < kHlsMaxSegments) {
+                    hls_resolve_url(h->playlist_url, line,
+                                    h->seg_urls[h->seg_count], sizeof(h->seg_urls[0]));
+                    ++h->seg_count;
+                }
+            }
+        }
+
+        if (master) {
+            if (!got_variant) {
+                ESP_LOGE(TAG, "hls: master playlist without variants");
+                break;
+            }
+            continue; // refetch the variant playlist
+        }
+        h->next_media_seq = first_seq + listed;
+        h->live = !endlist;
+        h->last_fetch_us = esp_timer_get_time();
+        ok = true;
+        break;
+    }
+    heap_caps_free(text);
+    return ok;
+}
+
+// Sequential byte stream across segments; refreshes the playlist on live
+// streams. Returns 0 only at true end of stream (VOD done / stopped / error).
+static size_t hls_read(HlsStream *h, uint8_t *dst, const size_t size)
+{
+    while (h->stop == nullptr || !*h->stop) {
+        if (h->seg_http == nullptr) {
+            if (h->seg_next >= h->seg_count) {
+                if (!h->live) {
+                    ESP_LOGI(TAG, "hls: vod played out");
+                    return 0; // VOD played out
+                }
+                // Live: poll the playlist for new segments, pacing by the
+                // advertised segment duration.
+                const int64_t since_us = esp_timer_get_time() - h->last_fetch_us;
+                const int64_t min_wait_us =
+                    static_cast<int64_t>(h->target_duration_s) * 500000LL; // half target
+                if (since_us < min_wait_us) {
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    continue;
+                }
+                if (!hls_load_playlist(h)) {
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    continue;
+                }
+                if (h->seg_count == 0u) {
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                }
+                continue;
+            }
+            const char *url = h->seg_urls[h->seg_next++];
+            h->seg_http = http_open_stream(url, 8000, 4096, &h->insecure);
+            if (h->seg_http == nullptr) {
+                ESP_LOGW(TAG, "hls: segment open failed, skipping");
+                continue;
+            }
+            (void)esp_http_client_fetch_headers(h->seg_http);
+            const int status = esp_http_client_get_status_code(h->seg_http);
+            if (status != 200) {
+                ESP_LOGW(TAG, "hls: segment HTTP %d, skipping", status);
+                (void)esp_http_client_close(h->seg_http);
+                esp_http_client_cleanup(h->seg_http);
+                h->seg_http = nullptr;
+                continue;
+            }
+            h->seg_bytes = 0;
+        }
+        const int n = esp_http_client_read(h->seg_http, reinterpret_cast<char *>(dst),
+                                           static_cast<int>(size));
+        if (n > 0) {
+            h->seg_bytes += static_cast<size_t>(n);
+            return static_cast<size_t>(n);
+        }
+        // Segment finished (or errored): move on to the next one.
+        ESP_LOGI(TAG, "hls: segment %u/%u done (%u bytes)",
+                 static_cast<unsigned>(h->seg_next),
+                 static_cast<unsigned>(h->seg_count),
+                 static_cast<unsigned>(h->seg_bytes));
+        (void)esp_http_client_close(h->seg_http);
+        esp_http_client_cleanup(h->seg_http);
+        h->seg_http = nullptr;
+    }
+    ESP_LOGI(TAG, "hls: stopped by owner");
+    return 0;
+}
+
+static void hls_close(HlsStream *h)
+{
+    if (h == nullptr) {
+        return;
+    }
+    if (h->seg_http != nullptr) {
+        (void)esp_http_client_close(h->seg_http);
+        esp_http_client_cleanup(h->seg_http);
+    }
+    if (h->seg_urls != nullptr) {
+        heap_caps_free(h->seg_urls);
+    }
+    heap_caps_free(h);
+}
+
+// Open the m3u8 source and prime the first segment so Open() can sniff the
+// container type. Returns nullptr on any failure.
+static HlsStream *hls_open(const char *url, volatile bool *stop)
+{
+    HlsStream *h = static_cast<HlsStream *>(heap_caps_calloc(1, sizeof(HlsStream), MALLOC_CAP_SPIRAM));
+    if (h == nullptr) {
+        return nullptr;
+    }
+    h->seg_urls = static_cast<char(*)[512]>(
+        heap_caps_calloc(kHlsMaxSegments, sizeof(h->seg_urls[0]), MALLOC_CAP_SPIRAM));
+    if (h->seg_urls == nullptr) {
+        heap_caps_free(h);
+        return nullptr;
+    }
+    snprintf(h->playlist_url, sizeof(h->playlist_url), "%s", url);
+    h->target_duration_s = 6;
+    h->stop = stop;
+    if (!hls_load_playlist(h) || h->seg_count == 0u) {
+        ESP_LOGE(TAG, "hls: no playable segments: %s", url);
+        hls_close(h);
+        return nullptr;
+    }
+    ESP_LOGI(TAG, "hls: %s stream, %u segments queued, target %lus",
+             h->live ? "live" : "vod",
+             static_cast<unsigned>(h->seg_count),
+             static_cast<unsigned long>(h->target_duration_s));
+    return h;
+}
+
+// ---- read-ahead ring --------------------------------------------------------
+
+// Raw read from whichever source backs the decoder (no ring), serving the
+// sniffed bytes first. Runs in the filler task for ring-backed sources.
+static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, const size_t size)
+{
+    size_t total = 0;
+    while (total < size && d->sniff_off < d->sniff_len) {
+        dst[total++] = d->sniff[d->sniff_off++];
+    }
+    if (total == size) {
+        return total;
+    }
+    if (d->file != nullptr) {
+        const int64_t t0 = esp_timer_get_time();
+        const size_t got = fread(dst + total, 1, size - total, d->file);
+        const int64_t dt_ms = (esp_timer_get_time() - t0) / 1000;
+        if (dt_ms > 2000) {
+            ESP_LOGW(TAG, "slow source read: %u bytes in %lld ms",
+                     static_cast<unsigned>(got), static_cast<long long>(dt_ms));
+        }
+        return total + got;
+    }
+    if (d->hls != nullptr) {
+        return total + hls_read(d->hls, dst + total, size - total);
+    }
+    if (d->http != nullptr) {
+        const int got = esp_http_client_read(d->http, reinterpret_cast<char *>(dst) + total,
+                                             static_cast<int>(size - total));
+        return total + ((got > 0) ? static_cast<size_t>(got) : 0u);
+    }
+    return total;
+}
+
+static void ring_filler_task(void *arg)
+{
+    MediaDecoder *d = static_cast<MediaDecoder *>(arg);
+    while (!d->ring_stop) {
+        const size_t head = d->ring_head;
+        const size_t tail = d->ring_tail;
+        const size_t used = (head + kRingBytes - tail) % kRingBytes;
+        const size_t free_space = kRingBytes - 1u - used;
+        if (free_space < kRingFillChunk) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        size_t want = kRingBytes - head; // contiguous run up to the wrap
+        if (want > free_space) {
+            want = free_space;
+        }
+        if (want > kRingFillChunk) {
+            want = kRingFillChunk;
+        }
+        const size_t got = source_read_direct(d, d->ring + head, want);
+        if (got == 0u) {
+            if (!d->ring_stop) {
+                ESP_LOGI(TAG, "readahead: source end of stream");
+            }
+            d->ring_eof = true;
+            break;
+        }
+        d->ring_head = (head + got) % kRingBytes;
+    }
+    d->ring_running = false;
+    vTaskDelete(nullptr);
+}
+
+// Start the read-ahead ring; on failure the decoder falls back to direct
+// reads (correct, just stutter-prone again).
+static void ring_start(MediaDecoder *d)
+{
+    d->ring = static_cast<uint8_t *>(heap_caps_malloc(kRingBytes, MALLOC_CAP_SPIRAM));
+    if (d->ring == nullptr) {
+        return;
+    }
+    d->ring_head = 0;
+    d->ring_tail = 0;
+    d->ring_eof = false;
+    d->ring_stop = false;
+    d->ring_running = true;
+    d->ring_wait_full = (d->file != nullptr);
+    if (xTaskCreatePinnedToCore(ring_filler_task, "mdec_fill", 10240, d, 5, nullptr, 0) != pdPASS) {
+        ESP_LOGW(TAG, "read-ahead task create failed; using direct reads");
+        d->ring_running = false;
+        heap_caps_free(d->ring);
+        d->ring = nullptr;
+    }
+}
+
+static void ring_stop_and_free(MediaDecoder *d)
+{
+    if (d->ring == nullptr) {
+        return;
+    }
+    d->ring_stop = true;
+    // The filler can sit inside an SMB/HTTP read for several seconds; give
+    // it time to notice the flag. If it never exits, leak rather than crash.
+    for (int i = 0; i < 1200 && d->ring_running; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (d->ring_running) {
+        ESP_LOGE(TAG, "read-ahead task stuck; leaking decoder resources");
+        return;
+    }
+    heap_caps_free(d->ring);
+    d->ring = nullptr;
+}
+
 } // namespace
 
 extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
@@ -167,24 +630,36 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
     }
 
     const bool is_http = strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0;
+    const bool is_hls = is_http && strstr(path, ".m3u8") != nullptr;
 
     MediaDecoder *d = static_cast<MediaDecoder *>(heap_caps_calloc(1, sizeof(MediaDecoder), MALLOC_CAP_SPIRAM));
     if (d == nullptr) {
         return nullptr;
     }
 
-    if (is_http) {
+    if (is_hls) {
+        // m3u8 playlist: resolve to a segment stream, then sniff the first
+        // segment's leading bytes for container detection (TS / ADTS / MP3).
+        d->hls = hls_open(path, &d->ring_stop);
+        if (d->hls == nullptr) {
+            MEDIA_DECODER_Close(d);
+            return nullptr;
+        }
+        size_t sniffed = 0;
+        while (sniffed < sizeof(d->sniff)) {
+            const size_t got = hls_read(d->hls, d->sniff + sniffed, sizeof(d->sniff) - sniffed);
+            if (got == 0u) {
+                break;
+            }
+            sniffed += got;
+        }
+        d->sniff_len = sniffed;
+    } else if (is_http) {
         // Net-radio stream: open the connection, then sniff the first bytes
         // for format detection (the stream is not seekable, so the sniffed
         // bytes are replayed ahead of the decoder's reads).
-        esp_http_client_config_t http_cfg = {};
-        http_cfg.url = path;
-        http_cfg.timeout_ms = 10000;
-        http_cfg.buffer_size = 4096;
-        http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        d->http = esp_http_client_init(&http_cfg);
-        if (d->http == nullptr ||
-            esp_http_client_open(d->http, 0) != ESP_OK) {
+        d->http = http_open_stream(path, 10000, 4096);
+        if (d->http == nullptr) {
             ESP_LOGE(TAG, "stream open failed: %s", path);
             MEDIA_DECODER_Close(d);
             return nullptr;
@@ -220,6 +695,11 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
     }
 
     esp_audio_simple_dec_type_t type = detect_type_from_header(d->sniff, d->sniff_len, path);
+    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE && is_hls) {
+        // HLS segments that didn't sniff as TS/ADTS/MP3: raw AAC is the
+        // usual remaining case.
+        type = ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+    }
     if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE && is_http) {
         // Typeless radio URL: MP3 is the de-facto webradio default.
         type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
@@ -243,8 +723,15 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
         return nullptr;
     }
 
-    ESP_LOGI(TAG, "decoding %s as %s%s", path, esp_audio_simple_dec_get_name(type),
-             is_http ? " (stream)" : "");
+    // File and HLS sources read through the read-ahead ring so SMB / segment
+    // round-trip latency doesn't reach the decode loop as audio stutter.
+    if (d->file != nullptr || d->hls != nullptr) {
+        ring_start(d);
+    }
+
+    ESP_LOGI(TAG, "decoding %s as %s%s%s", path, esp_audio_simple_dec_get_name(type),
+             is_hls ? " (hls)" : (is_http ? " (stream)" : ""),
+             d->ring != nullptr ? " +readahead" : "");
     return d;
 }
 
@@ -260,6 +747,7 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
     const int64_t enter_us = esp_timer_get_time();
     int64_t last_report_us = enter_us;
     unsigned iterations = 0;
+    unsigned stalled_calls = 0;
 
     while (true) {
         ++iterations;
@@ -342,22 +830,20 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
             return 1;
         }
 
-        // No output and nothing consumed: parser wants a bigger contiguous
-        // chunk than remains; compact by falling through to refill.
-        if (raw.consumed == 0u && d->raw_offset < d->raw_fill) {
-            const size_t remain = d->raw_fill - d->raw_offset;
-            memmove(d->raw_buffer, d->raw_buffer + d->raw_offset, remain);
-            const size_t extra = d->eof ? 0u : read_source(d, d->raw_buffer + remain, kRawBufferBytes - remain);
-            if (extra == 0u) {
-                if (d->eof) {
-                    return 0;
-                }
-                d->eof = true;
-            } else if (d->file != nullptr && remain + extra < kRawBufferBytes) {
-                d->eof = true;
+        // No output and nothing consumed: call process again with the SAME
+        // untouched window. The simple decoders cache input internally and
+        // may hold references into the unconsumed span, so it must never be
+        // moved or overwritten (see the reference loop in the esp_audio_codec
+        // test app) -- the old compact-and-refill here corrupted the TS
+        // demuxer's state. Guard against a decoder that truly stops.
+        if (raw.consumed == 0u) {
+            if (++stalled_calls > 1000u) {
+                ESP_LOGE(TAG, "parser made no progress (%u bytes pending)",
+                         static_cast<unsigned>(d->raw_fill - d->raw_offset));
+                return -1;
             }
-            d->raw_fill = remain + extra;
-            d->raw_offset = 0;
+        } else {
+            stalled_calls = 0;
         }
     }
 }
@@ -376,6 +862,15 @@ extern "C" void MEDIA_DECODER_Close(MediaDecoder *d)
     if (d == nullptr) {
         return;
     }
+    // Stop the read-ahead filler before touching the sources it reads from.
+    if (d->ring != nullptr) {
+        ring_stop_and_free(d);
+        if (d->ring != nullptr) {
+            // Filler wedged inside a source read: leak everything it might
+            // still touch rather than free under its feet.
+            return;
+        }
+    }
     if (d->handle != nullptr) {
         esp_audio_simple_dec_close(d->handle);
     }
@@ -385,6 +880,9 @@ extern "C" void MEDIA_DECODER_Close(MediaDecoder *d)
     if (d->http != nullptr) {
         (void)esp_http_client_close(d->http);
         (void)esp_http_client_cleanup(d->http);
+    }
+    if (d->hls != nullptr) {
+        hls_close(d->hls);
     }
     if (d->raw_buffer != nullptr) {
         heap_caps_free(d->raw_buffer);
