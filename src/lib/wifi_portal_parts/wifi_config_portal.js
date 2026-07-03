@@ -159,7 +159,17 @@ const translations = {
         smbShareName: 'Share name',
         smbUser: 'Username (empty = guest)',
         smbPassword: 'Password',
-        smbClear: 'Clear'
+        smbClear: 'Clear',
+        musicOutput: 'Music Output Device',
+        outputSpk: 'Onboard speaker',
+        outputBt: 'Bluetooth headset (A2DP)',
+        voiceCodec: 'NRL Voice Codec (TX)',
+        codecG711: 'G.711 8 kHz (compatible)',
+        codecOpus: 'Opus 16 kHz wideband',
+        aiAssistant: 'AI Assistant (xiaozhi)',
+        aiUrl: 'Server URL (ws:// or wss://)',
+        aiToken: 'Access Token',
+        aiEnabledText: 'Enable the assistant connection'
       },
       zh: {
         language: '语言',
@@ -326,7 +336,17 @@ const translations = {
         smbShareName: '共享名',
         smbUser: '用户名 (留空为来宾)',
         smbPassword: '密码',
-        smbClear: '清除'
+        smbClear: '清除',
+        musicOutput: '音乐输出设备',
+        outputSpk: '板载扬声器',
+        outputBt: '蓝牙耳机 (A2DP)',
+        voiceCodec: 'NRL 语音编码 (发送)',
+        codecG711: 'G.711 8kHz (兼容)',
+        codecOpus: 'Opus 16kHz 宽带',
+        aiAssistant: 'AI 助手 (小智)',
+        aiUrl: '服务器地址 (ws:// 或 wss://)',
+        aiToken: '访问令牌 (Token)',
+        aiEnabledText: '启用助手连接'
       }
     };
 

@@ -42,6 +42,9 @@ bool AI_IsListening(void);
 // Human-readable status line for the AT console / UI.
 void AI_Describe(char *out, size_t out_size);
 
+// Current configuration (for the web form). Buffers may be NULL to skip.
+void AI_GetConfig(char *url, size_t url_size, char *token, size_t token_size);
+
 #ifdef __cplusplus
 }
 #endif

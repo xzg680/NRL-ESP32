@@ -172,6 +172,8 @@
   <div class="section-head"><h2 data-i18n="musicTarget">Playback Target</h2><span class="hint" data-i18n="musicTargetHint">One shared setting for everything the player outputs: music, nanny beacon, and net radio.</span></div>
   <div class="grid">
     <form class="item-form" method="post" action="/save_media"><label data-i18n="musicTarget">Playback Target</label><select name="music_target" onchange="submitSwitch(this)"><option value="0"{{TARGET_LOCAL_SELECTED}} data-i18n="targetLocal">Local speaker</option><option value="1"{{TARGET_NET_SELECTED}} data-i18n="targetNet">NRL network</option><option value="2"{{TARGET_BOTH_SELECTED}} data-i18n="targetBoth">Local + network</option></select></form>
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="musicOutput">Music Output Device</label><select name="music_output" onchange="submitSwitch(this)"><option value="0"{{OUTPUT_SPK_SELECTED}} data-i18n="outputSpk">Onboard speaker</option><option value="1"{{OUTPUT_BT_SELECTED}} data-i18n="outputBt">Bluetooth headset (A2DP)</option></select></form>
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="voiceCodec">NRL Voice Codec (TX)</label><select name="voice_codec" onchange="submitSwitch(this)"><option value="0"{{CODEC_G711_SELECTED}} data-i18n="codecG711">G.711 8 kHz (compatible)</option><option value="1"{{CODEC_OPUS_SELECTED}} data-i18n="codecOpus">Opus 16 kHz wideband</option></select></form>
   </div>
 </section>
 <section class="panel">
@@ -215,6 +217,19 @@
         <div><label data-i18n="smbPassword">Password</label><input name="smb_password" type="password" value="{{SMB_PASSWORD}}"></div>
       </div>
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="secondary btn-small" type="button" onclick="submitFormAction(this, 'smb_clear')" data-i18n="smbClear">Clear</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aiAssistant">AI Assistant (xiaozhi)</h2><span class="hint mono">{{AI_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_media">
+      <div class="subgrid">
+        <div class="span-2"><label data-i18n="aiUrl">Server URL (ws:// or wss://)</label><input name="ai_url" value="{{AI_URL}}" placeholder="wss://api.tenclass.net/xiaozhi/v1/"></div>
+        <div class="span-2"><label data-i18n="aiToken">Access Token</label><input name="ai_token" type="password" value="{{AI_TOKEN}}"></div>
+        <div class="span-2"><input type="hidden" name="ai_present" value="1"><label class="hint"><input type="checkbox" name="ai_enabled" value="1" {{AI_CHECKED}}><span data-i18n="aiEnabledText">Enable the assistant connection</span></label></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
     </form>
   </div>
 </section>

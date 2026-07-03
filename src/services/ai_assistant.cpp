@@ -435,6 +435,16 @@ extern "C" void AI_Describe(char *out, const size_t out_size)
              s_listening ? ", listening" : "");
 }
 
+extern "C" void AI_GetConfig(char *url, const size_t url_size, char *token, const size_t token_size)
+{
+    if (url != nullptr && url_size > 0u) {
+        snprintf(url, url_size, "%s", s_url);
+    }
+    if (token != nullptr && token_size > 0u) {
+        snprintf(token, token_size, "%s", s_token);
+    }
+}
+
 #else // !S31
 
 extern "C" void AI_Init(void) {}
@@ -449,6 +459,15 @@ extern "C" void AI_Describe(char *out, size_t out_size)
 {
     if (out != nullptr && out_size > 0u) {
         snprintf(out, out_size, "(unsupported)");
+    }
+}
+extern "C" void AI_GetConfig(char *url, size_t url_size, char *token, size_t token_size)
+{
+    if (url != nullptr && url_size > 0u) {
+        url[0] = '\0';
+    }
+    if (token != nullptr && token_size > 0u) {
+        token[0] = '\0';
     }
 }
 

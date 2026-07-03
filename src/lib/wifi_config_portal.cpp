@@ -11,6 +11,7 @@
 #include "../app/driver/external_radio.h"
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
+#include "../services/ai_assistant.h"
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
 #include "../services/nanny.h"
@@ -1814,9 +1815,35 @@ static esp_err_t handleSaveMedia(httpd_req_t *req)
             ESP_LOGI(TAG, "media: playback target=%lu", value);
         }
     }
+    if (ok && s_server.hasArg("music_output")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("music_output"), &value) &&
+             value <= MUSIC_OUTPUT_BT;
+        if (ok) {
+            MUSIC_SetOutput(static_cast<int>(value));
+        }
+    }
+    if (ok && s_server.hasArg("voice_codec")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("voice_codec"), &value) && value <= 1UL;
+        if (ok) {
+            NRLAudioBridge_SetVoiceCodec(static_cast<uint8_t>(value));
+            ESP_LOGI(TAG, "media: voice codec=%s", value == 1UL ? "opus" : "g711");
+        }
+    }
     if (ok && s_server.hasArg("espnow_present")) {
         // Fails when enabling while WiFi is still down -- surfaced to the page.
         ok = ESPNOW_LINK_SetEnabled(s_server.hasArg("espnow_enabled"));
+    }
+    if (ok && s_server.hasArg("ai_present")) {
+        const std::string ai_url = s_server.arg("ai_url");
+        if (!s_server.hasArg("ai_enabled")) {
+            ok = AI_SetEnabled(false);
+        } else if (!ai_url.empty()) {
+            ok = AI_Configure(ai_url.c_str(), s_server.arg("ai_token").c_str());
+        } else {
+            ok = false; // enabling needs a URL
+        }
     }
     if (ok && s_server.hasArg("beacon_present")) {
         if (s_server.hasArg("beacon_enabled")) {

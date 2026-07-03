@@ -135,6 +135,7 @@ enum class AudioControl : intptr_t {
     Noise,
     MicHpf,
     EspNow,
+    OpusCodec,
 };
 
 bool s_ready = false;
@@ -500,6 +501,7 @@ void wifiOptionEvent(lv_event_t *event);
 void audioSliderEvent(lv_event_t *event);
 void audioSwitchEvent(lv_event_t *event);
 void musicTargetEvent(lv_event_t *event);
+void musicOutputEvent(lv_event_t *event);
 void updateAudioValueLabels();
 void refresh();
 void rebuildCurrentPage();
@@ -934,9 +936,16 @@ void buildApps()
                                  : 0u);
     lv_obj_add_event_cb(s_dd_music_target, musicTargetEvent, LV_EVENT_VALUE_CHANGED, nullptr);
 
+    fieldLabel(box, 380, 0, "Music Output Device");
+    lv_obj_t *dd_output = styledDropdown(box, 380, 24, 330);
+    lv_dropdown_set_options(dd_output, "Onboard speaker\nBT headset (A2DP)");
+    lv_dropdown_set_selected(dd_output,
+                             (MUSIC_GetOutput() == MUSIC_OUTPUT_BT) ? 1u : 0u);
+    lv_obj_add_event_cb(dd_output, musicOutputEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
-    lv_obj_set_pos(s_lbl_form_status, 370, 34);
-    lv_obj_set_width(s_lbl_form_status, 350);
+    lv_obj_set_pos(s_lbl_form_status, 0, 76);
+    lv_obj_set_width(s_lbl_form_status, 710);
     lv_label_set_text(s_lbl_form_status, "Applies from the next track.");
 
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
@@ -1142,8 +1151,12 @@ void buildAudio()
     s_slider_mic = slider(box, 0, 106, 710, 0, 255, cfg ? cfg->mic_volume : 0, AudioControl::Mic);
 
     s_sw_aec = switchControl(box, 0, 152, "AEC", cfg && cfg->aec_enabled, AudioControl::Aec);
-    s_sw_noise = switchControl(box, 228, 152, "AI Noise", cfg && cfg->ai_noise_enabled, AudioControl::Noise);
-    s_sw_mic_hpf = switchControl(box, 500, 152, "Mic HPF", cfg && cfg->mic_hpf_enabled, AudioControl::MicHpf);
+    s_sw_noise = switchControl(box, 190, 152, "AI Noise", cfg && cfg->ai_noise_enabled, AudioControl::Noise);
+    s_sw_mic_hpf = switchControl(box, 380, 152, "Mic HPF", cfg && cfg->mic_hpf_enabled, AudioControl::MicHpf);
+    // NRL TX voice codec: applies + persists immediately (RX auto-detects,
+    // so no Save round-trip is needed).
+    switchControl(box, 556, 152, "Opus 16k", NRLAudioBridge_GetVoiceCodec() == 1u,
+                  AudioControl::OpusCodec);
 
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_form_status, 710);
@@ -2294,10 +2307,26 @@ void audioSwitchEvent(lv_event_t *event)
             }
             s_cfg_gen_seen = CONFIG_NOTIFY_Generation(); // own change
             return;
+        case AudioControl::OpusCodec:
+            // Applies + persists immediately (bridge NVS); RX auto-detects
+            // both codecs so nothing else needs to change.
+            NRLAudioBridge_SetVoiceCodec(checked ? 1u : 0u);
+            formStatus(checked ? "TX voice: Opus 16k wideband (type 8)."
+                               : "TX voice: G.711 8k (type 1).", kColorGood);
+            return;
         default:
             break;
     }
     markAudioChanged();
+}
+
+// Music output-device dropdown (Apps page): applies + persists immediately.
+void musicOutputEvent(lv_event_t *event)
+{
+    lv_obj_t *dd = lv_event_get_target_obj(event);
+    MUSIC_SetOutput(static_cast<int>(lv_dropdown_get_selected(dd)));
+    formStatus("Music output saved (applies from the next track).", kColorGood);
+    s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
 }
 
 // Playback-target dropdown (Apps page): applies + persists immediately.

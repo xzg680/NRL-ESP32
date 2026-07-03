@@ -7,10 +7,12 @@
 #include "wifi_update_portal_page.generated.h"
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
+#include "../services/ai_assistant.h"
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
 #include "../services/nanny.h"
 #include "../services/storage_service.h"
+#include "nrl_audio_bridge.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -368,7 +370,23 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
     replaceToken(html, "{{TARGET_LOCAL_SELECTED}}", target == MUSIC_TARGET_LOCAL ? " selected" : "");
     replaceToken(html, "{{TARGET_NET_SELECTED}}", target == MUSIC_TARGET_NET ? " selected" : "");
     replaceToken(html, "{{TARGET_BOTH_SELECTED}}", target == MUSIC_TARGET_BOTH ? " selected" : "");
+    const int output = MUSIC_GetOutput();
+    replaceToken(html, "{{OUTPUT_SPK_SELECTED}}", output == MUSIC_OUTPUT_SPEAKER ? " selected" : "");
+    replaceToken(html, "{{OUTPUT_BT_SELECTED}}", output == MUSIC_OUTPUT_BT ? " selected" : "");
+    const uint8_t codec = NRLAudioBridge_GetVoiceCodec();
+    replaceToken(html, "{{CODEC_G711_SELECTED}}", codec == 0u ? " selected" : "");
+    replaceToken(html, "{{CODEC_OPUS_SELECTED}}", codec == 1u ? " selected" : "");
     replaceToken(html, "{{ESPNOW_CHECKED}}", checkedAttr(ESPNOW_LINK_IsEnabled()));
+
+    char ai_url[160] = {};
+    char ai_token[96] = {};
+    AI_GetConfig(ai_url, sizeof(ai_url), ai_token, sizeof(ai_token));
+    replaceToken(html, "{{AI_URL}}", htmlEscape(ai_url));
+    replaceToken(html, "{{AI_TOKEN}}", htmlEscape(ai_token));
+    replaceToken(html, "{{AI_CHECKED}}", checkedAttr(AI_IsEnabled()));
+    char ai_status[224] = {};
+    AI_Describe(ai_status, sizeof(ai_status));
+    replaceToken(html, "{{AI_STATUS}}", htmlEscape(ai_status));
 
     char beacon_path[128] = {};
     uint32_t beacon_interval = 0;
