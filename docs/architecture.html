@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NRL-ESP32 S31 功能扩展架构规划</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --paper: #ffffff;
+      --ink: #18202a;
+      --muted: #5d6876;
+      --line: #dfe4ea;
+      --accent: #0d766e;
+      --accent-soft: #e3f4f1;
+      --code-bg: #111827;
+      --code-ink: #e5e7eb;
+      --warn: #8a5a00;
+      --warn-bg: #fff4d8;
+      --shadow: 0 18px 45px rgba(24, 32, 42, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(180deg, #eef6f5 0, rgba(238, 246, 245, 0) 360px),
+        var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      line-height: 1.72;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    .page {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 38px 0 56px;
+    }
+
+    header {
+      padding: 34px 0 24px;
+    }
+
+    .kicker {
+      margin: 0 0 12px;
+      color: var(--accent);
+      font-size: 0.86rem;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 920px;
+      margin: 0;
+      font-size: clamp(2rem, 5vw, 4.2rem);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      max-width: 900px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 28px;
+      align-items: start;
+    }
+
+    nav {
+      position: sticky;
+      top: 20px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.86);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    nav h2 {
+      margin: 0 0 12px;
+      font-size: 0.95rem;
+    }
+
+    nav ol {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+      font-size: 0.94rem;
+      line-height: 1.45;
+    }
+
+    main {
+      min-width: 0;
+    }
+
+    section {
+      margin: 0 0 22px;
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    h2,
+    h3 {
+      line-height: 1.24;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 18px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 1.62rem;
+    }
+
+    h3 {
+      margin: 28px 0 12px;
+      font-size: 1.18rem;
+    }
+
+    p {
+      margin: 0 0 14px;
+    }
+
+    ul,
+    ol {
+      padding-left: 1.3rem;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    code {
+      padding: 0.12em 0.36em;
+      border-radius: 5px;
+      background: #eef1f5;
+      color: #0f172a;
+      font-family: "Cascadia Mono", Consolas, "SFMono-Regular", monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      overflow: auto;
+      margin: 18px 0;
+      padding: 18px;
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--code-ink);
+      line-height: 1.42;
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+      color: inherit;
+      font-size: 0.9rem;
+      white-space: pre;
+    }
+
+    blockquote,
+    .note {
+      margin: 0 0 20px;
+      padding: 14px 16px;
+      border-left: 4px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      background: var(--accent-soft);
+      color: #21413d;
+    }
+
+    .warning {
+      border-left-color: var(--warn);
+      background: var(--warn-bg);
+      color: var(--warn);
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px;
+      margin: 18px 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .cards li {
+      min-height: 72px;
+      margin: 0;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+
+    .cards strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--ink);
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      margin: 18px 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 680px;
+      background: #fff;
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f0f5f4;
+      color: #173b37;
+      font-weight: 700;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .phase-list {
+      counter-reset: phase;
+      display: grid;
+      gap: 12px;
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .phase-list li {
+      counter-increment: phase;
+      position: relative;
+      margin: 0;
+      padding: 14px 16px 14px 58px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+
+    .phase-list li::before {
+      content: counter(phase);
+      position: absolute;
+      top: 14px;
+      left: 16px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+      line-height: 28px;
+      text-align: center;
+    }
+
+    .dir-tree {
+      margin-bottom: 0;
+    }
+
+    footer {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 0.92rem;
+      text-align: center;
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      nav {
+        position: static;
+      }
+
+      section {
+        padding: 22px;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .page {
+        width: min(100% - 20px, 1180px);
+        padding-top: 18px;
+      }
+
+      h1 {
+        font-size: 2rem;
+      }
+
+      section {
+        padding: 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <p class="kicker">Architecture Plan · 2026-07</p>
+      <h1>NRL-ESP32 S31 功能扩展架构规划</h1>
+      <p class="subtitle">适用板卡: ESP32-S31-Korvo (esp32s31)。格子派 / BH4TDV 复用其中的音频核心层，应用层功能按硬件能力裁剪。</p>
+    </header>
+
+    <div class="layout">
+      <nav aria-label="目录">
+        <h2>目录</h2>
+        <ol>
+          <li><a href="#goals">目标功能</a></li>
+          <li><a href="#current">现状与核心问题</a></li>
+          <li><a href="#layers">总体分层</a></li>
+          <li><a href="#components">公用组件</a></li>
+          <li><a href="#hardware">硬件依据</a></li>
+          <li><a href="#difficulty">功能落点与难度</a></li>
+          <li><a href="#phases">实施顺序</a></li>
+          <li><a href="#dirs">目录规划</a></li>
+        </ol>
+      </nav>
+
+      <main>
+        <section id="goals">
+          <h2>目标功能</h2>
+          <ul class="cards">
+            <li><strong>网络收音机</strong>HTTP 流播放。</li>
+            <li><strong>硬件 NRL 保姆</strong>播放 TF 卡音乐/信标音频，输出目标可切换本地、NRL 网络或同时。</li>
+            <li><strong>视频通话</strong>音视频链路与摄像头能力整合。</li>
+            <li><strong>音乐播放器</strong>TF 卡 WAV/MP3/FLAC/APE 等，支持元数据、封面显示和蓝牙耳机听音乐。</li>
+            <li><strong>蓝牙耳机通话</strong>HFP，已有基础。</li>
+            <li><strong>AI 助手</strong>语音入口、云端能力和 TTS 输出。</li>
+            <li><strong>ESP-NOW</strong>脱网近距离语音。</li>
+          </ul>
+        </section>
+
+        <section id="current">
+          <h2>一、现状与核心问题</h2>
+          <p>现有音频管线是点对点的:</p>
+          <ul>
+            <li><code>src/app/driver/audio_passthrough.*</code>: 拥有 I2S、mic 采集任务、<strong>单一</strong> frame hook、<strong>单一</strong> 8kHz 输出队列，AFE (AEC/NS) 挂在 mic 路径上。</li>
+            <li><code>src/lib/nrl_audio_bridge.*</code>: 独占 frame hook，G.711 编码 → UDP；下行 UDP → <code>AUDIO_QueueOutputSamples</code>。</li>
+            <li><code>src/lib/nrl_bt_hfp.*</code>: 通过 <code>NRLAudioBridge_FeedExternalMic</code> 旁路塞入。</li>
+          </ul>
+          <p class="note warning">单 hook + 单队列无法承载多个并发音频功能。扩展的前提是升级为多源多汇路由。</p>
+        </section>
+
+        <section id="layers">
+          <h2>二、总体分层</h2>
+          <pre><code>┌─────────────────────────────────────────────────────────────┐
+│ 应用层 services/  (每个功能一个 App, 统一 start/stop/suspend) │
+│  nrl_voice │ nanny │ net_radio │ music │ ai │ video │ espnow │
+├──────────────────────────┬──────────────────────────────────┤
+│ App 管理器 (资源仲裁)      │ UI 屏幕注册表 (LVGL, 拆分 display_s31)│
+├──────────────────────────┴──────────────────────────────────┤
+│ 音频核心 audio/  ★ 最重要的公用层                             │
+│   AudioRouter: N源 × M汇 路由矩阵 + 混音 + SRC 重采样          │
+├──────────────────────────────────────────────────────────────┤
+│ 媒体引擎 media/ (解码/元数据)  │ 传输层 (UDP/ESP-NOW/HTTP/BT)  │
+├──────────────────────────────────────────────────────────────┤
+│ 驱动层 driver/ + vendor BSP (ES8389/I2S/LCD/SDMMC/摄像头)     │
+└──────────────────────────────────────────────────────────────┘</code></pre>
+        </section>
+
+        <section id="components">
+          <h2>三、公用组件</h2>
+
+          <h3>3.1 AudioRouter (音频路由器)</h3>
+          <p>AudioRouter 是所有音频功能的总线。</p>
+          <ul>
+            <li><code>AudioSource</code> / <code>AudioSink</code> 接口: 实现 <code>read_frame()</code> 即为源，实现 <code>write_frame()</code> 即为汇，向 Router 注册。</li>
+            <li>路由矩阵: 每条源→汇路由独立开关 + 独立增益；多源进同一汇时混音。</li>
+            <li>语音域统一格式: <strong>16 kHz 单声道 PCM16</strong>，适配 AFE/AEC/G.711/BT-SCO 的原生域。</li>
+          </ul>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>功能</th><th>路由</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>NRL 对讲</td><td>mic→NRL上行；NRL下行→喇叭</td></tr>
+                <tr><td>保姆</td><td>解码器→喇叭 / 解码器→NRL上行 / 双开 (三档切换)；信标源定时插入</td></tr>
+                <tr><td>网络收音机</td><td>HTTP流解码器→喇叭</td></tr>
+                <tr><td>音乐</td><td>解码器→喇叭 或 →BT-A2DP汇</td></tr>
+                <tr><td>BT 通话</td><td>BT-HFP源→NRL上行；NRL下行→BT-HFP汇</td></tr>
+                <tr><td>AI 助手</td><td>mic→ASR汇；TTS源→喇叭</td></tr>
+                <tr><td>ESP-NOW</td><td>mic→ESPNOW汇；ESPNOW源→喇叭</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>3.2 双时钟域</h3>
+          <p>双时钟域是无损播放的关键设计。</p>
+          <pre><code>                      ┌── 高保真域 (无损直通) ──────────────────────┐
+TF/HTTP → 解码器 ──┬──│ 原生率 44.1k/48k/96k/192k, 16/24bit, 立体声 │→ 喇叭汇(ES8389)
+                   │  └────────────────────────────────────────┘
+                   │  ┌── 语音域 (固定 16k mono 16bit) ────────┐
+                   └─→│ SRC降采样+下混 → Router 混音矩阵        │→ NRL上行(8k G711)
+  mic/NRL下行/TTS/──→│                                         │→ BT-SCO/ESPNOW/ASR
+  信标/ESPNOW         └────────────────────────────────────────┘</code></pre>
+          <ul>
+            <li><strong>高保真路径直通</strong>: 不进混音矩阵，中途零重采样、零位深转换。</li>
+            <li><strong>喇叭汇动态重配</strong>: <code>SpeakerSink_SetFormat(rate, bits, ch)</code>，换曲目时 <code>esp_codec_dev_close()</code> → 按新参数重开。ES8389 芯片规格支持至 192kHz 采样。</li>
+            <li>待 bring-up 验证: 改用 MCLK (板级已接 GPIO2，现配置 <code>use_mclk=false</code>)；高采样率必需。</li>
+            <li>待 bring-up 验证: 96k/192k、24bit 在 esp_codec_dev es8389 驱动中的实测支持。若驱动时钟表未覆盖 192k，需补充其 coeff 配置。</li>
+            <li><strong>SRC 重采样器</strong> (<code>audio/resampler</code>，公用): esp_audio_effects resample 或 esp-dsp 自组。跨域处统一使用。</li>
+            <li><strong>域冲突策略</strong> (App 管理器仲裁，可配置): 打断(默认，先做) / 闪避混音(后期) / 忽略。</li>
+            <li><strong>保姆“同时”模式</strong>: 解码 PCM 出口 fan-out 两路，原生率→喇叭 + SRC→NRL 上行，一次解码两处消费。</li>
+          </ul>
+
+          <h3>3.3 MediaPlayer (媒体引擎)</h3>
+          <p>MediaPlayer 由收音机、保姆、音乐播放器共用。</p>
+          <ul>
+            <li>输入抽象: TF 卡文件 (VFS) 与 HTTP 流同一接口。</li>
+            <li>解码器插件: <code>open(stream)</code> / <code>decode_frame()</code> / <code>seek()</code>，按文件头探测格式。</li>
+          </ul>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>格式</th><th>方案</th><th>成本</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>WAV</td><td>自写解析</td><td>极低</td></tr>
+                <tr><td>MP3/FLAC/AAC/OGG</td><td>乐鑫 <code>esp_audio_codec</code> 组件</td><td>低</td></tr>
+                <tr><td>APE</td><td>移植 libdemac</td><td>中，最后做</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <ul>
+            <li>元数据解析器 (<code>media/metadata_parser</code>，公用): ID3v1/v2 (含 APIC 封面)、Vorbis Comment + PICTURE、APE Tag → 统一 <code>TrackInfo{title, artist, album, duration, cover}</code>。</li>
+            <li>封面渲染: 复用已有 <code>esp_new_jpeg</code> / <code>libpng</code> / <code>esp_lv_decoder</code>，贴 LVGL image。视频通话的 JPEG 帧解码同源复用。</li>
+          </ul>
+
+          <h3>3.4 VoiceLink (语音链路抽象)</h3>
+          <p>从 <code>nrl_audio_bridge</code> 拆出 <code>send_voice_frame()</code> / <code>on_voice_frame()</code> 接口；NRL-UDP 与 ESP-NOW 为两个实现。PTT 逻辑、尾音抑制、呼号显示复用。</p>
+
+          <h3>3.5 TF 卡存储服务</h3>
+          <p><code>bsp_sdcard_mount()</code> 已由 vendor BSP 提供，SDMMC 4-bit GPIO20-25，电源开关 GPIO39 低有效，挂载 <code>/sdcard</code>。目录规范: <code>/sdcard/music</code>、<code>/sdcard/beacon</code>、<code>/sdcard/rec</code>。曲库索引缓存于卡上，避免每次全盘扫描。</p>
+
+          <h3>3.6 App 管理器 + UI 屏幕注册表</h3>
+          <ul>
+            <li>App 生命周期 <code>start()</code> / <code>stop()</code> / <code>suspend()</code>；仲裁冲突，如视频通话时暂停音乐，BT A2DP 与 WiFi 大流量并发限制。</li>
+            <li><code>display_s31.cpp</code> (~1800 行) 拆分: 各 App 注册自己的 LVGL 屏幕。</li>
+            <li>音乐播放器屏幕: 封面 + 标题/艺术家/专辑 + 进度条；触摸上一曲/播放暂停/下一曲 (GT1151 触摸)；板上 ADC 按键 VOL± 保持音量；输出目标切换喇叭/BT耳机，切 Router 汇。</li>
+            <li>播放队列组件 (<code>services/music/playlist</code>): <code>next()</code> / <code>prev()</code> / <code>shuffle()</code> / <code>repeat()</code>，保姆功能复用。</li>
+          </ul>
+        </section>
+
+        <section id="hardware">
+          <h2>四、硬件依据</h2>
+          <p>官方 BSP 已 vendor 到 <code>vendor/esp32_s31_korvo</code>。与官方 <code>esp-dev-kits/examples/esp32-s31-korvo/examples/common_components</code> 逐字节一致。参考实现为官方 <code>factory_demo</code>，含 camera/audio/usb_hid。</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>外设</th><th>引脚</th><th>状态</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>TF 卡 (SDMMC 4-bit)</td><td>D0-D3=20-23, CLK=24, CMD=25, 电源=39(低有效)</td><td>BSP API 现成，无引脚冲突</td></tr>
+                <tr><td>DVP 摄像头</td><td>D0-D7=46-53, PCLK=54, XCLK=55；默认 1280×720</td><td>BSP API 现成，无引脚冲突</td></tr>
+                <tr><td>I2S MCLK</td><td>GPIO2 (板级已接)</td><td>高保真需切 <code>use_mclk=true</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="difficulty">
+          <h2>五、各功能落点与难度</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>功能</th><th>复用</th><th>新增</th><th>难度</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>音乐播放器(本地)</td><td>Router+MediaPlayer+TF</td><td>APE 移植、元数据/封面</td><td>中</td></tr>
+                <tr><td>保姆</td><td>全部+现有NRL上行</td><td>信标调度器、三档切换UI</td><td>低(架构就绪后)</td></tr>
+                <tr><td>网络收音机</td><td>MediaPlayer</td><td>HTTP 流输入</td><td>低</td></tr>
+                <tr><td>BT 耳机通话</td><td>现有 nrl_bt_hfp</td><td>收编为标准源/汇</td><td>低</td></tr>
+                <tr><td>BT 耳机音乐</td><td>Router</td><td>A2DP Source (Bluedroid)</td><td>中</td></tr>
+                <tr><td>ESP-NOW</td><td>VoiceLink 抽象</td><td>ESP-NOW 传输实现</td><td>中</td></tr>
+                <tr><td>AI 助手</td><td>mic源+esp-sr AFE+TTS源</td><td>唤醒词、云端 ASR/LLM/TTS</td><td>中高</td></tr>
+                <tr><td>视频通话</td><td>音频走语音链路，JPEG 解码复用</td><td>摄像头+esp_video+RTP+对端协议</td><td>高，最后做</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="phases">
+          <h2>六、实施顺序</h2>
+          <ol class="phase-list">
+            <li><strong>Phase 0 (地基)</strong>: 抽出 AudioRouter，迁移现有 NRL 对讲与 BT HFP。外部行为零变化，三块板同时受益。</li>
+            <li><strong>Phase 1</strong>: TF 卡挂载 + MediaPlayer (WAV→MP3→FLAC→APE 递进) + 高保真喇叭汇 (动态采样率/MCLK) + 元数据/封面 + 播放器 UI → 音乐播放器可用。</li>
+            <li><strong>Phase 2</strong>: 保姆 (双路 fan-out + 信标调度 + 三档切换) + 网络收音机 (HTTP 流)。</li>
+            <li><strong>Phase 3</strong>: BT A2DP 音乐、ESP-NOW。</li>
+            <li><strong>Phase 4</strong>: AI 助手 → 视频通话。</li>
+          </ol>
+        </section>
+
+        <section id="dirs">
+          <h2>七、目录规划</h2>
+          <pre class="dir-tree"><code>src/
+  audio/        AudioRouter、source/sink 接口、resampler、tone/beacon 生成
+  media/        解码器插件、metadata_parser、流抽象 (file/http)
+  services/     nrl_voice(由 nrl_audio_bridge 重构)、nanny、net_radio、
+                music、ai_assistant、video_call、espnow_link
+  app/driver/   硬件驱动 (现状) + sdcard、camera 接入 (调 vendor BSP)
+  lib/          门户/AT/BLE 等 (现状)</code></pre>
+        </section>
+      </main>
+    </div>
+
+    <footer>
+      由 <code>docs/architecture.md</code> 转换为静态 HTML。
+    </footer>
+  </div>
+</body>
+</html>
