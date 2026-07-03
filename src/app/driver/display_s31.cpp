@@ -15,6 +15,7 @@
 #include "../../services/music_playlist.h"
 #include "../../services/nanny.h"
 #include "../../services/storage_service.h"
+#include "../../services/video_call.h"
 #include "external_radio.h"
 #include "fonts/lv_font_cjk.h"
 #include "s31_i2c.h"
@@ -82,6 +83,7 @@ enum class Page : uint8_t {
     Nanny,
     Smb,
     EspNow,
+    Video,
 };
 
 enum class Action : intptr_t {
@@ -119,6 +121,8 @@ enum class Action : intptr_t {
     SaveRadio,
     RadioPlay,
     RadioStop,
+    Video,
+    VideoTx,
 };
 
 enum class AudioControl : intptr_t {
@@ -218,6 +222,16 @@ bool s_shown_music_playing = false;
 CoverBitmap s_music_cover_bmp = {};
 lv_image_dsc_t s_music_cover_dsc = {};
 constexpr uint16_t kMusicCoverDim = 152;
+
+// Video-call page: remote JPEG frames decode through the same cover decoder
+// into this bitmap; s_video_shown_seq tracks the last rendered frame.
+lv_obj_t *s_img_video = nullptr;
+lv_obj_t *s_lbl_video_status = nullptr;
+lv_obj_t *s_btn_video_tx_label = nullptr;
+CoverBitmap s_video_bmp = {};
+lv_image_dsc_t s_video_dsc = {};
+uint32_t s_video_shown_seq = 0;
+constexpr uint16_t kVideoFrameDim = 456; // fits the 800x480 page layout
 
 // Montserrat with a CJK font as fallback: ASCII keeps the Latin design,
 // Chinese tags/filenames render from the CJK engine. Initialised in
@@ -740,6 +754,9 @@ void clearScreen()
     s_lbl_music_icon = nullptr;
     s_shown_music_path[0] = '\0';
     s_shown_music_playing = false;
+    s_img_video = nullptr;
+    s_lbl_video_status = nullptr;
+    s_btn_video_tx_label = nullptr;
 }
 
 void topBar(lv_obj_t *scr)
@@ -892,9 +909,10 @@ void buildApps()
     s_page = Page::Apps;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    button(scr, 24, 84, 240, 120, "Music", Action::Music);
-    button(scr, 280, 84, 240, 120, "Radio", Action::Radio);
-    button(scr, 536, 84, 238, 120, "ESP-NOW", Action::EspNow);
+    button(scr, 24, 84, 180, 120, "Music", Action::Music);
+    button(scr, 214, 84, 180, 120, "Radio", Action::Radio);
+    button(scr, 404, 84, 180, 120, "ESP-NOW", Action::EspNow);
+    button(scr, 594, 84, 180, 120, "Video", Action::Video);
 
     // Shared playback target: one setting for everything the music player
     // outputs (music / nanny beacon / net radio), so it lives here next to
@@ -1505,6 +1523,82 @@ void musicToggle()
     }
 }
 
+// ---- Video call page --------------------------------------------------------
+
+void refreshVideo()
+{
+    if (s_lbl_video_status != nullptr) {
+        char status[64];
+        snprintf(status, sizeof(status), "TX %s | RX %s",
+                 VIDEO_TxEnabled() ? "ON" : "off",
+                 VIDEO_Receiving() ? "receiving" : "idle");
+        setLabel(s_lbl_video_status, s_shown_detail, sizeof(s_shown_detail), status);
+    }
+    if (s_btn_video_tx_label != nullptr) {
+        lv_label_set_text(s_btn_video_tx_label, VIDEO_TxEnabled() ? "Cam OFF" : "Cam ON");
+    }
+
+    const uint8_t *jpeg = nullptr;
+    size_t jpeg_size = 0;
+    if (s_img_video == nullptr ||
+        !VIDEO_AcquireFrame(&jpeg, &jpeg_size, &s_video_shown_seq)) {
+        return;
+    }
+    lv_image_set_src(s_img_video, nullptr);
+    COVER_Free(&s_video_bmp);
+    if (!COVER_DecodeJpeg(jpeg, jpeg_size, kVideoFrameDim, &s_video_bmp)) {
+        return;
+    }
+    memset(&s_video_dsc, 0, sizeof(s_video_dsc));
+    s_video_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    s_video_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    s_video_dsc.header.w = s_video_bmp.width;
+    s_video_dsc.header.h = s_video_bmp.height;
+    s_video_dsc.header.stride = static_cast<uint32_t>(s_video_bmp.width) * 2u;
+    s_video_dsc.data = s_video_bmp.rgb565;
+    s_video_dsc.data_size = s_video_bmp.bytes;
+    lv_image_set_src(s_img_video, &s_video_dsc);
+}
+
+void buildVideo()
+{
+    clearScreen();
+    s_page = Page::Video;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    // Remote frame view (left) + status/controls (right).
+    lv_obj_t *frame_panel = panel(scr, 24, 78, 500, 274);
+    s_img_video = lv_image_create(frame_panel);
+    lv_obj_center(s_img_video);
+    lv_obj_t *hint = label(frame_panel, &lv_font_montserrat_16, kColorDim);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 6);
+    lv_label_set_text(hint, "Remote video");
+    lv_obj_move_background(hint);
+
+    s_lbl_video_status = label(scr, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_video_status, 548, 96);
+    lv_obj_set_width(s_lbl_video_status, 228);
+    lv_label_set_text(s_lbl_video_status, "TX off | RX idle");
+
+    lv_obj_t *toggle = button(scr, 548, 140, 226, 76, VIDEO_TxEnabled() ? "Cam OFF" : "Cam ON",
+                              Action::VideoTx);
+    s_btn_video_tx_label = lv_obj_get_child(toggle, 0);
+
+    button(scr, 24, 372, 230, 76, "Back", Action::Apps);
+
+    s_video_shown_seq = 0; // repaint the latest frame on entry
+    refreshVideo();
+}
+
+void videoTxToggle()
+{
+    if (!VIDEO_SetTxEnabled(!VIDEO_TxEnabled())) {
+        ESP_LOGW(TAG, "camera start failed");
+    }
+    s_last_refresh_ms = 0;
+}
+
 void updateAudioValueLabels()
 {
     if (s_slider_speaker != nullptr && s_lbl_speaker_value != nullptr) {
@@ -2069,6 +2163,8 @@ void action(lv_event_t *event)
         case Action::Smb: buildSmb(); break;
         case Action::Apps: buildApps(); break;
         case Action::EspNow: buildEspNow(); break;
+        case Action::Video: buildVideo(); break;
+        case Action::VideoTx: videoTxToggle(); break;
         case Action::SaveSmb: saveSmbForm(); break;
         case Action::ClearSmb: clearSmbForm(); break;
         case Action::SaveNanny: saveNannyForm(); break;
@@ -2572,6 +2668,9 @@ void refresh()
     if (s_page == Page::EspNow) {
         refreshEspNowPage();
     }
+    if (s_page == Page::Video) {
+        refreshVideo();
+    }
 }
 
 // Rebuild the active page so a font-engine switch takes effect on every
@@ -2591,6 +2690,7 @@ void rebuildCurrentPage()
         case Page::Smb: buildSmb(); break;
         case Page::Apps: buildApps(); break;
         case Page::EspNow: buildEspNow(); break;
+        case Page::Video: buildVideo(); break;
     }
     s_last_refresh_ms = 0;
 }
@@ -2671,6 +2771,11 @@ extern "C" void Display_Poll(void)
     // when the value is unchanged, so this is cheap. The full refresh below stays
     // on the slower cadence.
     refreshVolume();
+    // Video frames arrive at ~5 fps; the 500 ms page cadence would halve
+    // that. Acquire is cheap when no new frame is pending.
+    if (s_page == Page::Video) {
+        refreshVideo();
+    }
     if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
         s_last_refresh_ms = now;
         refresh();

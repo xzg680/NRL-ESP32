@@ -40,6 +40,17 @@ void NRLAudioBridge_SendMediaUplink(const short *pcm8k, size_t sample_count);
 void NRLAudioBridge_SetVoiceCodec(uint8_t codec);
 uint8_t NRLAudioBridge_GetVoiceCodec(void);
 
+// Generic typed NRL packet TX (video call uses packet type 13). The payload
+// is wrapped in the standard 48-byte NRL header (callsign etc.) and sent to
+// the configured server. Thread-safe (same UDP mutex as voice).
+bool NRLAudioBridge_SendTyped(uint8_t packet_type, const uint8_t *payload, size_t payload_size);
+
+// RX hook for NRL packet type 13 (video fragments). The callback runs in
+// the bridge task; it must copy the payload and return quickly. The sender
+// callsign of the current packet is available via GetRemoteIdentity.
+typedef void (*NrlVideoRxHandler_t)(const uint8_t *payload, size_t payload_size);
+void NRLAudioBridge_SetVideoRxHandler(NrlVideoRxHandler_t handler);
+
 // Poll the USB debug serial for AT commands typed by the user. Lines are
 // terminated by CR/LF; e.g. "AT" lists commands, "AT+WIFI_SSID=MyNet" sets it.
 void NRLAudioBridge_PollSerialConsole(void);

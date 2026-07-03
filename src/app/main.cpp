@@ -11,6 +11,7 @@
 #include "../lib/ble_config.h"
 #include "../services/ai_assistant.h"
 #include "../services/espnow_link.h"
+#include "../services/video_call.h"
 #include "../services/music_player.h"
 #include "../services/music_playlist.h"
 #include "../services/nanny.h"
@@ -165,6 +166,9 @@ static void initApp()
 
     // xiaozhi AI assistant: reconnects in the background when configured.
     AI_Init();
+
+    // Video call: passive RX buffering; camera TX starts on demand.
+    VIDEO_Init();
 
 #if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (ES8311_Init()) {

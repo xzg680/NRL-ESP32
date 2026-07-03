@@ -44,6 +44,7 @@ namespace {
 constexpr uint8_t kNrlHeaderSize = 48u;
 constexpr uint8_t kNrlTypeVoice = 1u;
 constexpr uint8_t kNrlTypeOpusVoice = 8u;  // wideband voice: one 16k/20ms Opus frame per packet
+constexpr uint8_t kNrlTypeVideo = 13u;     // video-call JPEG fragments (services/video_call)
 constexpr uint8_t kNrlTypeHeartbeat = 2u;
 constexpr uint8_t kNrlTypeServerHeartbeat = 3u;
 constexpr uint8_t kNrlTypeServerVoice = 9u;
@@ -391,6 +392,9 @@ static size_t currentVoicePayloadBytes(void)
     return configured;
 }
 
+// Video-fragment RX hook (NRL packet type 13); set by services/video_call.
+static volatile NrlVideoRxHandler_t s_video_rx_handler = nullptr;
+
 // True while a media stream (nanny music / beacon) owns the network uplink;
 // mic frames are dropped for the duration so the G.711 accumulator carries
 // exactly one producer at a time.
@@ -726,6 +730,7 @@ static void logReceivedPacket(const uint8_t packet_type,
         packet_type == kNrlTypeVoice ||
         packet_type == kNrlTypeServerVoice ||
         packet_type == kNrlTypeOpusVoice ||
+        packet_type == kNrlTypeVideo ||
         packet_type == kNrlTypeSciTransparent) {
         return;
     }
@@ -1047,6 +1052,11 @@ static void bridgeTask(void *)
                     handleIncomingVoicePayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeOpusVoice) {
                     handleIncomingOpusPayload(payload, payload_size);
+                } else if (packet_type == kNrlTypeVideo) {
+                    const NrlVideoRxHandler_t video_handler = s_video_rx_handler;
+                    if (video_handler != nullptr) {
+                        video_handler(payload, payload_size);
+                    }
                 } else if (packet_type == kNrlTypeSciTransparent) {
                     handleIncomingSciPayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeAtCommand) {
@@ -1129,6 +1139,25 @@ static void bridgeTask(void *)
 }
 
 } // namespace
+
+bool NRLAudioBridge_SendTyped(const uint8_t packet_type, const uint8_t *payload, const size_t payload_size)
+{
+    if (payload == nullptr || payload_size == 0u || payload_size > kNrlMaxPayloadSize) {
+        return false;
+    }
+    static uint8_t packet[kNrlMaxPacketSize]; // bridge/video task only; sized for the max payload
+    const size_t packet_size = buildNrlPacket(packet_type, payload, payload_size,
+                                              packet, sizeof(packet));
+    if (packet_size == 0u) {
+        return false;
+    }
+    return udpSendPacket(packet, packet_size);
+}
+
+void NRLAudioBridge_SetVideoRxHandler(NrlVideoRxHandler_t handler)
+{
+    s_video_rx_handler = handler;
+}
 
 void NRLAudioBridge_SetVoiceCodec(uint8_t codec)
 {

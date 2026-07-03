@@ -11,6 +11,7 @@
 #include "driver/external_radio.h"
 #include "services/ai_assistant.h"
 #include "services/espnow_link.h"
+#include "services/video_call.h"
 #include "services/music_player.h"
 #include "services/music_playlist.h"
 #include "services/nanny.h"
@@ -852,6 +853,27 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     if (stringEqualsIgnoreCase(command.command, "STOP")) {
         MUSIC_Stop();
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "STOP", "OK");
+        return;
+    }
+
+    // Video call camera TX: AT+VIDEO=ON|OFF|? (RX is always passive; open
+    // the LCD Video page to watch the remote side).
+    if (stringEqualsIgnoreCase(command.command, "VIDEO")) {
+        if (is_query) {
+            char status[48];
+            snprintf(status, sizeof(status), "TX %s, RX %s",
+                     VIDEO_TxEnabled() ? "ON" : "OFF",
+                     VIDEO_Receiving() ? "ACTIVE" : "IDLE");
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "VIDEO", status);
+            return;
+        }
+        bool enabled = false;
+        if (!parseBoolValue(command.value, &enabled) || !VIDEO_SetTxEnabled(enabled)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "VIDEO");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "VIDEO",
+                           enabled ? "ON" : "OFF");
         return;
     }
 
