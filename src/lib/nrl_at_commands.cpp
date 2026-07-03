@@ -854,6 +854,32 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    // Music local output device: AT+OUTPUT=SPK (onboard hi-fi speaker) or
+    // AT+OUTPUT=BT (Bluetooth headset via A2DP; falls back to the speaker
+    // when the headset is unreachable). Applies from the next track.
+    if (stringEqualsIgnoreCase(command.command, "OUTPUT")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "OUTPUT",
+                               (MUSIC_GetOutput() == MUSIC_OUTPUT_BT) ? "BT" : "SPK");
+            return;
+        }
+        int output = -1;
+        if (stringEqualsIgnoreCase(command.value, "SPK") ||
+            stringEqualsIgnoreCase(command.value, "SPEAKER")) {
+            output = MUSIC_OUTPUT_SPEAKER;
+        } else if (stringEqualsIgnoreCase(command.value, "BT")) {
+            output = MUSIC_OUTPUT_BT;
+        }
+        if (output < 0) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "OUTPUT");
+            return;
+        }
+        MUSIC_SetOutput(output);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "OUTPUT",
+                           (output == MUSIC_OUTPUT_BT) ? "BT" : "SPK");
+        return;
+    }
+
     // NRL TX voice codec: AT+CODEC=G711 (8k narrowband, packet type 1) or
     // AT+CODEC=OPUS (16k wideband, packet type 8). RX always accepts both.
     if (stringEqualsIgnoreCase(command.command, "CODEC")) {

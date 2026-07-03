@@ -14,6 +14,11 @@
 #include <esp_gap_bt_api.h>
 #include <esp_hf_ag_api.h>
 #include <esp_hf_defs.h>
+#if defined(CONFIG_BT_A2DP_ENABLE)
+#include <esp_a2dp_api.h>
+#include <esp_heap_caps.h>
+#include <esp_sbc_enc.h>
+#endif
 #include <esp_coexist.h>
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -606,6 +611,297 @@ void addSaved(const esp_bd_addr_t bda, const char *name)
     persistSaved();
 }
 
+#if defined(CONFIG_BT_A2DP_ENABLE)
+// ---- A2DP source: music streaming (IDF6 app-encoded-SBC model) -------------
+// The endpoint advertises exactly one configuration -- 44.1 kHz joint stereo,
+// 16 blocks, 8 subbands, loudness -- so codec negotiation is deterministic
+// and the SBC encoder config never depends on the peer's answer beyond the
+// bitpool ceiling. The music player writes 44.1 kHz stereo PCM into a PSRAM
+// ring; a paced TX task encodes and ships MTU-sized SBC batches.
+
+constexpr uint8_t kA2dSeid = 1;
+constexpr uint16_t kA2dBitpool = 53;                  // A2DP "high quality" for joint stereo
+constexpr size_t kA2dPcmRingSamples = 96 * 1024;      // int16: 192 KB PSRAM ~= 1.1 s
+constexpr size_t kA2dSbcFrameSamplesPerCh = 16 * 8;   // blocks * subbands = 128
+
+bool s_a2d_connected = false;
+volatile bool s_a2d_media_started = false;
+volatile bool s_a2d_want_stream = false;
+esp_a2d_conn_hdl_t s_a2d_conn_hdl = 0;
+uint16_t s_a2d_mtu = 0;
+void *s_sbc_enc = nullptr;
+int s_sbc_in_bytes = 0;   // PCM bytes per SBC frame (128 samples * 2ch * 2B = 512)
+int s_sbc_out_bytes = 0;  // encoded bytes per SBC frame
+int16_t *s_a2d_ring = nullptr;
+volatile size_t s_a2d_head = 0; // producer (NRL_BtA2dp_Write)
+volatile size_t s_a2d_tail = 0; // consumer (TX task)
+TaskHandle_t s_a2d_tx_task = nullptr;
+volatile bool s_a2d_tx_run = false;
+uint32_t s_a2d_timestamp = 0;
+
+size_t a2dRingUsed()
+{
+    return (s_a2d_head + kA2dPcmRingSamples - s_a2d_tail) % kA2dPcmRingSamples;
+}
+
+bool a2dOpenEncoder()
+{
+    if (s_sbc_enc != nullptr) {
+        return true;
+    }
+    esp_sbc_enc_config_t cfg = ESP_SBC_STD_ENC_CONFIG_DEFAULT();
+    cfg.sbc_mode = ESP_SBC_MODE_STD;
+    cfg.allocation_method = ESP_SBC_ALLOC_LOUDNESS;
+    cfg.ch_mode = ESP_SBC_CH_MODE_JOINT_STEREO;
+    cfg.sample_rate = 44100;
+    cfg.bits_per_sample = 16;
+    cfg.bitpool = kA2dBitpool;
+    cfg.block_length = 16;
+    cfg.sub_bands_num = 8;
+    if (esp_sbc_enc_open(&cfg, sizeof(cfg), &s_sbc_enc) != ESP_AUDIO_ERR_OK) {
+        ESP_LOGE(TAG, "A2DP SBC encoder open failed");
+        s_sbc_enc = nullptr;
+        return false;
+    }
+    if (esp_sbc_enc_get_frame_size(s_sbc_enc, &s_sbc_in_bytes, &s_sbc_out_bytes) != ESP_AUDIO_ERR_OK ||
+        s_sbc_in_bytes <= 0 || s_sbc_out_bytes <= 0) {
+        ESP_LOGE(TAG, "A2DP SBC frame size query failed");
+        esp_sbc_enc_close(s_sbc_enc);
+        s_sbc_enc = nullptr;
+        return false;
+    }
+    ESP_LOGI(TAG, "A2DP SBC up: 44.1k joint-stereo bp%u, frame %dB->%dB",
+             (unsigned)kA2dBitpool, s_sbc_in_bytes, s_sbc_out_bytes);
+    return true;
+}
+
+void a2dTxTask(void *)
+{
+    // Pace by the 44.1 kHz sample clock, staying a small lead ahead so the
+    // sink's jitter buffer keeps filled without us bursting the ACL.
+    const size_t frame_samples = kA2dSbcFrameSamplesPerCh * 2u; // interleaved L+R
+    const int64_t start_us = esp_timer_get_time();
+    uint64_t sent_frames = 0; // SBC frames sent
+
+    int16_t *pcm = static_cast<int16_t *>(heap_caps_malloc(frame_samples * sizeof(int16_t),
+                                                           MALLOC_CAP_INTERNAL));
+    while (s_a2d_tx_run && pcm != nullptr) {
+        // Frames per packet bounded by the negotiated MTU (RTP/AVDTP header
+        // overhead is handled by the stack below the buff API).
+        size_t fpp = (s_a2d_mtu > 32u) ? ((s_a2d_mtu - 32u) / static_cast<size_t>(s_sbc_out_bytes)) : 4u;
+        if (fpp == 0u) {
+            fpp = 1u;
+        }
+        if (fpp > 8u) {
+            fpp = 8u;
+        }
+
+        esp_a2d_audio_buff_t *buff = esp_a2d_audio_buff_alloc(
+            static_cast<uint16_t>(fpp * static_cast<size_t>(s_sbc_out_bytes)));
+        if (buff == nullptr) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        size_t encoded_frames = 0;
+        uint16_t data_len = 0;
+        for (size_t f = 0; f < fpp; ++f) {
+            // Pull one SBC frame's worth of PCM; zero-fill on underrun so the
+            // stream clock keeps running (brief silence beats a stall).
+            size_t got = 0;
+            while (got < frame_samples) {
+                if (s_a2d_tail == s_a2d_head) {
+                    break;
+                }
+                pcm[got++] = s_a2d_ring[s_a2d_tail];
+                s_a2d_tail = (s_a2d_tail + 1u) % kA2dPcmRingSamples;
+            }
+            if (got < frame_samples) {
+                memset(pcm + got, 0, (frame_samples - got) * sizeof(int16_t));
+            }
+
+            esp_audio_enc_in_frame_t in = {};
+            in.buffer = reinterpret_cast<uint8_t *>(pcm);
+            in.len = static_cast<uint32_t>(frame_samples * sizeof(int16_t));
+            esp_audio_enc_out_frame_t out = {};
+            out.buffer = buff->data + data_len;
+            out.len = static_cast<uint32_t>(s_sbc_out_bytes);
+            if (esp_sbc_enc_process(s_sbc_enc, &in, &out) != ESP_AUDIO_ERR_OK) {
+                break;
+            }
+            data_len = static_cast<uint16_t>(data_len + out.encoded_bytes);
+            ++encoded_frames;
+        }
+
+        if (encoded_frames == 0u) {
+            esp_a2d_audio_buff_free(buff);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        buff->number_frame = static_cast<uint16_t>(encoded_frames);
+        buff->data_len = data_len;
+        buff->timestamp = s_a2d_timestamp;
+        s_a2d_timestamp += static_cast<uint32_t>(encoded_frames * kA2dSbcFrameSamplesPerCh);
+
+        // Queue-full is normal back-pressure: retry the same buff briefly.
+        bool sent = false;
+        for (int attempt = 0; attempt < 20 && s_a2d_tx_run; ++attempt) {
+            const esp_err_t err = esp_a2d_source_audio_data_send(s_a2d_conn_hdl, buff);
+            if (err == ESP_OK) {
+                sent = true;
+                break;
+            }
+            if (err != ESP_FAIL) { // invalid state/arg: drop
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+        if (!sent) {
+            esp_a2d_audio_buff_free(buff);
+        }
+        sent_frames += encoded_frames;
+
+        // Real-time pacing: keep ~120 ms of lead over the wall clock.
+        const int64_t audio_us = static_cast<int64_t>(sent_frames) * kA2dSbcFrameSamplesPerCh * 1000000LL / 44100LL;
+        const int64_t lead_us = audio_us - (esp_timer_get_time() - start_us) - 120000LL;
+        if (lead_us > 10000LL) {
+            vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(lead_us / 1000LL)));
+        }
+    }
+
+    if (pcm != nullptr) {
+        heap_caps_free(pcm);
+    }
+    s_a2d_tx_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void a2dStopTx()
+{
+    s_a2d_tx_run = false;
+    for (int i = 0; i < 100 && s_a2d_tx_task != nullptr; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    s_a2d_media_started = false;
+}
+
+void a2dStartTxIfReady()
+{
+    if (!s_a2d_want_stream || s_a2d_tx_task != nullptr) {
+        return;
+    }
+    if (s_a2d_ring == nullptr) {
+        s_a2d_ring = static_cast<int16_t *>(
+            heap_caps_malloc(kA2dPcmRingSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+        if (s_a2d_ring == nullptr) {
+            ESP_LOGE(TAG, "A2DP ring alloc failed");
+            return;
+        }
+    }
+    if (!a2dOpenEncoder()) {
+        return;
+    }
+    s_a2d_head = 0;
+    s_a2d_tail = 0;
+    s_a2d_timestamp = 0;
+    s_a2d_tx_run = true;
+    // Core 1 with the other audio work; priority under the voice passthrough.
+    if (xTaskCreatePinnedToCore(a2dTxTask, "a2dp_tx", 4096, nullptr, 7, &s_a2d_tx_task, 1) != pdPASS) {
+        s_a2d_tx_run = false;
+        s_a2d_tx_task = nullptr;
+        ESP_LOGE(TAG, "A2DP tx task create failed");
+        return;
+    }
+    s_a2d_media_started = true;
+    ESP_LOGI(TAG, "A2DP streaming started (mtu=%u)", (unsigned)s_a2d_mtu);
+}
+
+void a2dpCb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_A2D_CONNECTION_STATE_EVT:
+        if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+            s_a2d_connected = true;
+            s_a2d_conn_hdl = param->conn_stat.conn_hdl;
+            s_a2d_mtu = param->conn_stat.audio_mtu;
+            ESP_LOGI(TAG, "A2DP connected (mtu=%u)", (unsigned)s_a2d_mtu);
+            if (s_a2d_want_stream) {
+                esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+            }
+        } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+            ESP_LOGI(TAG, "A2DP disconnected");
+            s_a2d_connected = false;
+            a2dStopTx();
+        }
+        break;
+    case ESP_A2D_AUDIO_CFG_EVT:
+        // Endpoint advertises a single configuration, so the negotiated
+        // codec always matches the encoder we open; just log it.
+        ESP_LOGI(TAG, "A2DP codec configured (type=%d)", param->audio_cfg.mcc.type);
+        break;
+    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+        if (param->media_ctrl_stat.status != ESP_A2D_MEDIA_CTRL_ACK_SUCCESS) {
+            ESP_LOGW(TAG, "A2DP media ctrl cmd=%d nack=%d",
+                     param->media_ctrl_stat.cmd, param->media_ctrl_stat.status);
+            break;
+        }
+        if (param->media_ctrl_stat.cmd == ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY && s_a2d_want_stream) {
+            esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
+        } else if (param->media_ctrl_stat.cmd == ESP_A2D_MEDIA_CTRL_START) {
+            a2dStartTxIfReady();
+        } else if (param->media_ctrl_stat.cmd == ESP_A2D_MEDIA_CTRL_SUSPEND) {
+            a2dStopTx();
+        }
+        break;
+    case ESP_A2D_AUDIO_STATE_EVT:
+        if (param->audio_stat.state == ESP_A2D_AUDIO_STATE_SUSPEND) {
+            a2dStopTx();
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+void a2dRegisterProfile()
+{
+    esp_a2d_register_callback(a2dpCb);
+    if (esp_a2d_source_init() != ESP_OK) {
+        ESP_LOGE(TAG, "A2DP source init failed");
+        return;
+    }
+    esp_a2d_mcc_t mcc = {};
+    mcc.type = ESP_A2D_MCT_SBC;
+    mcc.cie.sbc_info.samp_freq = ESP_A2D_SBC_CIE_SF_44K;
+    mcc.cie.sbc_info.ch_mode = ESP_A2D_SBC_CIE_CH_MODE_JOINT_STEREO;
+    mcc.cie.sbc_info.block_len = ESP_A2D_SBC_CIE_BLOCK_LEN_16;
+    mcc.cie.sbc_info.num_subbands = ESP_A2D_SBC_CIE_NUM_SUBBANDS_8;
+    mcc.cie.sbc_info.alloc_mthd = ESP_A2D_SBC_CIE_ALLOC_MTHD_LOUDNESS;
+    mcc.cie.sbc_info.min_bitpool = 2;
+    mcc.cie.sbc_info.max_bitpool = kA2dBitpool;
+    if (esp_a2d_source_register_stream_endpoint(kA2dSeid, &mcc) != ESP_OK) {
+        ESP_LOGE(TAG, "A2DP endpoint register failed");
+    }
+}
+
+void a2dTearDown()
+{
+    s_a2d_want_stream = false;
+    a2dStopTx();
+    if (s_a2d_connected) {
+        esp_a2d_source_disconnect(s_peer_bda);
+        for (int i = 0; i < 50 && s_a2d_connected; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+    esp_a2d_source_deinit();
+    if (s_sbc_enc != nullptr) {
+        esp_sbc_enc_close(s_sbc_enc);
+        s_sbc_enc = nullptr;
+    }
+}
+#endif // CONFIG_BT_A2DP_ENABLE
+
 bool stackUp()
 {
     if (s_stack_up) {
@@ -658,6 +954,12 @@ bool stackUp()
     // The SCO data-path callbacks are registered once the AG profile reports it
     // is up (ESP_HF_PROF_STATE_EVT), matching the IDF hfp_ag example.
 
+#if defined(CONFIG_BT_A2DP_ENABLE)
+    // A2DP source rides the same ACL as HFP; music streaming starts on
+    // demand (NRL_BtA2dp_RequestStart) once a headset is connected.
+    a2dRegisterProfile();
+#endif
+
     // Legacy pairing: variable PIN; we answer "0000" on a PIN request. (Match
     // the IDF example -- do NOT force an IO capability via set_security_param,
     // which broke SSP/pairing with some headsets.)
@@ -708,6 +1010,9 @@ void stackDown()
     // (use-after-free in transmit_command).
     esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
     s_have_peer = false;  // don't let Poll re-arm a reconnect during teardown
+#if defined(CONFIG_BT_A2DP_ENABLE)
+    a2dTearDown();
+#endif
     if (s_connected || s_connecting) {
         esp_hf_ag_slc_disconnect(s_peer_bda);
         for (int i = 0; i < 50 && (s_connected || s_connecting); ++i) {
@@ -1032,6 +1337,74 @@ void NRL_BtHfp_Poll(void)
     }
 }
 
+// ---- A2DP source public API -------------------------------------------------
+#if defined(CONFIG_BT_A2DP_ENABLE)
+
+bool NRL_BtA2dp_RequestStart(void)
+{
+    if (!s_enabled || !s_stack_up || !s_have_peer) {
+        return false;
+    }
+    s_a2d_want_stream = true;
+    if (!s_a2d_connected) {
+        // Ride the existing ACL to the chosen headset; the connection event
+        // continues the CHECK_SRC_RDY -> START ladder.
+        return esp_a2d_source_connect(s_peer_bda) == ESP_OK;
+    }
+    if (!s_a2d_media_started) {
+        return esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY) == ESP_OK;
+    }
+    return true;
+}
+
+void NRL_BtA2dp_RequestStop(void)
+{
+    s_a2d_want_stream = false;
+    if (s_a2d_media_started) {
+        (void)esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
+    }
+    a2dStopTx();
+}
+
+bool NRL_BtA2dp_IsStreaming(void)
+{
+    return s_a2d_media_started;
+}
+
+size_t NRL_BtA2dp_Write(const int16_t *stereo, size_t frames)
+{
+    if (stereo == nullptr || !s_a2d_media_started || s_a2d_ring == nullptr) {
+        return 0u;
+    }
+    // Producer blocks while the ring is full: that back-pressure paces the
+    // music decode loop the same way the I2S DMA does for the speaker path.
+    size_t written = 0;
+    int waits = 0;
+    const size_t total = frames * 2u; // interleaved samples
+    while (written < total && s_a2d_media_started) {
+        const size_t next = (s_a2d_head + 1u) % kA2dPcmRingSamples;
+        if (next == s_a2d_tail) {
+            if (++waits > 40) { // ~400 ms: give up rather than wedge the player
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        s_a2d_ring[s_a2d_head] = stereo[written++];
+        s_a2d_head = next;
+    }
+    return written / 2u;
+}
+
+#else // HFP without A2DP in this configuration
+
+bool NRL_BtA2dp_RequestStart(void) { return false; }
+void NRL_BtA2dp_RequestStop(void) {}
+bool NRL_BtA2dp_IsStreaming(void) { return false; }
+size_t NRL_BtA2dp_Write(const int16_t *, size_t) { return 0u; }
+
+#endif // CONFIG_BT_A2DP_ENABLE
+
 #else // !CONFIG_BT_HFP_AG_ENABLE -- non-S31 boards: no Bluetooth HFP.
 
 #include <string.h>
@@ -1075,5 +1448,9 @@ void NRL_BtHfp_PushPlayback(const int16_t *, size_t) {}
 int NRL_BtHfp_GetVolumePercent(void) { return -1; }
 void NRL_BtHfp_AdjustVolume(int) {}
 void NRL_BtHfp_SetVolumePercent(int) {}
+bool NRL_BtA2dp_RequestStart(void) { return false; }
+void NRL_BtA2dp_RequestStop(void) {}
+bool NRL_BtA2dp_IsStreaming(void) { return false; }
+size_t NRL_BtA2dp_Write(const int16_t *, size_t) { return 0u; }
 
 #endif // CONFIG_BT_HFP_AG_ENABLE

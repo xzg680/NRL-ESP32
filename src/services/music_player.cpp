@@ -5,6 +5,7 @@
 #include "services/config_notify.h"
 #include "driver/es8389.h"
 #include "lib/nrl_audio_bridge.h"
+#include "lib/nrl_bt_hfp.h"
 #include "media/media_decoder.h"
 
 #include <esp_heap_caps.h>
@@ -14,6 +15,7 @@
 #include <freertos/task.h>
 #include <nvs.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -39,6 +41,86 @@ static volatile int s_target = MUSIC_TARGET_LOCAL;
 static int16_t *s_net_buffer = nullptr;
 static size_t s_net_capacity = 0;
 
+// Local output device (speaker hi-fi path vs BT headset A2DP).
+static volatile int s_output = MUSIC_OUTPUT_SPEAKER;
+
+// 44.1 kHz stereo scratch + linear resampler state for the A2DP branch.
+static int16_t *s_bt_buffer = nullptr;
+static size_t s_bt_capacity = 0; // in interleaved samples
+
+struct BtResampler {
+    float pos;
+    float step;
+    uint8_t channels;
+    int16_t carry_l;
+    int16_t carry_r;
+    int has_carry;
+};
+
+static void bt_resampler_init(BtResampler *rs, const uint32_t in_rate, const uint8_t channels)
+{
+    memset(rs, 0, sizeof(*rs));
+    rs->step = static_cast<float>(in_rate) / 44100.0f;
+    rs->channels = channels;
+}
+
+// in: interleaved PCM16 (mono or stereo) frames; out: 44.1 kHz stereo
+// interleaved. Same floorf/carry scheme as voice_resampler so chunk
+// boundaries stay continuous.
+static size_t bt_resampler_process(BtResampler *rs, const int16_t *in, const size_t in_frames,
+                                   int16_t *out, const size_t out_cap_frames)
+{
+    if (in_frames == 0u) {
+        return 0;
+    }
+    const uint8_t ch = rs->channels;
+    size_t produced = 0;
+    float pos = rs->pos;
+    while (produced < out_cap_frames) {
+        const float fbase = floorf(pos);
+        const long base = static_cast<long>(fbase);
+        if (base + 1 >= static_cast<long>(in_frames)) {
+            break;
+        }
+        const float frac = pos - fbase;
+        int16_t l0, r0;
+        if (base < 0) {
+            l0 = rs->has_carry ? rs->carry_l : in[0];
+            r0 = rs->has_carry ? rs->carry_r : ((ch == 2u) ? in[1] : in[0]);
+        } else {
+            l0 = in[base * ch];
+            r0 = (ch == 2u) ? in[base * ch + 1] : l0;
+        }
+        const size_t nf = (base < 0) ? 0u : static_cast<size_t>(base + 1);
+        const int16_t l1 = in[nf * ch];
+        const int16_t r1 = (ch == 2u) ? in[nf * ch + 1] : l1;
+        out[produced * 2u] = static_cast<int16_t>(l0 + (l1 - l0) * frac);
+        out[produced * 2u + 1u] = static_cast<int16_t>(r0 + (r1 - r0) * frac);
+        ++produced;
+        pos += rs->step;
+    }
+    rs->pos = pos - static_cast<float>(in_frames);
+    rs->carry_l = in[(in_frames - 1u) * ch];
+    rs->carry_r = (ch == 2u) ? in[(in_frames - 1u) * ch + 1u] : rs->carry_l;
+    rs->has_carry = 1;
+    return produced;
+}
+
+static bool ensure_bt_capacity(const size_t samples)
+{
+    if (s_bt_capacity >= samples) {
+        return true;
+    }
+    int16_t *grown = static_cast<int16_t *>(
+        heap_caps_realloc(s_bt_buffer, samples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (grown == nullptr) {
+        return false;
+    }
+    s_bt_buffer = grown;
+    s_bt_capacity = samples;
+    return true;
+}
+
 // Playback target + net-radio station persist in NVS so the web portal and
 // LCD UI survive a reboot (the AT path shares the same setters).
 constexpr const char *kMediaNvsNamespace = "media";
@@ -55,6 +137,11 @@ static void media_config_load(void)
         target <= MUSIC_TARGET_BOTH) {
         s_target = target;
     }
+    uint8_t output = MUSIC_OUTPUT_SPEAKER;
+    if (nvs_get_u8(nvs, "output", &output) == ESP_OK &&
+        output <= MUSIC_OUTPUT_BT) {
+        s_output = output;
+    }
     size_t len = sizeof(s_radio_url);
     if (nvs_get_str(nvs, "radio_url", s_radio_url, &len) != ESP_OK) {
         s_radio_url[0] = '\0';
@@ -70,6 +157,7 @@ static void media_config_save(void)
         return;
     }
     (void)nvs_set_u8(nvs, "target", static_cast<uint8_t>(s_target));
+    (void)nvs_set_u8(nvs, "output", static_cast<uint8_t>(s_output));
     (void)nvs_set_str(nvs, "radio_url", s_radio_url);
     (void)nvs_commit(nvs);
     nvs_close(nvs);
@@ -121,9 +209,11 @@ static void player_task(void *)
     const bool to_net = (target != MUSIC_TARGET_LOCAL);
 
     bool hifi_acquired = false;
+    bool bt_active = false;
     bool format_ready = false;
     bool reached_end = false;
     VoiceResampler resampler = {};
+    BtResampler bt_resampler = {};
     // Pacing for the net-only case: without the I2S DMA back-pressure the
     // decode loop would free-run; throttle to real time by the 8 kHz clock.
     int64_t net_start_us = 0;
@@ -160,11 +250,26 @@ static void player_task(void *)
                 break;
             }
             if (to_local) {
-                if (!ES8389_HifiAcquire(info.sample_rate_hz, 16u, 2u)) {
-                    ESP_LOGE(TAG, "hi-fi speaker unavailable (wrong board, or voice busy)");
-                    break;
+                // Preferred local device: BT headset (A2DP) when selected and
+                // reachable, otherwise the onboard hi-fi speaker.
+                if (s_output == MUSIC_OUTPUT_BT && NRL_BtA2dp_RequestStart()) {
+                    for (int i = 0; i < 40 && !NRL_BtA2dp_IsStreaming() && !s_stop_requested; ++i) {
+                        vTaskDelay(pdMS_TO_TICKS(100)); // connect + negotiate + start
+                    }
+                    bt_active = NRL_BtA2dp_IsStreaming();
+                    if (bt_active) {
+                        bt_resampler_init(&bt_resampler, info.sample_rate_hz, info.channels);
+                    } else {
+                        ESP_LOGW(TAG, "A2DP not ready, falling back to speaker");
+                    }
                 }
-                hifi_acquired = true;
+                if (!bt_active) {
+                    if (!ES8389_HifiAcquire(info.sample_rate_hz, 16u, 2u)) {
+                        ESP_LOGE(TAG, "hi-fi speaker unavailable (wrong board, or voice busy)");
+                        break;
+                    }
+                    hifi_acquired = true;
+                }
             }
             if (to_net) {
                 if (!VOICE_RESAMPLER_Init(&resampler, info.sample_rate_hz, info.channels)) {
@@ -211,7 +316,22 @@ static void player_task(void *)
             }
         }
 
-        if (to_local) {
+        if (to_local && bt_active) {
+            const size_t in_frames = bytes / (sizeof(int16_t) * info.channels);
+            const size_t out_max = static_cast<size_t>(in_frames * 44100ull / info.sample_rate_hz) + 8u;
+            if (!ensure_bt_capacity(out_max * 2u)) {
+                ESP_LOGE(TAG, "bt buffer alloc failed");
+                break;
+            }
+            const size_t out_frames = bt_resampler_process(
+                &bt_resampler, reinterpret_cast<const int16_t *>(pcm), in_frames,
+                s_bt_buffer, out_max);
+            if (out_frames > 0u &&
+                NRL_BtA2dp_Write(s_bt_buffer, out_frames) == 0u && !NRL_BtA2dp_IsStreaming()) {
+                ESP_LOGW(TAG, "A2DP stream lost, stopping track");
+                break;
+            }
+        } else if (to_local) {
             if (info.channels == 2u) {
                 if (!ES8389_HifiWrite(pcm, bytes)) {
                     break;
@@ -244,6 +364,11 @@ static void player_task(void *)
     }
     if (hifi_acquired) {
         ES8389_HifiRelease();
+    }
+    if (bt_active) {
+        // Suspend the media channel so HFP voice (SCO) has the bandwidth;
+        // the A2DP connection stays for a quick restart on the next track.
+        NRL_BtA2dp_RequestStop();
     }
 
     s_playing = false;
@@ -353,6 +478,20 @@ extern "C" void MUSIC_SetTarget(const int target)
 extern "C" int MUSIC_GetTarget(void)
 {
     return s_target;
+}
+
+extern "C" void MUSIC_SetOutput(const int output)
+{
+    if (output >= MUSIC_OUTPUT_SPEAKER && output <= MUSIC_OUTPUT_BT &&
+        output != s_output) {
+        s_output = output;
+        media_config_save();
+    }
+}
+
+extern "C" int MUSIC_GetOutput(void)
+{
+    return s_output;
 }
 
 extern "C" bool MUSIC_SetRadioUrl(const char *url)

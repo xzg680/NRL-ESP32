@@ -32,6 +32,17 @@ typedef enum {
 void MUSIC_SetTarget(int target);
 int MUSIC_GetTarget(void);
 
+// Local output device: onboard speaker (hi-fi path) or the Bluetooth
+// headset (A2DP source, 44.1 kHz SBC). Applies from the next track; falls
+// back to the speaker when the headset/A2DP is unavailable. Persisted.
+typedef enum {
+    MUSIC_OUTPUT_SPEAKER = 0,
+    MUSIC_OUTPUT_BT = 1,
+} MusicOutput_t;
+
+void MUSIC_SetOutput(int output);
+int MUSIC_GetOutput(void);
+
 // Net-radio station URL (http:// or https://), persisted in NVS so the
 // web portal / LCD UI can re-tune the saved station. Empty when unset.
 bool MUSIC_SetRadioUrl(const char *url);

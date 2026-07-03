@@ -46,9 +46,10 @@ CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
 CONFIG_BT_CTRL_BR_EDR_MAX_SYNC_CONN=1
 # SCO/voice PCM travels over HCI so the app receives/sends it via data callbacks.
 CONFIG_BT_CTRL_BR_EDR_SCO_DATA_PATH_HCI=y
-# Bluedroid Classic profiles: HFP Audio Gateway only (no A2DP, no HFP client).
+# Bluedroid Classic profiles: HFP Audio Gateway (voice) + A2DP source
+# (music to the headset; app-side SBC encoding via esp_audio_codec).
 CONFIG_BT_CLASSIC_ENABLED=y
-# CONFIG_BT_A2DP_ENABLE is not set
+CONFIG_BT_A2DP_ENABLE=y
 CONFIG_BT_HFP_ENABLE=y
 CONFIG_BT_HFP_AG_ENABLE=y
 # CONFIG_BT_HFP_CLIENT_ENABLE is not set

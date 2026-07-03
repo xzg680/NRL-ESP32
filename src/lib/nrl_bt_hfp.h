@@ -95,6 +95,27 @@ void NRL_BtHfp_AdjustVolume(int direction);
 // the headset and saves the value for that device. Used by the on-screen slider.
 void NRL_BtHfp_SetVolumePercent(int percent);
 
+// ---- A2DP source: music streaming to the headset ---------------------------
+// The IDF6 A2DP source takes app-encoded SBC frames; this module owns the
+// SBC encoder (fixed 44.1 kHz joint-stereo endpoint) and a paced TX task.
+// The music player feeds 44.1 kHz stereo PCM through NRL_BtA2dp_Write. On
+// boards without Bluedroid A2DP all of these are no-op stubs.
+
+// Async: connect the A2DP channel to the current HFP headset peer and start
+// media streaming. Returns false when no peer is known / BT is off.
+bool NRL_BtA2dp_RequestStart(void);
+
+// Suspend media streaming (connection stays for a quick restart).
+void NRL_BtA2dp_RequestStop(void);
+
+// True once the media channel is started and the TX task is running.
+bool NRL_BtA2dp_IsStreaming(void);
+
+// Queue 44.1 kHz stereo interleaved PCM (frame = L+R pair). Blocks briefly
+// while the ring is full (this paces the producer); returns frames accepted
+// (0 when not streaming).
+size_t NRL_BtA2dp_Write(const int16_t *stereo, size_t frames);
+
 #ifdef __cplusplus
 }
 #endif
