@@ -11,6 +11,7 @@
 
 #include "audio/audio_focus.h"
 #include "audio/audio_router.h"
+#include "media/opus_voice.h"
 #include "driver/audio_passthrough.h"
 #include "driver/board_pins.h"
 #include "driver/es8311.h"
@@ -22,6 +23,7 @@
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
+#include <nvs.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -41,6 +43,7 @@ namespace {
 
 constexpr uint8_t kNrlHeaderSize = 48u;
 constexpr uint8_t kNrlTypeVoice = 1u;
+constexpr uint8_t kNrlTypeOpusVoice = 8u;  // wideband voice: one 16k/20ms Opus frame per packet
 constexpr uint8_t kNrlTypeHeartbeat = 2u;
 constexpr uint8_t kNrlTypeServerHeartbeat = 3u;
 constexpr uint8_t kNrlTypeServerVoice = 9u;
@@ -393,28 +396,36 @@ static size_t currentVoicePayloadBytes(void)
 // exactly one producer at a time.
 static volatile bool s_media_uplink_active = false;
 
+// Captured-audio gate shared by the G.711 and Opus uplink paths: transmit
+// only while the radio squelch is open and outside the tail-suppression
+// window (see stopDownlinkPlayback).
+static bool uplinkGateOpen(void)
+{
+    if (!STATUS_IO_IsSqlActive()) {
+        return false;
+    }
+    // Tail-audio suppression: for a configured window after the device
+    // finishes playing a network voice stream out to the radio, drop
+    // captured radio audio so a repeater's echo response is not bounced
+    // back onto the network (which would mutually re-trigger two or more
+    // networked devices). Media uplink is not radio echo, so ungated.
+    if (s_tail_suppress_until_ms != 0u) {
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        if (static_cast<int32_t>(now - s_tail_suppress_until_ms) < 0) {
+            return false;
+        }
+        s_tail_suppress_until_ms = 0u;
+    }
+    return true;
+}
+
 static void sendVoiceFrameInternal(const int16_t *pcm8k, const size_t sample_count, const bool gated)
 {
     if (pcm8k == nullptr || sample_count == 0u) {
         return;
     }
-    if (gated) {
-        if (!STATUS_IO_IsSqlActive()) {
-            return;
-        }
-
-        // Tail-audio suppression: for a configured window after the device
-        // finishes playing a network voice stream out to the radio, drop
-        // captured radio audio so a repeater's echo response is not bounced
-        // back onto the network (which would mutually re-trigger two or more
-        // networked devices). Media uplink is not radio echo, so ungated.
-        if (s_tail_suppress_until_ms != 0u) {
-            const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
-            if (static_cast<int32_t>(now - s_tail_suppress_until_ms) < 0) {
-                return;
-            }
-            s_tail_suppress_until_ms = 0u;
-        }
+    if (gated && !uplinkGateOpen()) {
+        return;
     }
 
     static uint8_t alaw_accumulator[kG711PayloadMaxBytes];
@@ -453,10 +464,58 @@ static void sendVoiceFrame(const int16_t *pcm8k, const size_t sample_count)
     sendVoiceFrameInternal(pcm8k, sample_count, true);
 }
 
-// Router sink for the NRL uplink. Frames arrive already at 8 kHz (the router
-// downsamples the 16 kHz raw-mic pushes; AFE and BT-mic pushes are 8 kHz
-// natively). PTT/SQL gating, tail suppression and G.711 packetisation all
-// stay in sendVoiceFrame.
+// ---- Wideband voice (NRL packet type 8, shared Opus codec) -----------------
+// TX codec selection: 0 = G.711 8k (type 1, default), 1 = Opus 16k (type 8).
+// Persisted in NVS namespace "voice". RX always accepts both types.
+constexpr const char *kVoiceNvsNamespace = "voice";
+constexpr uint32_t kOpusFrameMs = 20u;
+constexpr size_t kOpusFrameSamples = (OPUS_VOICE_SAMPLE_RATE / 1000u) * kOpusFrameMs; // 320
+volatile uint8_t s_voice_codec = 0u;
+OpusVoiceEnc *s_opus_enc = nullptr;
+OpusVoiceDec *s_opus_dec = nullptr;
+int16_t s_opus_tx_stage[kOpusFrameSamples];
+size_t s_opus_tx_fill = 0u;
+
+static void sendOpusVoice16k(const int16_t *pcm16k, const size_t sample_count)
+{
+    if (!uplinkGateOpen()) {
+        s_opus_tx_fill = 0u; // drop the partial frame on squelch close
+        return;
+    }
+    if (s_opus_enc == nullptr) {
+        s_opus_enc = OPUS_VOICE_EncOpen(kOpusFrameMs);
+        if (s_opus_enc == nullptr) {
+            return;
+        }
+    }
+    for (size_t i = 0; i < sample_count; ++i) {
+        s_opus_tx_stage[s_opus_tx_fill++] = pcm16k[i];
+        if (s_opus_tx_fill < kOpusFrameSamples) {
+            continue;
+        }
+        s_opus_tx_fill = 0u;
+        uint8_t frame[OPUS_VOICE_MAX_FRAME_BYTES];
+        const int encoded = OPUS_VOICE_EncProcess(s_opus_enc, s_opus_tx_stage,
+                                                  kOpusFrameSamples, frame, sizeof(frame));
+        if (encoded <= 0) {
+            continue;
+        }
+        uint8_t packet[kNrlHeaderSize + OPUS_VOICE_MAX_FRAME_BYTES];
+        const size_t packet_size = buildNrlPacket(kNrlTypeOpusVoice, frame,
+                                                  static_cast<size_t>(encoded),
+                                                  packet, sizeof(packet));
+        if (packet_size > 0u) {
+            udpSendPacket(packet, packet_size);
+        }
+    }
+}
+
+// Router sink for the NRL uplink, registered at 16 kHz (the voice domain's
+// native rate): raw mic frames arrive untouched; 8 kHz producers (AFE, BT
+// SCO) are upsampled by the router. In G.711 mode the pair-average
+// downsample happens here -- the same conversion the router used to do --
+// so the narrowband path sounds as before; in Opus mode the full 16 kHz
+// bandwidth reaches the encoder.
 static void uplinkSinkWrite(const uint8_t source_id,
                             const int16_t *samples,
                             const size_t sample_count,
@@ -472,7 +531,28 @@ static void uplinkSinkWrite(const uint8_t source_id,
     if (source_id == AUDIO_SRC_MIC && NRL_BtHfp_IsConnected()) {
         return;
     }
-    sendVoiceFrame(samples, sample_count);
+
+    if (s_voice_codec == 1u) {
+        sendOpusVoice16k(samples, sample_count);
+        return;
+    }
+
+    // G.711: 16k -> 8k pair average, sliced to bound the stack buffer.
+    int16_t pcm8k[160];
+    size_t offset = 0;
+    while (offset < sample_count) {
+        const size_t take = ((sample_count - offset) < 320u) ? (sample_count - offset) : 320u;
+        const size_t pairs = take / 2u;
+        for (size_t i = 0; i < pairs; ++i) {
+            const int32_t a = samples[offset + i * 2u];
+            const int32_t b = samples[offset + i * 2u + 1u];
+            pcm8k[i] = static_cast<int16_t>((a + b) / 2);
+        }
+        if (pairs > 0u) {
+            sendVoiceFrame(pcm8k, pairs);
+        }
+        offset += take;
+    }
 }
 
 // Router sink for the Bluetooth headset speaker (8 kHz SCO). Pushing while
@@ -645,6 +725,7 @@ static void logReceivedPacket(const uint8_t packet_type,
         packet_type == kNrlTypeServerHeartbeat ||
         packet_type == kNrlTypeVoice ||
         packet_type == kNrlTypeServerVoice ||
+        packet_type == kNrlTypeOpusVoice ||
         packet_type == kNrlTypeSciTransparent) {
         return;
     }
@@ -755,6 +836,48 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
             AudioRouter_PushFrame(AUDIO_SRC_NRL_DOWNLINK, 8000u, s_downlink_pcm_buffer, chunk);
         }
         offset += chunk;
+    }
+}
+
+// Wideband sibling of handleIncomingVoicePayload: one 16 kHz/20 ms Opus
+// frame per type-8 packet. Shares the caller latch, playback state and
+// per-packet BT/speaker routing; the router upsamples nothing here (the
+// speaker sink runs at 16 kHz natively, BT SCO gets a 16k->8k downconvert).
+static void handleIncomingOpusPayload(const uint8_t *payload, const size_t payload_size)
+{
+    if (payload == nullptr || payload_size == 0u) {
+        return;
+    }
+
+    memcpy(s_voice_callsign, s_remote_callsign, sizeof(s_voice_callsign));
+    s_voice_ssid = s_remote_ssid;
+
+    startDownlinkPlayback();
+    if (!s_downlink_playback_active) {
+        return;
+    }
+
+    s_last_rx_packet_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    // Feed the stream logger/timeout the G.711-equivalent of 20 ms so
+    // currentRxPacketTimeoutMs' bytes-per-ms math stays meaningful.
+    logIncomingVoicePacket(160u);
+
+    const bool bt_route = NRL_BtHfp_IsConnected();
+    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_SPEAKER, !bt_route);
+    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_BT_HFP, bt_route);
+
+    if (s_opus_dec == nullptr) {
+        s_opus_dec = OPUS_VOICE_DecOpen(kOpusFrameMs);
+        if (s_opus_dec == nullptr) {
+            return;
+        }
+    }
+    static int16_t pcm16k[kOpusFrameSamples * 3u]; // headroom for 40/60 ms senders
+    const int decoded = OPUS_VOICE_DecProcess(s_opus_dec, payload, payload_size,
+                                              pcm16k, sizeof(pcm16k) / sizeof(pcm16k[0]));
+    if (decoded > 0) {
+        AudioRouter_PushFrame(AUDIO_SRC_NRL_DOWNLINK, 16000u, pcm16k,
+                              static_cast<size_t>(decoded));
     }
 }
 
@@ -922,6 +1045,8 @@ static void bridgeTask(void *)
                                   s_last_peer_port);
                 if (packet_type == kNrlTypeVoice || packet_type == kNrlTypeServerVoice) {
                     handleIncomingVoicePayload(payload, payload_size);
+                } else if (packet_type == kNrlTypeOpusVoice) {
+                    handleIncomingOpusPayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeSciTransparent) {
                     handleIncomingSciPayload(payload, payload_size);
                 } else if (packet_type == kNrlTypeAtCommand) {
@@ -1005,6 +1130,26 @@ static void bridgeTask(void *)
 
 } // namespace
 
+void NRLAudioBridge_SetVoiceCodec(uint8_t codec)
+{
+    if (codec > 1u) {
+        return;
+    }
+    s_voice_codec = codec;
+    s_opus_tx_fill = 0u;
+    nvs_handle_t nvs;
+    if (nvs_open(kVoiceNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "codec", codec);
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+uint8_t NRLAudioBridge_GetVoiceCodec(void)
+{
+    return s_voice_codec;
+}
+
 void NRLAudioBridge_SetMediaUplinkActive(bool active)
 {
     s_media_uplink_active = active;
@@ -1036,6 +1181,17 @@ bool NRLAudioBridge_Init(void)
     initCpuId();
     NRL_G711_Init();
 
+    // Restore the persisted TX voice codec (0 = G.711 type 1, 1 = Opus type 8).
+    {
+        nvs_handle_t nvs;
+        uint8_t codec = 0u;
+        if (nvs_open(kVoiceNvsNamespace, NVS_READONLY, &nvs) == ESP_OK) {
+            (void)nvs_get_u8(nvs, "codec", &codec);
+            nvs_close(nvs);
+        }
+        s_voice_codec = (codec <= 1u) ? codec : 0u;
+    }
+
     if (s_udp_mutex == nullptr) {
         s_udp_mutex = xSemaphoreCreateMutex();
         if (s_udp_mutex == nullptr) {
@@ -1047,7 +1203,7 @@ bool NRLAudioBridge_Init(void)
     // Wire the NRL voice paths into the audio router: both mic flavours feed
     // the uplink; the downlink starts on the onboard speaker (flipped to the
     // BT sink per-packet in handleIncomingVoicePayload when a headset is up).
-    AudioRouter_RegisterSink(AUDIO_SINK_NRL_UPLINK, 8000u, uplinkSinkWrite, nullptr);
+    AudioRouter_RegisterSink(AUDIO_SINK_NRL_UPLINK, 16000u, uplinkSinkWrite, nullptr);
     AudioRouter_RegisterSink(AUDIO_SINK_BT_HFP, 8000u, btHfpSinkWrite, nullptr);
     AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_NRL_UPLINK, true);
     AudioRouter_SetRoute(AUDIO_SRC_BT_HFP_MIC, AUDIO_SINK_NRL_UPLINK, true);

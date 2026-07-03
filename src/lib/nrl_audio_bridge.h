@@ -33,6 +33,13 @@ void NRLAudioBridge_FeedExternalMic(const short *pcm8k, size_t sample_count);
 void NRLAudioBridge_SetMediaUplinkActive(bool active);
 void NRLAudioBridge_SendMediaUplink(const short *pcm8k, size_t sample_count);
 
+// TX voice codec: 0 = G.711 A-law 8 kHz (NRL packet type 1, default),
+// 1 = Opus 16 kHz wideband (packet type 8, shared codec module, 20 ms
+// frames, VOIP/VBR). RX accepts both regardless. Persisted in NVS.
+#include <stdint.h>
+void NRLAudioBridge_SetVoiceCodec(uint8_t codec);
+uint8_t NRLAudioBridge_GetVoiceCodec(void);
+
 // Poll the USB debug serial for AT commands typed by the user. Lines are
 // terminated by CR/LF; e.g. "AT" lists commands, "AT+WIFI_SSID=MyNet" sets it.
 void NRLAudioBridge_PollSerialConsole(void);

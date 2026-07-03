@@ -1,5 +1,6 @@
 #include "nrl_at_commands.h"
 
+#include "nrl_audio_bridge.h"
 #include "nrl_net_compat.h"
 #include "nrl_version.h"
 
@@ -850,6 +851,30 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     if (stringEqualsIgnoreCase(command.command, "STOP")) {
         MUSIC_Stop();
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "STOP", "OK");
+        return;
+    }
+
+    // NRL TX voice codec: AT+CODEC=G711 (8k narrowband, packet type 1) or
+    // AT+CODEC=OPUS (16k wideband, packet type 8). RX always accepts both.
+    if (stringEqualsIgnoreCase(command.command, "CODEC")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "CODEC",
+                               (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
+            return;
+        }
+        uint8_t codec = 0xFFu;
+        if (stringEqualsIgnoreCase(command.value, "G711")) {
+            codec = 0u;
+        } else if (stringEqualsIgnoreCase(command.value, "OPUS")) {
+            codec = 1u;
+        }
+        if (codec > 1u) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "CODEC");
+            return;
+        }
+        NRLAudioBridge_SetVoiceCodec(codec);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "CODEC",
+                           (codec == 1u) ? "OPUS" : "G711");
         return;
     }
 

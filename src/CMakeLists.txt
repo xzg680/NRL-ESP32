@@ -8,6 +8,7 @@ set(app_sources
     media/cover_decoder.cpp
     media/media_decoder.cpp
     media/media_metadata.cpp
+    media/opus_voice.cpp
     services/config_notify.cpp
     services/espnow_link.cpp
     services/music_player.cpp

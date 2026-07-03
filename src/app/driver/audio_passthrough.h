@@ -43,9 +43,10 @@ bool AUDIO_GetI2SHandles(i2s_chan_handle_t *tx_handle, i2s_chan_handle_t *rx_han
 void AUDIO_SetMode(AUDIO_Mode_t mode);
 AUDIO_Mode_t AUDIO_GetMode(void);
 
-// Queue PCM16 mono samples (8 kHz) for DAC playback. This is the backend of
-// the router's AUDIO_SINK_SPEAKER; producers should route through the audio
-// router rather than calling it directly.
+// Queue PCM16 mono samples (16 kHz voice domain) for DAC playback. This is
+// the backend of the router's AUDIO_SINK_SPEAKER (registered at 16 kHz;
+// 8 kHz sources are upsampled by the router at delivery); producers should
+// route through the audio router rather than calling it directly.
 size_t AUDIO_QueueOutputSamples(const int16_t *samples, size_t sample_count);
 void AUDIO_ClearOutputQueue(void);
 

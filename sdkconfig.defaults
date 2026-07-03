@@ -131,3 +131,28 @@ CONFIG_LV_FONT_MONTSERRAT_48=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
+
+# --- esp_audio_codec: compile only the codecs the media stack uses ---------
+# Decoders kept: AAC, MP3, FLAC, OPUS, PCM/WAV (+ M4A/TS simple-dec parsers).
+# Everything else is dead weight in the 5 MB OTA app slots (the unused codec
+# libraries alone pushed the S31 image past the partition size once the Opus
+# encoder for NRL packet type 8 landed).
+# CONFIG_AUDIO_DECODER_AMRNB_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_AMRWB_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_VORBIS_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_ADPCM_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_ALAC_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_SBC_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_LC3_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_G722_SUPPORT is not set
+# CONFIG_AUDIO_SIMPLE_DEC_OGG_SUPPORT is not set
+# Encoders: only Opus (NRL wideband voice + xiaozhi AI uplink).
+# CONFIG_AUDIO_ENCODER_AAC_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_G711_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_AMRNB_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_AMRWB_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_ADPCM_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_ALAC_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_PCM_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_SBC_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_LC3_SUPPORT is not set

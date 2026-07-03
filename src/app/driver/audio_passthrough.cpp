@@ -39,7 +39,6 @@ constexpr int kI2sPort = I2S_NUM_0;
 constexpr int kSampleRate = 16000;
 constexpr int kMclkRate = kSampleRate * 256;
 constexpr size_t kFrameSamples = 160;
-constexpr size_t kNetworkFrameSamples = kFrameSamples / 2u;
 // I2S bus stays stereo (2 slots/frame) so BCLK timing matches the codec's
 // clock divider expectations. The mic ADC drives the LEFT slot only; we
 // duplicate mono content into both slots in i2s_write_frame.
@@ -67,7 +66,10 @@ static volatile bool s_passthrough_running = false;
 static AUDIO_Mode_t s_audio_mode = AUDIO_MODE_RECEIVE;
 static bool s_speaker_sink_registered = false;
 
-constexpr size_t kOutputQueueSamples = kNetworkFrameSamples * 64u;
+// The playback queue holds 16 kHz voice-domain samples (~640 ms). It moved
+// from 8 kHz when NRL packet type 8 (Opus wideband) arrived: narrowband
+// sources are upsampled by the audio router at delivery instead of here.
+constexpr size_t kOutputQueueSamples = kFrameSamples * 64u;
 static int16_t s_output_queue[kOutputQueueSamples];
 static size_t s_output_queue_head = 0;
 static size_t s_output_queue_tail = 0;
@@ -413,19 +415,6 @@ static void aec_network_ref_push(const int16_t *src, const size_t sample_count) 
     }
 }
 
-static void upsample_8k_to_16k_frame(const int16_t *src8, int16_t *dst16) {
-    if (src8 == nullptr || dst16 == nullptr) {
-        return;
-    }
-    for (size_t i = 0; i < kNetworkFrameSamples; ++i) {
-        const int16_t current = src8[i];
-        const int16_t next = (i + 1u < kNetworkFrameSamples) ? src8[i + 1u] : current;
-        dst16[i * 2u] = current;
-        dst16[i * 2u + 1u] = static_cast<int16_t>(
-            (static_cast<int32_t>(current) + static_cast<int32_t>(next)) / 2);
-    }
-}
-
 static size_t output_queue_push(const int16_t *samples, size_t sample_count) {
     if (samples == nullptr || sample_count == 0) {
         return 0;
@@ -569,7 +558,7 @@ static void speaker_sink_write(uint8_t /*source_id*/,
 static void ensure_speaker_sink_registered(void) {
     if (!s_speaker_sink_registered) {
         s_speaker_sink_registered =
-            AudioRouter_RegisterSink(AUDIO_SINK_SPEAKER, 8000u, speaker_sink_write, nullptr);
+            AudioRouter_RegisterSink(AUDIO_SINK_SPEAKER, 16000u, speaker_sink_write, nullptr);
     }
 }
 
@@ -586,7 +575,6 @@ static void audio_aec_output(const int16_t *clean, size_t count, void *) {
 
 static void audio_passthrough_task(void *) {
     static int16_t frame[kFrameSamples];
-    static int16_t playback_8k[kNetworkFrameSamples];
     static int16_t playback_frame[kFrameSamples];
 
     while (s_passthrough_running) {
@@ -647,11 +635,11 @@ static void audio_passthrough_task(void *) {
         AudioRouter_PushFrame(AUDIO_SRC_MIC, 16000u, frame, kFrameSamples);
 #endif
 
-        // RX mode: DAC plays whatever is in the output queue (NRL downlink).
-        // If the queue is empty, write silence so the DAC stays at VMID.
-        const size_t popped = output_queue_pop_frame(playback_8k, kNetworkFrameSamples);
+        // RX mode: DAC plays whatever is in the output queue (16 kHz voice
+        // domain; the router upsampled any 8 kHz source at delivery). If the
+        // queue is empty, write silence so the DAC stays at VMID.
+        const size_t popped = output_queue_pop_frame(playback_frame, kFrameSamples);
         (void)popped;
-        upsample_8k_to_16k_frame(playback_8k, playback_frame);
         aec_network_ref_push(playback_frame, kFrameSamples);
         if (!i2s_write_frame(playback_frame)) {
             vTaskDelay(pdMS_TO_TICKS(2));
