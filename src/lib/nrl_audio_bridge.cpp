@@ -80,6 +80,9 @@ uint32_t s_voice_decode_sample_total = 0u;
 uint32_t s_voice_decode_chunks = 0u;
 uint16_t s_packet_counter = 0u;
 uint32_t s_last_rx_packet_ms = 0u;
+// Codec of the most recently decoded downlink voice packet, for the LCD:
+// 0 = G.711 (packet type 1/9), 1 = Opus (type 8). Latched per packet.
+volatile uint8_t s_last_rx_codec = 0u;
 uint32_t s_last_heartbeat_ms = 0u;
 uint32_t s_last_remote_identity_ms = 0u;
 uint32_t s_reboot_at_ms = 0u;
@@ -806,6 +809,7 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
     }
 
     s_last_rx_packet_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    s_last_rx_codec = 0u; // G.711
     logIncomingVoicePacket(payload_size);
 
     // Route the downlink to the Bluetooth headset whenever one is connected;
@@ -865,6 +869,7 @@ static void handleIncomingOpusPayload(const uint8_t *payload, const size_t paylo
     }
 
     s_last_rx_packet_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    s_last_rx_codec = 1u; // Opus
     // Feed the stream logger/timeout the G.711-equivalent of 20 ms so
     // currentRxPacketTimeoutMs' bytes-per-ms math stays meaningful.
     logIncomingVoicePacket(160u);
@@ -928,7 +933,8 @@ static void scheduleReboot(void)
 
 //=============== Serial AT command console (USB debug serial) ================
 
-constexpr size_t kSerialAtLineMax = 168u;
+// Sized for the longest command: AT+RADIOADD=<48-byte name>,<200-byte URL>.
+constexpr size_t kSerialAtLineMax = 288u;
 char s_serial_at_line[kSerialAtLineMax];
 size_t s_serial_at_len = 0u;
 uint8_t s_serial_at_payload[kSerialAtLineMax + 1u];
@@ -1243,7 +1249,12 @@ bool NRLAudioBridge_Init(void)
     // Pin to core 0 so RX recvfrom() / heartbeat / AT replies share the WiFi
     // and lwIP cores; voice TX from the audio task on core 1 still hits the
     // same socket but lwIP's internal locking handles that.
-    if (xTaskCreatePinnedToCore(bridgeTask, "nrl_audio_bridge", 8192, nullptr,
+    //
+    // 16 KB stack: the Opus RX decode (handleIncomingOpusPayload ->
+    // esp_opus_dec_decode / libopus) runs inline on this task and its peak
+    // stack, on top of the UDP recv + packet-parse baseline, overflows an
+    // 8 KB stack (stack-protection fault on the first received Opus frame).
+    if (xTaskCreatePinnedToCore(bridgeTask, "nrl_audio_bridge", 16384, nullptr,
                                 2, &s_bridge_task, 0) != pdPASS) {
         ESP_LOGI(TAG,"[NRL] failed to create bridge task");
         return false;
@@ -1285,6 +1296,11 @@ bool NRLAudioBridge_GetRemoteCaller(char *callsign, size_t callsign_size, unsign
     // merely that some packet arrived recently. Heartbeat / AT / SCI packets
     // never start downlink playback, so they no longer count as reception.
     return s_downlink_playback_active;
+}
+
+uint8_t NRLAudioBridge_GetRxCodec(void)
+{
+    return s_last_rx_codec;
 }
 
 void NRLAudioBridge_ApplyConfig(bool restart_wifi, bool restart_udp)

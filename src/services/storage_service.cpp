@@ -21,9 +21,19 @@ static void storage_mount_sdcard(void)
 {
     sdmmc_card_t *card = nullptr;
     const esp_err_t err = bsp_sdcard_mount(nullptr, &card);
+    if (err == ESP_FAIL) {
+        // The SDMMC probe answered but FatFs found no FAT volume (FatFs error
+        // FR_NO_FILESYSTEM surfaces as ESP_FAIL): typically a >32 GB card
+        // still in its factory exFAT format, which this FatFs build cannot
+        // read (IDF hardcodes FF_FS_EXFAT=0).
+        ESP_LOGW(TAG, "TF card detected but has no FAT filesystem (exFAT/NTFS "
+                      "unsupported): reformat it as FAT32 on a PC, or erase + "
+                      "format in-device with AT+SDFORMAT=YES");
+        return;
+    }
     if (err != ESP_OK) {
         // No card inserted is a normal condition; the music player simply
-        // has nothing to index. Hot-insert requires a reboot for now.
+        // has nothing to index. AT+SDMOUNT=1 retries after a hot insert.
         ESP_LOGW(TAG, "TF card mount failed: %s (no card inserted?)", esp_err_to_name(err));
         return;
     }
@@ -36,6 +46,33 @@ static void storage_mount_sdcard(void)
                  : 0ULL);
 }
 } // namespace
+
+extern "C" bool STORAGE_SdMountRetry(void)
+{
+    if (!s_sd_mounted) {
+        storage_mount_sdcard();
+    }
+    return s_sd_mounted;
+}
+
+extern "C" bool STORAGE_SdFormat(void)
+{
+    if (s_sd_mounted) {
+        // Card already works; refuse to erase it from here.
+        return false;
+    }
+    bsp_sdcard_config_t cfg = BSP_SDCARD_DEFAULT_CONFIG();
+    cfg.format_if_mount_failed = true;
+    sdmmc_card_t *card = nullptr;
+    const esp_err_t err = bsp_sdcard_mount(&cfg, &card);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "TF card format failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    s_sd_mounted = true;
+    ESP_LOGI(TAG, "TF card formatted and mounted at %s", bsp_sdcard_get_mount_point());
+    return true;
+}
 
 extern "C" bool STORAGE_SdMounted(void)
 {
@@ -57,6 +94,16 @@ extern "C" bool STORAGE_SdMounted(void)
 extern "C" const char *STORAGE_SdMountPoint(void)
 {
     return nullptr;
+}
+
+extern "C" bool STORAGE_SdMountRetry(void)
+{
+    return false;
+}
+
+extern "C" bool STORAGE_SdFormat(void)
+{
+    return false;
 }
 
 #endif // NRL_HAS_SDCARD

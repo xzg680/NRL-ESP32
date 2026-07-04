@@ -11,6 +11,7 @@
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
 #include "../services/nanny.h"
+#include "../services/radio_favorites.h"
 #include "../services/storage_service.h"
 #include "nrl_audio_bridge.h"
 
@@ -67,6 +68,35 @@ static std::string htmlEscape(const char *text)
                 break;
             default:
                 out += text[i];
+                break;
+        }
+    }
+    return out;
+}
+
+// JSON string escaping for values embedded in an inline <script> block:
+// besides the usual JSON escapes, '<' is escaped so a stored URL/name can
+// never smuggle a "</script>" into the page.
+static std::string jsonScriptEscape(const char *text)
+{
+    std::string out;
+    if (text == nullptr) {
+        return out;
+    }
+    for (size_t i = 0; text[i] != '\0'; ++i) {
+        const char ch = text[i];
+        switch (ch) {
+            case '\\': out += "\\\\"; break;
+            case '"':  out += "\\\""; break;
+            case '<':  out += "\\u003C"; break;
+            default:
+                if (static_cast<unsigned char>(ch) < 0x20u) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04X", static_cast<unsigned>(ch));
+                    out += buf;
+                } else {
+                    out += ch;
+                }
                 break;
         }
     }
@@ -404,6 +434,24 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
                                strncmp(playing_path, "http", 4) == 0;
     replaceToken(html, "{{RADIO_STATUS}}",
                  radio_playing ? (std::string("&#9654; ") + htmlEscape(playing_path)) : std::string(""));
+
+    std::string favs_json = "[";
+    const size_t fav_count = RADIO_FAV_Count();
+    for (size_t i = 0; i < fav_count; ++i) {
+        char fav_name[RADIO_FAV_NAME_SIZE] = {};
+        char fav_url[RADIO_FAV_URL_SIZE] = {};
+        if (!RADIO_FAV_Get(i, fav_name, sizeof(fav_name), fav_url, sizeof(fav_url))) {
+            break;
+        }
+        if (i > 0u) {
+            favs_json += ",";
+        }
+        favs_json += "{\"name\":\"" + jsonScriptEscape(fav_name) +
+                     "\",\"url\":\"" + jsonScriptEscape(fav_url) + "\"}";
+    }
+    favs_json += "]";
+    replaceToken(html, "{{RADIO_FAVS_JSON}}", favs_json);
+    replaceToken(html, "{{RADIO_FAV_CUR}}", fromI32(RADIO_FAV_CurrentIndex()));
 
     char smb_server[64] = {};
     char smb_share[64] = {};

@@ -70,6 +70,12 @@ const char *MUSIC_CurrentPath(void);
 // MUSIC_PlayFile; UI consumers should render promptly after a track change.
 const MediaTrackInfo *MUSIC_GetTrackInfo(void);
 
+// Sample format of the stream currently decoding (rate / bit depth /
+// channel count for the UI's format line). Valid from the first decoded
+// frame until the track stops; returns false when idle. Out pointers may
+// be NULL.
+bool MUSIC_GetStreamInfo(uint32_t *sample_rate_hz, uint8_t *bits_per_sample, uint8_t *channels);
+
 // Called when a track finishes decoding to the end (NOT on MUSIC_Stop,
 // voice interrupt, or decode error). Fired from the player task after it
 // has released the codec, so the callback may start the next track.

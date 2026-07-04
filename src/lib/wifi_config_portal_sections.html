@@ -204,6 +204,18 @@
       </div>
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="btn-small" type="button" onclick="submitFormAction(this, 'radio_play')" data-i18n="radioPlay">Play</button><button class="secondary btn-small" type="button" onclick="submitFormAction(this, 'radio_stop')" data-i18n="radioStop">Stop</button></div>
     </form>
+    <div class="span-2">
+      <div class="group-label" data-i18n="radioFavs">Favorite stations</div>
+      <div id="radio-fav-list" class="fav-list"></div>
+    </div>
+    <form class="item-form span-2" method="post" action="/save_media" id="radio-fav-form">
+      <div class="subgrid">
+        <div><label data-i18n="radioFavName">Station name</label><input name="fav_name" value="" maxlength="47"></div>
+        <div><label data-i18n="radioFavUrl">Stream URL (http:// or https://)</label><input name="fav_url" value="" maxlength="199" placeholder="http://..."></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="button" onclick="addRadioFav(this)" data-i18n="radioFavAdd">Add favorite</button></div>
+    </form>
+    <script>window.RADIO_FAVS={{RADIO_FAVS_JSON}};window.RADIO_FAV_CUR={{RADIO_FAV_CUR}};</script>
   </div>
 </section>
 <section class="panel">

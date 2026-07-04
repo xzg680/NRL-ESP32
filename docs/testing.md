@@ -15,13 +15,31 @@
 ## 1. 音乐播放器
 
 - [ ] TF 卡 /sdcard/music 扫描, 触摸列表点播, 自动连播
+- [ ] 曲库递归扫描: music/歌手/专辑/ 子目录内歌曲全部入列表 (深度 4);
+      中文文件名正常显示/播放 (FatFs UTF-8 API); exFAT 大卡直接可读
+- [ ] 目录封面: 无内嵌封面的曲目显示同目录 cover/folder/album/front.jpg
+- [ ] 播放页右下角显示码流格式 (如 "44.1kHz 16bit 2ch"), 开播约 1 秒内出现
+- [ ] 小智 AI 屏幕入口: Apps → AI; 开关启用 (未配置时给出提示并弹回),
+      连接后按住 "Hold to Talk" 说话/松开发送, 回答从喇叭播出;
+      Web/AT 改配置时页面状态行自动更新
+- [ ] TF 卡维护: exFAT 卡启动日志给出明确提示 (不再是 "no card
+      inserted?"); `AT+SDFORMAT=YES` 机内格 FAT 后可挂载;
+      开机后插卡 `AT+SDMOUNT=1` 免重启挂载
 - [ ] MP3 / FLAC / WAV / M4A 各放一首; 44.1k 与 48k 各试
 - [ ] 中文标签 + 封面显示; `AT+FONT=FT` / `BMP` 切换对比
       (FT 需 TF 卡 fonts/cjk.ttf)
 - [ ] U 盘插入自动并入曲库, 播放中拔出 → 停止不死机
 - [ ] `AT+SMB=NAS地址/共享,用户,密码` → 网络曲库播放, 断网重试
 - [ ] 网络电台: Radio 页 / `AT+PLAY=http://...`; m3u8 电台
+- [ ] 电台收藏列表 (三端同一列表, 改动互见):
+      Web 媒体页添加/删除/播放收藏; LCD Radio 页下拉选台 + `<` `>` 切台 +
+      `+`/垃圾桶增删; AT: `AT+RADIOADD=名称,http://...` → `AT+RADIOLIST=?`
+      → `AT+RADIOPLAY=0` → `AT+RADIONEXT=1` / `AT+RADIOPREV=1` →
+      `AT+RADIODEL=0`; 重启后列表和当前台序号保留
 - [ ] 播放中来 NRL 语音 → 音乐让路, 语音完整
+- [ ] 视频通话本地预览: Video 页 Cam ON 后右下小窗显示本机画面
+      (~5 fps); 远端画面同时刷新时触摸仍流畅 (解码已移出 UI 任务);
+      Cam OFF 小窗回到 "Local camera" 占位; 切页再回来画面恢复
 
 ## 2. 保姆功能
 

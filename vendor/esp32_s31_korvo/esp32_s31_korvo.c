@@ -194,6 +194,16 @@ static esp_err_t bsp_i2c_init(void)
         return ESP_OK;
     }
 
+    // The application may already own this port (the NRL firmware creates
+    // the shared touch/codec bus itself via s31_i2c.cpp before any BSP
+    // camera call); creating a second master on the same port fails. Adopt
+    // the existing bus handle instead -- the i2c_master driver serialises
+    // transactions per bus, so camera SCCB traffic coexists with touch.
+    if (i2c_master_get_bus_handle(I2C_NUM_0, &s_i2c_bus) == ESP_OK && s_i2c_bus) {
+        ESP_LOGI(TAG, "I2C bus adopted from application (port 0)");
+        return ESP_OK;
+    }
+
     const i2c_master_bus_config_t i2c_bus_config = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .sda_io_num = BSP_I2C_SDA,
@@ -1079,7 +1089,30 @@ esp_err_t bsp_sdcard_mount(const bsp_sdcard_config_t *config, sdmmc_card_t **out
         active_config.max_freq_khz = BSP_SDCARD_MAX_FREQ_KHZ;
     }
 
-    ESP_RETURN_ON_ERROR(bsp_sdcard_set_power(true), TAG, "SD card power on failed");
+    /* NRL PATCH: power-cycle the card before every init attempt. A soft
+     * reset (esptool RTS, AT+REBOOT, WDT) does not cut card VDD, and a card
+     * left mid-transaction ignores the next init sequence (send_op_cond
+     * timeout 0x107) until it really loses power. Cutting the GPIO39 gate
+     * alone is not enough: the card keeps itself alive through the CMD/DAT
+     * pull-ups (phantom power), so drive every bus line low for the off
+     * window, then release them for the SDMMC host to reclaim. */
+    {
+        const gpio_num_t sd_bus_pins[] = {
+            BSP_SD_CLK, BSP_SD_CMD, BSP_SD_D0, BSP_SD_D1, BSP_SD_D2, BSP_SD_D3,
+        };
+        for (size_t i = 0; i < sizeof(sd_bus_pins) / sizeof(sd_bus_pins[0]); i++) {
+            gpio_reset_pin(sd_bus_pins[i]);
+            gpio_set_direction(sd_bus_pins[i], GPIO_MODE_OUTPUT);
+            gpio_set_level(sd_bus_pins[i], 0);
+        }
+        ESP_RETURN_ON_ERROR(bsp_sdcard_set_power(false), TAG, "SD card power off failed");
+        vTaskDelay(pdMS_TO_TICKS(200));
+        for (size_t i = 0; i < sizeof(sd_bus_pins) / sizeof(sd_bus_pins[0]); i++) {
+            gpio_reset_pin(sd_bus_pins[i]);
+        }
+        ESP_RETURN_ON_ERROR(bsp_sdcard_set_power(true), TAG, "SD card power on failed");
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
 
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.slot = SDMMC_HOST_SLOT_0;

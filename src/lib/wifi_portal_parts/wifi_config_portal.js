@@ -154,6 +154,12 @@ const translations = {
         radioUrl: 'Stream URL (http:// or https://)',
         radioPlay: 'Play',
         radioStop: 'Stop',
+        radioFavs: 'Favorite stations',
+        radioFavName: 'Station name',
+        radioFavUrl: 'Stream URL (http:// or https://)',
+        radioFavAdd: 'Add favorite',
+        radioFavDelete: 'Delete',
+        radioFavEmpty: 'No favorites yet. Add a station below.',
         smbShare: 'Network Share (SMB)',
         smbServer: 'Server (NAS / PC)',
         smbShareName: 'Share name',
@@ -331,6 +337,12 @@ const translations = {
         radioUrl: '直播流地址 (http:// 或 https://)',
         radioPlay: '播放',
         radioStop: '停止',
+        radioFavs: '收藏电台',
+        radioFavName: '电台名称',
+        radioFavUrl: '直播流地址 (http:// 或 https://)',
+        radioFavAdd: '添加收藏',
+        radioFavDelete: '删除',
+        radioFavEmpty: '还没有收藏电台，在下方添加。',
         smbShare: '网络共享 (SMB)',
         smbServer: '服务器 (NAS / 电脑)',
         smbShareName: '共享名',
@@ -470,7 +482,97 @@ const translations = {
     function postAndApply(form) {
       return postForm(form).then((reply) => {
         if (reply && reply.fields) applyEchoFields(reply.fields);
+        // /save_media replies carry the favorite-station list so the page
+        // reflects adds/deletes/tunes without a reload.
+        if (reply && reply.favs) renderRadioFavs(reply.favs, reply.fav_cur);
         return reply;
+      });
+    }
+
+    // Favorite net-radio stations. The list is rendered client-side from
+    // window.RADIO_FAVS (initial page data) and from the JSON echoed by every
+    // /save_media POST; rows post their action straight back to /save_media.
+    function renderRadioFavs(favs, current) {
+      const list = document.getElementById('radio-fav-list');
+      if (!list || !Array.isArray(favs)) return;
+      list.innerHTML = '';
+      if (!favs.length) {
+        const empty = document.createElement('span');
+        empty.className = 'hint';
+        empty.setAttribute('data-i18n', 'radioFavEmpty');
+        empty.textContent = t('radioFavEmpty');
+        list.appendChild(empty);
+        return;
+      }
+      favs.forEach((fav, idx) => {
+        const row = document.createElement('div');
+        row.className = 'fav-row' + (idx === current ? ' current' : '');
+        const text = document.createElement('div');
+        text.className = 'fav-text';
+        const name = document.createElement('span');
+        name.className = 'fav-name';
+        name.textContent = (idx === current ? '▶ ' : '') + (fav.name || fav.url);
+        const url = document.createElement('span');
+        url.className = 'fav-url mono';
+        url.textContent = fav.url;
+        text.appendChild(name);
+        text.appendChild(url);
+        row.appendChild(text);
+        const play = document.createElement('button');
+        play.type = 'button';
+        play.className = 'btn-small';
+        play.textContent = t('radioPlay');
+        play.setAttribute('data-i18n', 'radioPlay');
+        play.addEventListener('click', () => radioFavAction(play, 'fav_play', idx));
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'secondary btn-small';
+        del.textContent = t('radioFavDelete');
+        del.setAttribute('data-i18n', 'radioFavDelete');
+        del.addEventListener('click', () => radioFavAction(del, 'fav_del', idx));
+        row.appendChild(play);
+        row.appendChild(del);
+        list.appendChild(row);
+      });
+    }
+
+    function radioFavAction(button, action, index) {
+      button.disabled = true;
+      const body = new URLSearchParams();
+      body.append(action, String(index));
+      fetch('/save_media', {
+        method: 'POST',
+        body,
+        cache: 'no-store',
+        credentials: 'same-origin',
+        referrerPolicy: 'no-referrer',
+      }).then((r) => r.json().then((data) => Object.assign({ ok: r.ok }, data)))
+        .catch(() => ({ ok: false }))
+        .then((reply) => {
+          button.disabled = false;
+          if (reply && reply.fields) applyEchoFields(reply.fields);
+          if (reply && reply.favs) renderRadioFavs(reply.favs, reply.fav_cur);
+        });
+    }
+
+    function addRadioFav(button) {
+      const form = button ? button.form : null;
+      if (!form) return;
+      const flag = document.createElement('input');
+      flag.type = 'hidden';
+      flag.name = 'fav_add';
+      flag.value = '1';
+      form.appendChild(flag);
+      button.disabled = true;
+      postAndApply(form).then((reply) => {
+        flag.remove();
+        button.disabled = false;
+        flashButtonFeedback(button, reply && reply.ok);
+        if (reply && reply.ok) {
+          form.querySelectorAll('input[name="fav_name"], input[name="fav_url"]').forEach((input) => {
+            input.value = '';
+          });
+        }
       });
     }
 
@@ -598,6 +700,10 @@ const translations = {
     function initPortal() {
       applyLanguage(currentLang());
       syncDhcpFields();
+      if (window.RADIO_FAVS) {
+        renderRadioFavs(window.RADIO_FAVS, window.RADIO_FAV_CUR);
+        applyLanguage(currentLang()); // translate the freshly rendered rows
+      }
       const expert = document.getElementById('audio-expert-mode');
       if (expert) {
         expert.checked = false;

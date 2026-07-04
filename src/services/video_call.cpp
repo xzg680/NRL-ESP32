@@ -23,7 +23,7 @@ namespace {
 
 constexpr size_t kSubHeaderBytes = 4;
 constexpr size_t kFragDataBytes = 1020;      // NRL max payload (1024) - sub header
-constexpr size_t kMaxJpegBytes = 96 * 1024;  // VGA JPEG headroom
+constexpr size_t kMaxJpegBytes = VIDEO_MAX_JPEG_BYTES; // VGA JPEG headroom
 constexpr uint32_t kTxIntervalMs = 200;      // ~5 fps
 constexpr int kJpegQuality = 40;
 constexpr int64_t kRxActiveWindowUs = 2000000; // "receiving" indicator window
@@ -33,6 +33,15 @@ static bsp_camera_t *s_camera = nullptr;
 static TaskHandle_t s_tx_task = nullptr;
 static volatile bool s_tx_run = false;
 static uint16_t s_tx_seq = 0;
+
+// Local self-view: the TX task publishes each captured JPEG here so the LCD
+// can render the local camera without a second sensor stream. Copy-out under
+// the lock keeps the decode task tear-free at the cost of one ~10-30 KB
+// PSRAM memcpy per frame (negligible against the 200 ms frame interval).
+static uint8_t *s_local = nullptr;
+static SemaphoreHandle_t s_local_lock = nullptr;
+static size_t s_local_bytes = 0;
+static volatile uint32_t s_local_seq = 0;
 
 // ---- RX ---------------------------------------------------------------------
 // Double buffer: fragments assemble into s_assm; a completed frame is copied
@@ -116,6 +125,15 @@ static void video_tx_task(void *)
             const uint8_t *jpeg = static_cast<const uint8_t *>(frame.data);
             const size_t jpeg_size = frame.size;
             if (jpeg_size > 0u && jpeg_size <= kMaxJpegBytes) {
+                // Publish for the local self-view before the network send so
+                // the preview isn't delayed by the fragment burst.
+                if (s_local != nullptr && s_local_lock != nullptr &&
+                    xSemaphoreTake(s_local_lock, pdMS_TO_TICKS(20)) == pdTRUE) {
+                    memcpy(s_local, jpeg, jpeg_size);
+                    s_local_bytes = jpeg_size;
+                    s_local_seq = s_local_seq + 1u; // volatile: no ++ in C++20
+                    xSemaphoreGive(s_local_lock);
+                }
                 const uint8_t cnt = static_cast<uint8_t>((jpeg_size + kFragDataBytes - 1u) / kFragDataBytes);
                 ++s_tx_seq;
                 static uint8_t payload[kSubHeaderBytes + kFragDataBytes];
@@ -156,13 +174,20 @@ extern "C" void VIDEO_Init(void)
     if (s_ready_lock == nullptr) {
         s_ready_lock = xSemaphoreCreateMutex();
     }
+    if (s_local_lock == nullptr) {
+        s_local_lock = xSemaphoreCreateMutex();
+    }
     if (s_assm == nullptr) {
         s_assm = static_cast<uint8_t *>(heap_caps_malloc(kMaxJpegBytes, MALLOC_CAP_SPIRAM));
     }
     if (s_ready == nullptr) {
         s_ready = static_cast<uint8_t *>(heap_caps_malloc(kMaxJpegBytes, MALLOC_CAP_SPIRAM));
     }
-    if (s_assm == nullptr || s_ready == nullptr || s_ready_lock == nullptr) {
+    if (s_local == nullptr) {
+        s_local = static_cast<uint8_t *>(heap_caps_malloc(kMaxJpegBytes, MALLOC_CAP_SPIRAM));
+    }
+    if (s_assm == nullptr || s_ready == nullptr || s_local == nullptr ||
+        s_ready_lock == nullptr || s_local_lock == nullptr) {
         ESP_LOGE(TAG, "rx buffer alloc failed");
         return;
     }
@@ -187,10 +212,13 @@ extern "C" bool VIDEO_SetTxEnabled(const bool enabled)
     if (s_tx_task != nullptr) {
         return true;
     }
+    // The OV3660's only DVP JPEG mode: 1280x720 @ 12 fps, 10 MHz XCLK
+    // (sensor-side encode, no CPU cost). We pace it down to ~5 fps.
     bsp_camera_config_t cfg = BSP_CAMERA_DEFAULT_CONFIG();
-    cfg.width = 640;
-    cfg.height = 480;
+    cfg.width = 1280;
+    cfg.height = 720;
     cfg.pixel_format = BSP_CAMERA_PIXEL_FORMAT_JPEG;
+    cfg.xclk_freq_hz = 10 * 1000 * 1000;
     if (bsp_camera_open(&cfg, &s_camera) != ESP_OK || s_camera == nullptr) {
         ESP_LOGE(TAG, "camera open failed");
         s_camera = nullptr;
@@ -213,7 +241,7 @@ extern "C" bool VIDEO_SetTxEnabled(const bool enabled)
         ESP_LOGE(TAG, "tx task create failed");
         return false;
     }
-    ESP_LOGI(TAG, "camera streaming (VGA JPEG q%d, ~%lu fps)",
+    ESP_LOGI(TAG, "camera streaming (720p JPEG q%d, ~%lu fps)",
              kJpegQuality, static_cast<unsigned long>(1000u / kTxIntervalMs));
     return true;
 }
@@ -246,6 +274,31 @@ extern "C" bool VIDEO_AcquireFrame(const uint8_t **jpeg, size_t *jpeg_size, uint
     return true;
 }
 
+extern "C" bool VIDEO_CopyLocalFrame(uint8_t *dst, const size_t dst_cap,
+                                     size_t *size, uint32_t *seq)
+{
+    if (dst == nullptr || size == nullptr || seq == nullptr ||
+        s_local == nullptr || s_local_lock == nullptr) {
+        return false;
+    }
+    const uint32_t current = s_local_seq;
+    if (current == 0u || current == *seq) {
+        return false;
+    }
+    if (xSemaphoreTake(s_local_lock, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return false;
+    }
+    const size_t bytes = s_local_bytes;
+    const bool ok = bytes > 0u && bytes <= dst_cap;
+    if (ok) {
+        memcpy(dst, s_local, bytes);
+        *size = bytes;
+        *seq = s_local_seq; // re-read: the TX task may have republished
+    }
+    xSemaphoreGive(s_local_lock);
+    return ok;
+}
+
 extern "C" bool VIDEO_Receiving(void)
 {
     return (esp_timer_get_time() - s_last_rx_us) < kRxActiveWindowUs;
@@ -257,6 +310,7 @@ extern "C" void VIDEO_Init(void) {}
 extern "C" bool VIDEO_SetTxEnabled(bool) { return false; }
 extern "C" bool VIDEO_TxEnabled(void) { return false; }
 extern "C" bool VIDEO_AcquireFrame(const uint8_t **, size_t *, uint32_t *) { return false; }
+extern "C" bool VIDEO_CopyLocalFrame(uint8_t *, size_t, size_t *, uint32_t *) { return false; }
 extern "C" bool VIDEO_Receiving(void) { return false; }
 
 #endif

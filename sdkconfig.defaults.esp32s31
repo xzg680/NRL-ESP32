@@ -129,3 +129,19 @@ CONFIG_LV_DRAW_THREAD_PRIO=6
 # restoring CONFIG_LV_USE_FREETYPE=y + CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT
 # and bumping CONFIG_LV_DRAW_THREAD_STACK_SIZE to 32768.
 # CONFIG_LV_USE_FREETYPE is not set
+
+# --- FatFs filename encoding (TF card / USB drive music library) ---
+# Default ANSI/OEM (CP437) cannot represent Chinese long filenames: readdir
+# falls back to the 8.3 short alias (".flac" -> ".FLA") and the playlist
+# scanner skips the file. The UTF-8 API returns the LFN verbatim, which also
+# feeds the CJK-capable music UI font directly.
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+
+# --- DVP camera sensor (video call, S31 only) ---
+# The Korvo board's OV3660 must be enabled explicitly or esp-video registers
+# no sensor and /dev/video2 never appears (bsp_camera_open fails). The only
+# JPEG mode this sensor offers over DVP is 1280x720@12fps with a 10 MHz
+# XCLK; video_call.cpp requests exactly that.
+CONFIG_CAMERA_OV3660=y
+CONFIG_CAMERA_OV3660_DVP_JPEG_1280X720_12FPS=y
+CONFIG_CAMERA_OV3660_DVP_DEFAULT_FMT_JPEG_1280X720_12FPS=y

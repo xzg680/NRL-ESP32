@@ -20,12 +20,17 @@
 extern "C" {
 #endif
 
+// Upper bound of one JPEG frame in either direction; sizes the destination
+// buffer for VIDEO_CopyLocalFrame. The OV3660's only DVP JPEG mode is
+// 1280x720, which lands around 40-90 KB per frame.
+#define VIDEO_MAX_JPEG_BYTES (128 * 1024)
+
 // Register the RX handler with the bridge. Call once at startup; reception
 // is passive from then on (frames buffer whenever a peer transmits).
 void VIDEO_Init(void);
 
-// Camera transmission on/off (~5 fps VGA JPEG). Returns false when the
-// camera fails to start (no sensor / wrong board).
+// Camera transmission on/off (~5 fps 720p JPEG, sensor-side encode).
+// Returns false when the camera fails to start (no sensor / wrong board).
 bool VIDEO_SetTxEnabled(bool enabled);
 bool VIDEO_TxEnabled(void);
 
@@ -33,6 +38,12 @@ bool VIDEO_TxEnabled(void);
 // from the caller's previous value; the data stays valid until the next
 // VIDEO_AcquireFrame call. Pattern: acquire -> decode -> render.
 bool VIDEO_AcquireFrame(const uint8_t **jpeg, size_t *jpeg_size, uint32_t *seq);
+
+// Latest locally captured JPEG frame (only while camera TX is enabled),
+// copied into `dst` under the internal lock so the caller can decode at its
+// own pace with no tear risk. Returns true when a frame newer than `*seq`
+// was copied. Used by the LCD video page's self-view.
+bool VIDEO_CopyLocalFrame(uint8_t *dst, size_t dst_cap, size_t *size, uint32_t *seq);
 
 // True while frames arrived within the last couple of seconds.
 bool VIDEO_Receiving(void);

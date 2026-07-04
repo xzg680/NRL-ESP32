@@ -15,6 +15,7 @@
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
 #include "../services/nanny.h"
+#include "../services/radio_favorites.h"
 #include "../services/storage_service.h"
 
 #include <driver/gpio.h>
@@ -1794,7 +1795,25 @@ static void sendMediaSavedJson(const bool ok)
     appendField("smb_share", smb_share);
     appendField("smb_user", smb_user);
     appendField("smb_password", smb_pass);
-    body += "}}";
+    body += "}";
+    // Favorite stations ride along on every media save so the page can
+    // re-render the list after an add/delete/tune without a reload.
+    body += ",\"favs\":[";
+    const size_t fav_count = RADIO_FAV_Count();
+    for (size_t i = 0; i < fav_count; ++i) {
+        char fav_name[RADIO_FAV_NAME_SIZE] = {};
+        char fav_url[RADIO_FAV_URL_SIZE] = {};
+        if (!RADIO_FAV_Get(i, fav_name, sizeof(fav_name), fav_url, sizeof(fav_url))) {
+            break;
+        }
+        if (i > 0u) {
+            body += ",";
+        }
+        body += "{\"name\":\"" + jsonEscape(fav_name) +
+                "\",\"url\":\"" + jsonEscape(fav_url) + "\"}";
+    }
+    body += "],\"fav_cur\":" + std::to_string(RADIO_FAV_CurrentIndex());
+    body += "}";
     s_server.send(ok ? 200 : 400, "application/json; charset=utf-8", body);
 }
 
@@ -1879,6 +1898,20 @@ static esp_err_t handleSaveMedia(httpd_req_t *req)
     }
     if (ok && s_server.hasArg("radio_stop")) {
         MUSIC_Stop();
+    }
+    if (ok && s_server.hasArg("fav_add")) {
+        ok = RADIO_FAV_Set(-1, s_server.arg("fav_name").c_str(),
+                           s_server.arg("fav_url").c_str(), nullptr);
+    }
+    if (ok && s_server.hasArg("fav_del")) {
+        unsigned long index = 0UL;
+        ok = parseUIntArg(s_server.arg("fav_del"), &index) &&
+             RADIO_FAV_Remove(index);
+    }
+    if (ok && s_server.hasArg("fav_play")) {
+        unsigned long index = 0UL;
+        ok = parseUIntArg(s_server.arg("fav_play"), &index) &&
+             RADIO_FAV_PlayIndex(index);
     }
 
     if (!ok) {

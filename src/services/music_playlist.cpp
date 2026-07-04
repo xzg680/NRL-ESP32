@@ -17,8 +17,13 @@ static const char *TAG = "PLAYLIST";
 namespace {
 
 constexpr size_t kMaxTracks = 512;
-constexpr size_t kMaxPathLen = 128;
+// Matches music_player's limit; UTF-8 Chinese paths (3 bytes per CJK char
+// plus artist/album directories) overflow the old 128 quickly.
+constexpr size_t kMaxPathLen = 256;
 constexpr const char *kMusicSubdir = "music";
+// Albums usually sit one or two levels deep (music/artist/album/track);
+// cap the recursion so a pathological tree can't blow the scanner's stack.
+constexpr int kMaxScanDepth = 4;
 
 static char (*s_paths)[kMaxPathLen] = nullptr; // PSRAM array of paths
 static size_t s_count = 0;
@@ -36,6 +41,45 @@ static bool has_supported_extension(const char *name)
            strcasecmp(dot, ".aac") == 0;
 }
 
+// Recursive scan: albums live in subdirectories (music/artist/album/...),
+// so walk the whole tree up to kMaxScanDepth instead of one flat level.
+static void scan_tree(const char *dir_path, const int depth)
+{
+    DIR *dir = opendir(dir_path);
+    if (dir == nullptr) {
+        if (depth == 0) {
+            ESP_LOGI(TAG, "no %s directory", dir_path);
+        }
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr && s_count < kMaxTracks) {
+        if (entry->d_name[0] == '.') {
+            continue; // hidden entries + "."/".."
+        }
+        if (entry->d_type == DT_DIR) {
+            if (depth < kMaxScanDepth) {
+                char sub_path[kMaxPathLen];
+                const int written = snprintf(sub_path, sizeof(sub_path), "%s/%s",
+                                             dir_path, entry->d_name);
+                if (written > 0 && static_cast<size_t>(written) < sizeof(sub_path)) {
+                    scan_tree(sub_path, depth + 1);
+                }
+            }
+            continue;
+        }
+        if (!has_supported_extension(entry->d_name)) {
+            continue;
+        }
+        const int written = snprintf(s_paths[s_count], kMaxPathLen, "%s/%s", dir_path, entry->d_name);
+        if (written > 0 && static_cast<size_t>(written) < kMaxPathLen) {
+            ++s_count;
+        }
+    }
+    closedir(dir);
+}
+
 static void scan_dir(const char *mount_point, const char *subdir)
 {
     if (mount_point == nullptr) {
@@ -47,24 +91,7 @@ static void scan_dir(const char *mount_point, const char *subdir)
     } else {
         snprintf(dir_path, sizeof(dir_path), "%s", mount_point);
     }
-
-    DIR *dir = opendir(dir_path);
-    if (dir == nullptr) {
-        ESP_LOGI(TAG, "no %s directory", dir_path);
-        return;
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr && s_count < kMaxTracks) {
-        if (entry->d_type == DT_DIR || !has_supported_extension(entry->d_name)) {
-            continue;
-        }
-        const int written = snprintf(s_paths[s_count], kMaxPathLen, "%s/%s", dir_path, entry->d_name);
-        if (written > 0 && static_cast<size_t>(written) < kMaxPathLen) {
-            ++s_count;
-        }
-    }
-    closedir(dir);
+    scan_tree(dir_path, 0);
 }
 
 static int compare_paths(const void *a, const void *b)

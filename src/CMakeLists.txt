@@ -15,6 +15,7 @@ set(app_sources
     services/music_player.cpp
     services/music_playlist.cpp
     services/nanny.cpp
+    services/radio_favorites.cpp
     services/smb_vfs.cpp
     services/storage_service.cpp
     services/video_call.cpp

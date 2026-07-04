@@ -26,6 +26,16 @@ bool STORAGE_SdMounted(void);
 // Mount point of the TF card ("/sdcard"), or NULL when not mounted.
 const char *STORAGE_SdMountPoint(void);
 
+// Retry mounting the TF card (AT+SDMOUNT): lets a card inserted after boot
+// come online without a reboot. Returns the mounted state.
+bool STORAGE_SdMountRetry(void);
+
+// Erase + format the TF card as FAT in-device, then mount it. DESTRUCTIVE
+// (all card data is lost); only reachable via the explicit AT+SDFORMAT=YES.
+// Rescues cards shipped exFAT/NTFS, which this firmware's FatFs cannot read,
+// and sidesteps Windows' 32 GB FAT32 formatting limit.
+bool STORAGE_SdFormat(void);
+
 // USB flash drive state (USB-OTG Host MSC, hot-pluggable). On insertion the
 // drive is mounted at /usb and the playlist rescans; on removal any track
 // playing from it is stopped first.

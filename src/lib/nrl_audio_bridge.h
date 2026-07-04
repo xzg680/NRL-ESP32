@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,6 +18,11 @@ bool NRLAudioBridge_GetRemoteIdentity(char *buffer, size_t buffer_size);
 // false when idle. `callsign` is filled with the last known caller in both
 // cases, or an empty string if no caller has ever been heard.
 bool NRLAudioBridge_GetRemoteCaller(char *callsign, size_t callsign_size, unsigned *ssid);
+
+// Codec of the most recently decoded downlink voice packet: 0 = G.711,
+// 1 = Opus. Only meaningful while NRLAudioBridge_GetRemoteCaller reports an
+// active caller; the LCD reads it to show the incoming stream's format.
+uint8_t NRLAudioBridge_GetRxCodec(void);
 
 void NRLAudioBridge_ApplyConfig(bool restart_wifi, bool restart_udp);
 
@@ -36,7 +42,6 @@ void NRLAudioBridge_SendMediaUplink(const short *pcm8k, size_t sample_count);
 // TX voice codec: 0 = G.711 A-law 8 kHz (NRL packet type 1, default),
 // 1 = Opus 16 kHz wideband (packet type 8, shared codec module, 20 ms
 // frames, VOIP/VBR). RX accepts both regardless. Persisted in NVS.
-#include <stdint.h>
 void NRLAudioBridge_SetVoiceCodec(uint8_t codec);
 uint8_t NRLAudioBridge_GetVoiceCodec(void);
 

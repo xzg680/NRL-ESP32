@@ -9,11 +9,13 @@
 #include "../../lib/nrl_net_compat.h"
 #include "../../lib/nrl_wifi.h"
 #include "../../media/cover_decoder.h"
+#include "../../services/ai_assistant.h"
 #include "../../services/config_notify.h"
 #include "../../services/espnow_link.h"
 #include "../../services/music_player.h"
 #include "../../services/music_playlist.h"
 #include "../../services/nanny.h"
+#include "../../services/radio_favorites.h"
 #include "../../services/storage_service.h"
 #include "../../services/video_call.h"
 #include "external_radio.h"
@@ -39,8 +41,10 @@
 #include <esp_sntp.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
+#include <nvs.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <lvgl.h>
 
@@ -87,6 +91,7 @@ enum class Page : uint8_t {
     EspNow,
     Video,
     Game,
+    Ai,
 };
 
 enum class Action : intptr_t {
@@ -124,9 +129,14 @@ enum class Action : intptr_t {
     SaveRadio,
     RadioPlay,
     RadioStop,
+    RadioFavAdd,
+    RadioFavDel,
+    RadioFavPrev,
+    RadioFavNext,
     Video,
     VideoTx,
     Game,
+    Ai,
 };
 
 enum class AudioControl : intptr_t {
@@ -157,6 +167,8 @@ esp_lcd_panel_io_handle_t s_touch_io = nullptr;
 lv_indev_t *s_touch_indev = nullptr;
 
 lv_obj_t *s_lbl_caption = nullptr;
+lv_obj_t *s_lbl_rx_codec = nullptr;
+char s_shown_rx_codec[12] = {};
 lv_obj_t *s_lbl_callsign = nullptr;
 lv_obj_t *s_lbl_ssid = nullptr;
 lv_obj_t *s_lbl_time = nullptr;
@@ -196,6 +208,8 @@ lv_obj_t *s_ta_smb_pass = nullptr;
 lv_obj_t *s_ta_beacon_path = nullptr;
 lv_obj_t *s_ta_beacon_interval = nullptr;
 lv_obj_t *s_ta_radio_url = nullptr;
+lv_obj_t *s_ta_radio_name = nullptr;
+lv_obj_t *s_dd_radio_fav = nullptr;
 lv_obj_t *s_dd_music_target = nullptr;
 lv_obj_t *s_sw_espnow = nullptr;
 lv_obj_t *s_lbl_espnow_status = nullptr;
@@ -219,11 +233,13 @@ lv_obj_t *s_lbl_music_title = nullptr;
 lv_obj_t *s_lbl_music_artist = nullptr;
 lv_obj_t *s_lbl_music_album = nullptr;
 lv_obj_t *s_lbl_music_state = nullptr;
+lv_obj_t *s_lbl_music_format = nullptr;
 lv_obj_t *s_btn_music_toggle_label = nullptr;
 lv_obj_t *s_list_music = nullptr;
 lv_obj_t *s_img_music_cover = nullptr;
 lv_obj_t *s_lbl_music_icon = nullptr;
-char s_shown_music_path[128] = {};
+char s_shown_music_path[256] = {}; // matches the player/playlist path limit
+char s_shown_music_format[40] = {};
 bool s_shown_music_playing = false;
 
 // Decoded album art for the now-playing card. The bitmap and its LVGL
@@ -235,13 +251,39 @@ constexpr uint16_t kMusicCoverDim = 152;
 
 // Video-call page: remote JPEG frames decode through the same cover decoder
 // into this bitmap; s_video_shown_seq tracks the last rendered frame.
+// AI assistant page (xiaozhi push-to-talk).
+lv_obj_t *s_lbl_ai_status = nullptr;
+lv_obj_t *s_btn_ai_talk_label = nullptr;
+lv_obj_t *s_btn_ai_talk = nullptr;
+lv_obj_t *s_sw_ai = nullptr;
+char s_shown_ai_status[224] = {};
+
 lv_obj_t *s_img_video = nullptr;
 lv_obj_t *s_lbl_video_status = nullptr;
 lv_obj_t *s_btn_video_tx_label = nullptr;
 CoverBitmap s_video_bmp = {};
 lv_image_dsc_t s_video_dsc = {};
-uint32_t s_video_shown_seq = 0;
 constexpr uint16_t kVideoFrameDim = 456; // fits the 800x480 page layout
+
+// Local camera self-view (small PIP in the right column).
+lv_obj_t *s_img_video_local = nullptr;
+CoverBitmap s_video_local_bmp = {};
+lv_image_dsc_t s_video_local_dsc = {};
+constexpr uint16_t kVideoLocalDim = 144; // scaled decode; fits the PIP panel
+
+// Video decode worker: JPEG -> RGB565 for both the remote frame and the
+// local self-view runs in this task instead of inside Display_Poll, so the
+// LVGL/touch latency stays flat while a call is up. Core 0 (core 1 is
+// reserved for the audio pipeline + BT), priority 3: below the main loop (5)
+// and the camera TX task (4) -- decoding uses leftover cycles and simply
+// drops to a lower frame rate under load (Acquire/Copy always hand out only
+// the newest frame). Handoff to the UI is a pair of pending bitmaps guarded
+// by s_video_view_lock; refreshVideo adopts them with a non-blocking take.
+TaskHandle_t s_video_view_task = nullptr;
+volatile bool s_video_view_run = false;
+SemaphoreHandle_t s_video_view_lock = nullptr;
+CoverBitmap s_video_pending_remote = {};
+CoverBitmap s_video_pending_local = {};
 
 // Montserrat with a CJK font as fallback: ASCII keeps the Latin design,
 // Chinese tags/filenames render from the CJK engine. Initialised in
@@ -249,8 +291,8 @@ constexpr uint16_t kVideoFrameDim = 456; // fits the 800x480 page layout
 // The fallback is switchable at runtime between the built-in bitmap subset
 // (lv_font_cjk_*) and FreeType vector rendering from a TTF on the TF card,
 // for side-by-side comparison (Display_SetCjkFontEngine).
-lv_font_t s_font_music_16;
-lv_font_t s_font_music_20;
+lv_font_t s_font_ui_16;
+lv_font_t s_font_ui_20;
 int s_cjk_font_engine = DISPLAY_CJK_FONT_BITMAP;
 #if LV_USE_FREETYPE
 constexpr const char *kCjkTtfPath = "/sdcard/fonts/cjk.ttf";
@@ -514,9 +556,221 @@ bool initTouch()
     return true;
 }
 
+// ---- UI language (i18n) -----------------------------------------------------
+// English is the source language; `tr()` looks a string up in the table and
+// returns the Chinese text when 中文 is selected (falling back to English for
+// anything untranslated, so dynamic/technical strings pass through). The
+// helpers (button / fieldLabel / formStatus) translate automatically, so page
+// code mostly stays written in plain English. Persisted in NVS ("ui"/"lang");
+// switching rebuilds the current page. The CJK glyphs come from the GB2312
+// level-1 bitmap font that already backs the music tags.
+
+int s_lang = 0; // 0 = English, 1 = 中文
+
+struct TrEntry {
+    const char *en;
+    const char *zh;
+};
+
+const TrEntry kTr[] = {
+    // Navigation / common buttons
+    {"Back", "返回"},
+    {"Save", "保存"},
+    {"Config", "设置"},
+    {"Apps", "应用"},
+    {"Music", "音乐"},
+    {"Radio", "电台"},
+    {"Video", "视频"},
+    {"Tetris", "方块"},
+    {"Station", "台站"},
+    {"Audio", "音频"},
+    {"BT", "蓝牙"},
+    {"Nanny", "保姆"},
+    {"NAS", "共享"},
+    {"Scan", "扫描"},
+    {"Reset", "重置"},
+    {"Rescan", "重扫"},
+    {"Clear", "清除"},
+    {"Beacon Off", "关闭信标"},
+    {"Cam ON", "开摄像头"},
+    {"Cam OFF", "关摄像头"},
+    {"Hold to Talk", "按住说话"},
+    {"Language", "语言"},
+    {"English\n中文", "English\n中文"},
+    {"VOL-", "音量-"},
+    {"VOL+", "音量+"},
+    // PTT stays English (universal ham term); left untranslated on purpose.
+    // Home-page status captions (top bar)
+    {"STANDBY", "待机"},
+    {"FULL DUPLEX", "全双工"},
+    {"TRANSMITTING", "发射中"},
+    {"RECEIVING", "接收中"},
+    {"ESP-NOW TX", "ESP-NOW 发射"},
+    {"ESP-NOW RX", "ESP-NOW 接收"},
+    // WiFi page
+    {"WiFi SSID", "WiFi 名称"},
+    {"Password", "密码"},
+    {"Nearby WiFi", "附近 WiFi"},
+    {"Scan, select or type SSID, then save.", "扫描后选择或直接输入名称, 然后保存。"},
+    {"Scanning WiFi...", "正在扫描 WiFi..."},
+    {"Found %u WiFi networks.", "找到 %u 个 WiFi 网络。"},
+    {"Scan failed.", "扫描失败。"},
+    {"Scan failed: task create failed.", "扫描失败: 任务创建失败。"},
+    {"(scanning)", "(扫描中)"},
+    {"Select WiFi...", "选择 WiFi..."},
+    {"SSID: %s\nMode: %s\nSTA IP: %s\nConfig AP: %s\n\nReset WiFi clears saved network credentials.",
+     "名称: %s\n模式: %s\n联网地址: %s\n配置热点: %s\n\n重置将清除已保存的 WiFi 凭据。"},
+    // Station page
+    {"Callsign", "呼号"},
+    {"Server Host / IP", "服务器地址 / IP"},
+    {"Port", "端口"},
+    {"Edit station and server settings, then save.", "修改台站和服务器设置后保存。"},
+    {"Callsign: %s\nSSID: %u\nServer: %s:%u\n\nEdit station and server settings on the Station page.",
+     "呼号: %s\nSSID: %u\n服务器: %s:%u\n\n在台站页修改呼号和服务器设置。"},
+    // Audio page
+    {"Speaker", "扬声器"},
+    {"Speaker (headset)", "扬声器 (耳机)"},
+    {"Mic", "麦克风"},
+    {"Adjust audio settings, then save.", "调整音频设置后保存。"},
+    {"Changed. Tap Save to persist.", "已修改, 点保存生效。"},
+    {"Reset failed.", "重置失败。"},
+    {"Speaker volume: %d%%\nMic volume: %u\nAEC: %s\nNoise reduction: %s",
+     "扬声器音量: %d%%\n麦克风音量: %u\n回声消除: %s\nAI 降噪: %s"},
+    // Bluetooth page
+    {"Bluetooth headset", "蓝牙耳机"},
+    {"Turn on, Scan, then tap a headset. Saved ones reconnect automatically.",
+     "先开启并扫描, 点击耳机连接; 已保存的会自动重连。"},
+    {"Headsets: tap to connect, long-press a saved one to delete",
+     "点击耳机连接, 长按已保存条目删除"},
+    {"Scanning for headsets...", "正在扫描耳机..."},
+    {"Turn Bluetooth on first.", "请先打开蓝牙。"},
+    {"Removed saved headset.", "已删除保存的耳机。"},
+    // Apps page / playback target
+    {"Playback Target (music / beacon / radio)", "播放目标 (音乐 / 信标 / 电台)"},
+    {"Music Output Device", "音乐输出设备"},
+    {"Local speaker\nNRL network\nLocal + network", "本地扬声器\nNRL 网络\n本地 + 网络"},
+    {"Onboard speaker\nBT headset (A2DP)", "板载扬声器\n蓝牙耳机 (A2DP)"},
+    {"Applies from the next track.", "下一曲目起生效。"},
+    {"Playback target saved (applies from the next track).", "播放目标已保存 (下一曲目起生效)。"},
+    {"Music output saved (applies from the next track).", "输出设备已保存 (下一曲目起生效)。"},
+    // Music page
+    {"Playing", "播放中"},
+    {"Stopped", "已停止"},
+    {"No tracks. Put files in /sdcard/music and Rescan.",
+     "没有歌曲。把文件放进 TF 卡 music 目录后重扫。"},
+    {"No TF card mounted.", "未挂载 TF 卡。"},
+    // Net radio page
+    {"Favorite Stations", "收藏电台"},
+    {"Station Name", "电台名称"},
+    {"Stream URL (http:// or https://)", "直播流地址 (http:// 或 https://)"},
+    {"(no favorites)", "(暂无收藏)"},
+    {"My station", "我的电台"},
+    {"Pick a favorite or type a URL, then tap Play. + saves to favorites.",
+     "选择收藏或输入地址后点播放; + 存入收藏。"},
+    {"Playing: %s", "播放中: %s"},
+    {"Station URL saved.", "电台地址已保存。"},
+    {"Set a station URL first.", "请先填写电台地址。"},
+    {"Tuning in...", "正在连接电台..."},
+    {"Play failed.", "播放失败。"},
+    {"Stopped.", "已停止。"},
+    {"Save failed: URL must start with http:// or https://.",
+     "保存失败: 地址必须以 http:// 或 https:// 开头。"},
+    {"Add failed: URL must start with http:// or https://.",
+     "添加失败: 地址必须以 http:// 或 https:// 开头。"},
+    {"Favorites list is full.", "收藏已满。"},
+    {"Favorite saved.", "已存入收藏。"},
+    {"Favorite deleted.", "已删除收藏。"},
+    {"Delete failed.", "删除失败。"},
+    {"No favorites to delete.", "没有可删除的收藏。"},
+    {"No favorites to switch. Add one with +.", "没有收藏可切换, 用 + 添加。"},
+    // Nanny page
+    {"Beacon File Path", "信标文件路径"},
+    {"Interval (min)", "间隔 (分钟)"},
+    {"Beacon armed.", "信标已启用。"},
+    {"Beacon disabled.", "信标已关闭。"},
+    {"Beacon armed. Save applies changes; Beacon Off disarms.",
+     "信标已启用。保存应用修改; 关闭信标停用。"},
+    {"Beacon off. Set file path + minutes, then Save.",
+     "信标未启用。填写文件路径和分钟数后保存。"},
+    {"Save failed: set the beacon file path.", "保存失败: 请填写信标文件路径。"},
+    {"Save failed: interval must be 1-1440 minutes.", "保存失败: 间隔须为 1-1440 分钟。"},
+    // SMB page
+    {"Server (NAS / PC)", "服务器 (NAS / 电脑)"},
+    {"Share Name", "共享名"},
+    {"Username (empty = guest)", "用户名 (留空为来宾)"},
+    {"SMB saved. Mounting in background...", "已保存, 后台挂载中..."},
+    {"SMB config cleared.", "已清除共享配置。"},
+    {"Save failed: server and share are required.", "保存失败: 服务器和共享名必填。"},
+    // ESP-NOW page
+    {"ESP-NOW enable failed (WiFi not started).", "开启失败 (WiFi 未启动)。"},
+    // Video page
+    {"Remote video", "对方画面"},
+    {"Local camera", "本机画面"},
+    // AI page
+    {"xiaozhi AI Assistant", "小智 AI 助手"},
+    {"Enable assistant", "启用助手"},
+    {"Listening... release to send", "正在录音... 松开发送"},
+    {"Not connected", "未连接"},
+    {"Enable the assistant first", "请先启用助手"},
+    {"Connecting...", "连接中..."},
+    {"Assistant disabled.", "已停用助手。"},
+    {"Set the server URL first (web portal Media page or AT+AI=wss://...,token).",
+     "请先配置服务器地址 (Web 配置页媒体标签, 或 AT+AI=wss://...,token)。"},
+    {"Server URL / token: web portal Media page, or AT+AI=wss://...,token",
+     "服务器地址/令牌: Web 配置页媒体标签, 或 AT+AI=wss://...,token"},
+    // Shared
+    {"Settings updated from web/serial.", "设置已从 Web/串口更新。"},
+};
+
+const char *tr(const char *text)
+{
+    if (s_lang == 0 || text == nullptr) {
+        return text;
+    }
+    for (size_t i = 0; i < sizeof(kTr) / sizeof(kTr[0]); ++i) {
+        if (strcmp(kTr[i].en, text) == 0) {
+            return kTr[i].zh;
+        }
+    }
+    return text;
+}
+
+void loadUiLang()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("ui", NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    uint8_t lang = 0;
+    if (nvs_get_u8(nvs, "lang", &lang) == ESP_OK && lang <= 1u) {
+        s_lang = lang;
+    }
+    nvs_close(nvs);
+}
+
+void setUiLang(const int lang)
+{
+    s_lang = (lang != 0) ? 1 : 0;
+    nvs_handle_t nvs;
+    if (nvs_open("ui", NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "lang", static_cast<uint8_t>(s_lang));
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+// ---- widget helpers ---------------------------------------------------------
+
 lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
 {
     lv_obj_t *obj = lv_label_create(parent);
+    // Route the standard UI fonts through their CJK-fallback twins so
+    // translated text renders; pure-ASCII output is unaffected.
+    if (font == &lv_font_montserrat_16) {
+        font = &s_font_ui_16;
+    } else if (font == &lv_font_montserrat_20) {
+        font = &s_font_ui_20;
+    }
     lv_obj_set_style_text_font(obj, font, 0);
     lv_obj_set_style_text_color(obj, lv_color_hex(color), 0);
     lv_obj_set_style_text_letter_space(obj, 0, 0);
@@ -549,16 +803,18 @@ void audioSliderEvent(lv_event_t *event);
 void audioSwitchEvent(lv_event_t *event);
 void musicTargetEvent(lv_event_t *event);
 void musicOutputEvent(lv_event_t *event);
+void languageEvent(lv_event_t *event);
 void updateAudioValueLabels();
 void refresh();
 void rebuildCurrentPage();
+void stopVideoView();
 lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w);
 
 // Set the per-page form status line (no-op when the page has none).
 void formStatus(const char *text, uint32_t color)
 {
     if (s_lbl_form_status != nullptr) {
-        lv_label_set_text(s_lbl_form_status, text);
+        lv_label_set_text(s_lbl_form_status, tr(text));
         lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(color), 0);
     }
 }
@@ -583,7 +839,7 @@ lv_obj_t *button(lv_obj_t *parent, int x, int y, int w, int h, const char *text,
 
     lv_obj_t *txt = label(btn, &lv_font_montserrat_20, kColorText);
     lv_obj_center(txt);
-    lv_label_set_text(txt, text);
+    lv_label_set_text(txt, tr(text));
     return btn;
 }
 
@@ -624,7 +880,7 @@ void fieldLabel(lv_obj_t *parent, int x, int y, const char *text)
 {
     lv_obj_t *obj = label(parent, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_pos(obj, x, y);
-    lv_label_set_text(obj, text);
+    lv_label_set_text(obj, tr(text));
 }
 
 lv_obj_t *valueLabel(lv_obj_t *parent, int x, int y, int w)
@@ -633,7 +889,7 @@ lv_obj_t *valueLabel(lv_obj_t *parent, int x, int y, int w)
     lv_obj_set_pos(obj, x, y);
     lv_obj_set_width(obj, w);
     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_label_set_text(obj, "--");
+    lv_label_set_text(obj, tr("--"));
     return obj;
 }
 
@@ -665,7 +921,7 @@ lv_obj_t *switchControl(lv_obj_t *parent, int x, int y, const char *text, bool c
 
     lv_obj_t *txt = label(parent, &lv_font_montserrat_20, kColorText);
     lv_obj_set_pos(txt, x + 78, y + 6);
-    lv_label_set_text(txt, text);
+    lv_label_set_text(txt, tr(text));
     return sw;
 }
 
@@ -753,6 +1009,8 @@ void clearScreen()
     s_clr_bt_top = kColorUnset;
     s_ls_callsign = -1;
     s_lbl_caption = nullptr;
+    s_lbl_rx_codec = nullptr;
+    s_shown_rx_codec[0] = '\0';
     s_lbl_callsign = nullptr;
     s_lbl_ssid = nullptr;
     s_lbl_time = nullptr;
@@ -793,6 +1051,8 @@ void clearScreen()
     s_ta_beacon_path = nullptr;
     s_ta_beacon_interval = nullptr;
     s_ta_radio_url = nullptr;
+    s_ta_radio_name = nullptr;
+    s_dd_radio_fav = nullptr;
     s_dd_music_target = nullptr;
     s_sw_espnow = nullptr;
     s_lbl_espnow_status = nullptr;
@@ -804,15 +1064,27 @@ void clearScreen()
     s_lbl_music_artist = nullptr;
     s_lbl_music_album = nullptr;
     s_lbl_music_state = nullptr;
+    s_lbl_music_format = nullptr;
+    s_shown_music_format[0] = '\0';
     s_btn_music_toggle_label = nullptr;
     s_list_music = nullptr;
     s_img_music_cover = nullptr;
     s_lbl_music_icon = nullptr;
     s_shown_music_path[0] = '\0';
     s_shown_music_playing = false;
+    // Video page teardown: park the decode worker before its target widgets
+    // disappear (frames keep flowing in video_call; re-entering the page
+    // restarts the worker and repaints from the newest frame).
+    stopVideoView();
     s_img_video = nullptr;
+    s_img_video_local = nullptr;
     s_lbl_video_status = nullptr;
     s_btn_video_tx_label = nullptr;
+    s_lbl_ai_status = nullptr;
+    s_btn_ai_talk_label = nullptr;
+    s_btn_ai_talk = nullptr;
+    s_sw_ai = nullptr;
+    s_shown_ai_status[0] = '\0';
 }
 
 void topBar(lv_obj_t *scr)
@@ -844,7 +1116,7 @@ void topBar(lv_obj_t *scr)
     lv_obj_set_width(s_lbl_time, kTopTimeW);
     lv_obj_align(s_lbl_time, LV_ALIGN_LEFT_MID, kTopTimeX, 0);
     lv_obj_set_style_text_align(s_lbl_time, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(s_lbl_time, "--:--:--");
+    lv_label_set_text(s_lbl_time, tr("--:--:--"));
 
     s_lbl_local_station = label(bar, &lv_font_montserrat_20, kColorText);
     lv_obj_set_width(s_lbl_local_station, kTopStationW);
@@ -861,7 +1133,7 @@ void topBar(lv_obj_t *scr)
 
     // Music font (CJK fallback): when idle this badge doubles as the
     // now-playing ticker, which must render Chinese titles.
-    s_lbl_remote_station = label(bar, &s_font_music_20, kColorDim);
+    s_lbl_remote_station = label(bar, &s_font_ui_20, kColorDim);
     lv_obj_set_width(s_lbl_remote_station, kTopStationW);
     lv_obj_align(s_lbl_remote_station, LV_ALIGN_LEFT_MID, kTopRemoteX, 0);
     lv_obj_set_style_text_align(s_lbl_remote_station, LV_TEXT_ALIGN_CENTER, 0);
@@ -881,14 +1153,14 @@ void topBar(lv_obj_t *scr)
     lv_obj_set_width(s_lbl_bt_top, kTopBtW);
     lv_obj_align(s_lbl_bt_top, LV_ALIGN_LEFT_MID, kTopBtX, 0);
     lv_obj_set_style_text_align(s_lbl_bt_top, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(s_lbl_bt_top, "");
+    lv_label_set_text(s_lbl_bt_top, tr(""));
 
     // Per-core CPU load ("cpu0/cpu1"), updated by refreshCpu().
     s_lbl_cpu = label(bar, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_cpu, kTopCpuW);
     lv_obj_align(s_lbl_cpu, LV_ALIGN_LEFT_MID, kTopCpuX, 0);
     lv_obj_set_style_text_align(s_lbl_cpu, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(s_lbl_cpu, "--/--");
+    lv_label_set_text(s_lbl_cpu, tr("--/--"));
 }
 
 void buildHome()
@@ -902,7 +1174,13 @@ void buildHome()
     lv_obj_t *left = panel(scr, 22, 78, 458, 270);
     s_lbl_caption = label(left, &lv_font_montserrat_20, kColorDim);
     lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_label_set_text(s_lbl_caption, "STANDBY");
+    lv_label_set_text(s_lbl_caption, tr("STANDBY"));
+
+    // Incoming-stream codec tag (OPUS / G.711), top-right opposite the
+    // caption; only shown while an NRL voice stream is being received.
+    s_lbl_rx_codec = label(left, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_align(s_lbl_rx_codec, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_label_set_text(s_lbl_rx_codec, "");
 
     // Incoming caller's callsign-SSID at the largest crisp built-in font (48px),
     // centred in the freed space so it reads as the focal element.
@@ -923,7 +1201,7 @@ void buildHome()
     lv_obj_align(s_lbl_server, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     lv_obj_set_style_text_align(s_lbl_server, LV_TEXT_ALIGN_RIGHT, 0);
     lv_label_set_long_mode(s_lbl_server, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_lbl_server, "---");
+    lv_label_set_text(s_lbl_server, tr("---"));
 
     // Right: hold-to-talk PTT. With ESP-NOW enabled the area splits into two
     // stacked PTTs -- top keys the NRL network, bottom is the dedicated
@@ -948,18 +1226,18 @@ void buildHome()
         lv_obj_t *ptt = make_ptt(78, 270, softPttEvent, 0x7A1F1F);
         lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
         lv_obj_center(ptt_lbl);
-        lv_label_set_text(ptt_lbl, "PTT");
+        lv_label_set_text(ptt_lbl, tr("PTT"));
     } else {
         lv_obj_t *ptt = make_ptt(78, 128, softPttEvent, 0x7A1F1F);
         lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
         lv_obj_center(ptt_lbl);
-        lv_label_set_text(ptt_lbl, "PTT");
+        lv_label_set_text(ptt_lbl, tr("PTT"));
 
         lv_obj_t *eptt = make_ptt(220, 128, espnowPttEvent, 0x4C1D95);
         lv_obj_t *eptt_lbl = label(eptt, &lv_font_montserrat_20, kColorDuplex);
         lv_obj_center(eptt_lbl);
         lv_obj_set_style_text_align(eptt_lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(eptt_lbl, "ESP-NOW\nPTT");
+        lv_label_set_text(eptt_lbl, tr("ESP-NOW\nPTT"));
     }
 
     button(scr, 22, 372, 170, 78, "VOL-", Action::VolumeDown);
@@ -974,11 +1252,12 @@ void buildApps()
     s_page = Page::Apps;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    button(scr, 24, 84, 144, 120, "Music", Action::Music);
-    button(scr, 180, 84, 144, 120, "Radio", Action::Radio);
-    button(scr, 336, 84, 144, 120, "ESP-NOW", Action::EspNow);
-    button(scr, 492, 84, 144, 120, "Video", Action::Video);
-    button(scr, 648, 84, 126, 120, "Tetris", Action::Game);
+    button(scr, 24, 84, 118, 120, "Music", Action::Music);
+    button(scr, 150, 84, 118, 120, "Radio", Action::Radio);
+    button(scr, 276, 84, 118, 120, "ESP-NOW", Action::EspNow);
+    button(scr, 402, 84, 118, 120, "Video", Action::Video);
+    button(scr, 528, 84, 118, 120, "AI", Action::Ai);
+    button(scr, 654, 84, 120, 120, "Tetris", Action::Game);
 
     // Shared playback target: one setting for everything the music player
     // outputs (music / nanny beacon / net radio), so it lives here next to
@@ -986,7 +1265,7 @@ void buildApps()
     lv_obj_t *box = panel(scr, 24, 220, 750, 132);
     fieldLabel(box, 0, 0, "Playback Target (music / beacon / radio)");
     s_dd_music_target = styledDropdown(box, 0, 24, 340);
-    lv_dropdown_set_options(s_dd_music_target, "Local speaker\nNRL network\nLocal + network");
+    lv_dropdown_set_options(s_dd_music_target, tr("Local speaker\nNRL network\nLocal + network"));
     const int target = MUSIC_GetTarget();
     lv_dropdown_set_selected(s_dd_music_target,
                              (target >= MUSIC_TARGET_LOCAL && target <= MUSIC_TARGET_BOTH)
@@ -996,7 +1275,7 @@ void buildApps()
 
     fieldLabel(box, 380, 0, "Music Output Device");
     lv_obj_t *dd_output = styledDropdown(box, 380, 24, 330);
-    lv_dropdown_set_options(dd_output, "Onboard speaker\nBT headset (A2DP)");
+    lv_dropdown_set_options(dd_output, tr("Onboard speaker\nBT headset (A2DP)"));
     lv_dropdown_set_selected(dd_output,
                              (MUSIC_GetOutput() == MUSIC_OUTPUT_BT) ? 1u : 0u);
     lv_obj_add_event_cb(dd_output, musicOutputEvent, LV_EVENT_VALUE_CHANGED, nullptr);
@@ -1004,7 +1283,7 @@ void buildApps()
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_pos(s_lbl_form_status, 0, 76);
     lv_obj_set_width(s_lbl_form_status, 710);
-    lv_label_set_text(s_lbl_form_status, "Applies from the next track.");
+    lv_label_set_text(s_lbl_form_status, tr("Applies from the next track."));
 
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
 }
@@ -1023,6 +1302,13 @@ void buildConfig()
     button(scr, 280, 220, 240, 120, "Nanny", Action::Nanny);
     button(scr, 536, 220, 238, 120, "NAS", Action::Smb);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
+
+    // Language selector: switching persists and rebuilds this page in place.
+    fieldLabel(scr, 470, 388, "Language");
+    lv_obj_t *dd_lang = styledDropdown(scr, 574, 378, 200);
+    lv_dropdown_set_options(dd_lang, "English\n中文");
+    lv_dropdown_set_selected(dd_lang, static_cast<uint32_t>(s_lang));
+    lv_obj_add_event_cb(dd_lang, languageEvent, LV_EVENT_VALUE_CHANGED, nullptr);
 }
 
 void sanitizeOptionText(const char *src, char *dst, size_t dst_size)
@@ -1121,7 +1407,7 @@ void buildWifi()
     lv_obj_set_style_border_width(s_dd_wifi, 1, 0);
     lv_obj_set_style_text_color(s_dd_wifi, lv_color_hex(kColorText), 0);
     lv_dropdown_set_text(s_dd_wifi, "Select WiFi...");
-    lv_dropdown_set_options(s_dd_wifi, "(scanning)");
+    lv_dropdown_set_options(s_dd_wifi, tr("(scanning)"));
     lv_obj_add_event_cb(s_dd_wifi, wifiOptionEvent, LV_EVENT_VALUE_CHANGED, nullptr);
     // Style the popped-up option list so it is readable on the dark theme.
     lv_obj_t *dd_list = lv_dropdown_get_list(s_dd_wifi);
@@ -1141,7 +1427,7 @@ void buildWifi()
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_form_status, 710);
     lv_obj_set_pos(s_lbl_form_status, 0, 174);
-    lv_label_set_text(s_lbl_form_status, "Scan, select or type SSID, then save.");
+    lv_label_set_text(s_lbl_form_status, tr("Scan, select or type SSID, then save."));
 
     button(scr, 24, 372, 230, 76, "Back", Action::Config);
     button(scr, 278, 372, 146, 76, "Scan", Action::ScanWifi);
@@ -1178,7 +1464,7 @@ void buildStation()
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_form_status, 710);
     lv_obj_set_pos(s_lbl_form_status, 0, 176);
-    lv_label_set_text(s_lbl_form_status, "Edit station and server settings, then save.");
+    lv_label_set_text(s_lbl_form_status, tr("Edit station and server settings, then save."));
 
     button(scr, 24, 372, 230, 76, "Back", Action::Config);
     button(scr, 544, 372, 230, 76, "Save", Action::SaveStation);
@@ -1219,7 +1505,7 @@ void buildAudio()
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_form_status, 710);
     lv_obj_set_pos(s_lbl_form_status, 0, 210);
-    lv_label_set_text(s_lbl_form_status, "Adjust audio settings, then save.");
+    lv_label_set_text(s_lbl_form_status, tr("Adjust audio settings, then save."));
     updateAudioValueLabels();
 
     button(scr, 24, 372, 230, 76, "Back", Action::Config);
@@ -1239,10 +1525,14 @@ lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w)
     lv_obj_set_style_border_color(dd, lv_color_hex(kColorBorder), 0);
     lv_obj_set_style_border_width(dd, 1, 0);
     lv_obj_set_style_text_color(dd, lv_color_hex(kColorText), 0);
+    // CJK-capable font on the selected-value box AND the popup list, so
+    // translated options render instead of tofu (乱码).
+    lv_obj_set_style_text_font(dd, &s_font_ui_20, 0);
     lv_obj_t *dd_list = lv_dropdown_get_list(dd);
     if (dd_list != nullptr) {
         lv_obj_set_style_bg_color(dd_list, lv_color_hex(kColorPanel), 0);
         lv_obj_set_style_text_color(dd_list, lv_color_hex(kColorText), 0);
+        lv_obj_set_style_text_font(dd_list, &s_font_ui_20, 0);
         lv_obj_set_style_border_color(dd_list, lv_color_hex(kColorBorder), 0);
         lv_obj_set_style_max_height(dd_list, 220, 0);
     }
@@ -1322,6 +1612,28 @@ void buildNanny()
     createKeyboard(scr);
 }
 
+// Copy favorite `index` into the name/URL fields (no retune).
+void loadRadioFavForm(const size_t index)
+{
+    char name[RADIO_FAV_NAME_SIZE] = {};
+    char url[RADIO_FAV_URL_SIZE] = {};
+    if (!RADIO_FAV_Get(index, name, sizeof(name), url, sizeof(url))) {
+        return;
+    }
+    if (s_ta_radio_name != nullptr) {
+        lv_textarea_set_text(s_ta_radio_name, name);
+    }
+    if (s_ta_radio_url != nullptr) {
+        lv_textarea_set_text(s_ta_radio_url, url);
+    }
+}
+
+void radioFavSelectEvent(lv_event_t *event)
+{
+    lv_obj_t *dd = lv_event_get_target_obj(event);
+    loadRadioFavForm(lv_dropdown_get_selected(dd));
+}
+
 void buildRadio()
 {
     clearScreen();
@@ -1332,21 +1644,67 @@ void buildRadio()
 
     char url[256] = {};
     MUSIC_GetRadioUrl(url, sizeof(url));
+    const int fav_match = RADIO_FAV_IndexOfUrl(url);
+    char name[RADIO_FAV_NAME_SIZE] = {};
+    if (fav_match >= 0) {
+        (void)RADIO_FAV_Get(static_cast<size_t>(fav_match), name, sizeof(name), nullptr, 0);
+    }
 
-    fieldLabel(box, 0, 0, "Stream URL (http:// or https://)");
-    s_ta_radio_url = textArea(box, 0, 24, 710, "http://...", url, 200, false, nullptr, false);
+    // Favorite stations: pick from the dropdown to load a station into the
+    // fields, < / > retune directly, +Fav stores the fields, Del removes the
+    // selected entry. The same list is served to the web portal and AT.
+    fieldLabel(box, 0, 0, "Favorite Stations");
+    s_dd_radio_fav = styledDropdown(box, 0, 24, 380);
+    const size_t fav_count = RADIO_FAV_Count();
+    if (fav_count == 0u) {
+        lv_dropdown_set_options(s_dd_radio_fav, tr("(no favorites)"));
+    } else {
+        char options[RADIO_FAV_MAX * RADIO_FAV_NAME_SIZE + 8] = {};
+        size_t used = 0;
+        for (size_t i = 0; i < fav_count; ++i) {
+            char fav_name[RADIO_FAV_NAME_SIZE] = {};
+            (void)RADIO_FAV_Get(i, fav_name, sizeof(fav_name), nullptr, 0);
+            char clean[RADIO_FAV_NAME_SIZE];
+            sanitizeOptionText(fav_name, clean, sizeof(clean));
+            const int written = snprintf(options + used, sizeof(options) - used,
+                                         "%s%s", (i > 0u) ? "\n" : "", clean);
+            if (written <= 0 || used + static_cast<size_t>(written) >= sizeof(options)) {
+                break;
+            }
+            used += static_cast<size_t>(written);
+        }
+        lv_dropdown_set_options(s_dd_radio_fav, options);
+        lv_obj_add_event_cb(s_dd_radio_fav, radioFavSelectEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+        const int current = (fav_match >= 0) ? fav_match : RADIO_FAV_CurrentIndex();
+        if (current >= 0 && static_cast<size_t>(current) < fav_count) {
+            lv_dropdown_set_selected(s_dd_radio_fav, static_cast<uint32_t>(current));
+        }
+    }
+    button(box, 396, 24, 82, 42, LV_SYMBOL_PREV, Action::RadioFavPrev);
+    button(box, 488, 24, 82, 42, LV_SYMBOL_NEXT, Action::RadioFavNext);
+    button(box, 580, 24, 66, 42, "+", Action::RadioFavAdd);
+    button(box, 656, 24, 66, 42, LV_SYMBOL_TRASH, Action::RadioFavDel);
+
+    fieldLabel(box, 0, 80, "Station Name");
+    s_ta_radio_name = textArea(box, 0, 104, 280, "My station", name,
+                               RADIO_FAV_NAME_SIZE - 1, false, nullptr, false);
+    lv_obj_set_style_text_font(s_ta_radio_name, &s_font_ui_20, 0);
+    fieldLabel(box, 310, 80, "Stream URL (http:// or https://)");
+    s_ta_radio_url = textArea(box, 310, 104, 412, "http://...", url,
+                              RADIO_FAV_URL_SIZE - 1, false, nullptr, false);
 
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_form_status, 710);
-    lv_obj_set_pos(s_lbl_form_status, 0, 100);
+    lv_obj_set_pos(s_lbl_form_status, 0, 164);
     const char *playing_path = MUSIC_CurrentPath();
     if (MUSIC_IsPlaying() && strncmp(playing_path, "http", 4) == 0) {
         char text[192];
-        snprintf(text, sizeof(text), "Playing: %s", playing_path);
+        snprintf(text, sizeof(text), tr("Playing: %s"), playing_path);
         lv_label_set_text(s_lbl_form_status, text);
         lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorGood), 0);
     } else {
-        lv_label_set_text(s_lbl_form_status, "Save the station URL, then tap Play.");
+        lv_label_set_text(s_lbl_form_status,
+                          tr("Pick a favorite or type a URL, then tap Play. + saves to favorites."));
     }
 
     button(scr, 24, 372, 190, 76, "Back", Action::Apps);
@@ -1427,9 +1785,9 @@ void populateMusicList()
     const size_t count = PLAYLIST_Count();
     if (count == 0u) {
         lv_obj_t *empty = lv_list_add_text(s_list_music,
-                                           STORAGE_SdMounted()
-                                               ? "No tracks. Put files in /sdcard/music and Rescan."
-                                               : "No TF card mounted.");
+                                           tr(STORAGE_SdMounted()
+                                                  ? "No tracks. Put files in /sdcard/music and Rescan."
+                                                  : "No TF card mounted."));
         lv_obj_set_style_text_color(empty, lv_color_hex(kColorSub), 0);
         return;
     }
@@ -1441,6 +1799,59 @@ void populateMusicList()
         lv_obj_add_event_cb(btn, musicListEvent, LV_EVENT_CLICKED,
                             reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
     }
+}
+
+// Album-art fallback: a cover image file sitting next to the track
+// (cover.jpg / folder.jpg / album.jpg / front.jpg -- FatFs matches case-
+// insensitively, SMB may not, so a capitalised variant is tried too).
+// JPEG only; the cover decoder has no PNG path.
+bool loadFolderCover(const char *track_path, CoverBitmap *out)
+{
+    if (track_path == nullptr || track_path[0] == '\0') {
+        return false;
+    }
+    const char *slash = strrchr(track_path, '/');
+    if (slash == nullptr) {
+        return false;
+    }
+    const size_t dir_len = static_cast<size_t>(slash - track_path);
+
+    constexpr size_t kFolderCoverMaxBytes = 1024 * 1024;
+    static const char *kCoverNames[] = {
+        "cover.jpg", "folder.jpg", "album.jpg", "front.jpg", "Cover.jpg", "Folder.jpg",
+    };
+    for (size_t i = 0; i < sizeof(kCoverNames) / sizeof(kCoverNames[0]); ++i) {
+        char path[280]; // track dir (<=255) + "/folder.jpg"
+        const int written = snprintf(path, sizeof(path), "%.*s/%s",
+                                     static_cast<int>(dir_len), track_path, kCoverNames[i]);
+        if (written <= 0 || static_cast<size_t>(written) >= sizeof(path)) {
+            continue;
+        }
+        FILE *file = fopen(path, "rb");
+        if (file == nullptr) {
+            continue;
+        }
+        bool ok = false;
+        if (fseek(file, 0, SEEK_END) == 0) {
+            const long size = ftell(file);
+            if (size > 0 && static_cast<size_t>(size) <= kFolderCoverMaxBytes &&
+                fseek(file, 0, SEEK_SET) == 0) {
+                uint8_t *data = static_cast<uint8_t *>(
+                    heap_caps_malloc(static_cast<size_t>(size), MALLOC_CAP_SPIRAM));
+                if (data != nullptr) {
+                    if (fread(data, 1, static_cast<size_t>(size), file) == static_cast<size_t>(size)) {
+                        ok = COVER_DecodeJpeg(data, static_cast<size_t>(size), kMusicCoverDim, out);
+                    }
+                    heap_caps_free(data);
+                }
+            }
+        }
+        fclose(file);
+        if (ok) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void refreshMusicCover(const MediaTrackInfo *track)
@@ -1455,12 +1866,18 @@ void refreshMusicCover(const MediaTrackInfo *track)
     lv_obj_remove_flag(s_lbl_music_icon, LV_OBJ_FLAG_HIDDEN);
     COVER_Free(&s_music_cover_bmp);
 
-    if (track == nullptr || track->cover_type != MEDIA_COVER_JPEG ||
-        track->cover_data == nullptr || track->cover_size == 0u) {
-        return; // PNG or no art: keep the placeholder icon
+    bool have_cover = false;
+    if (track != nullptr && track->cover_type == MEDIA_COVER_JPEG &&
+        track->cover_data != nullptr && track->cover_size > 0u) {
+        have_cover = COVER_DecodeJpeg(track->cover_data, track->cover_size,
+                                      kMusicCoverDim, &s_music_cover_bmp);
     }
-    if (!COVER_DecodeJpeg(track->cover_data, track->cover_size, kMusicCoverDim, &s_music_cover_bmp)) {
-        return;
+    if (!have_cover) {
+        // No usable embedded art: try a cover image file in the track's folder.
+        have_cover = loadFolderCover(MUSIC_CurrentPath(), &s_music_cover_bmp);
+    }
+    if (!have_cover) {
+        return; // keep the placeholder icon
     }
 
     memset(&s_music_cover_dsc, 0, sizeof(s_music_cover_dsc));
@@ -1481,6 +1898,25 @@ void refreshMusic()
 {
     const bool playing = MUSIC_IsPlaying();
     const char *path = MUSIC_CurrentPath();
+
+    // Stream format line: the decoder only knows rate/depth/channels a
+    // moment after playback starts (no track/state change fires then), so
+    // poll it every pass; setLabel no-ops while the text is unchanged.
+    if (s_lbl_music_format != nullptr) {
+        char text[40] = "";
+        uint32_t rate = 0;
+        uint8_t bits = 0;
+        uint8_t channels = 0;
+        if (playing && MUSIC_GetStreamInfo(&rate, &bits, &channels)) {
+            snprintf(text, sizeof(text), "%lu.%lukHz %ubit %uch",
+                     static_cast<unsigned long>(rate / 1000u),
+                     static_cast<unsigned long>((rate % 1000u) / 100u),
+                     static_cast<unsigned>(bits),
+                     static_cast<unsigned>(channels));
+        }
+        setLabel(s_lbl_music_format, s_shown_music_format, sizeof(s_shown_music_format), text);
+    }
+
     const bool track_changed = strncmp(path, s_shown_music_path, sizeof(s_shown_music_path)) != 0;
     if (!track_changed && playing == s_shown_music_playing) {
         return;
@@ -1507,7 +1943,7 @@ void refreshMusic()
                           (track != nullptr && track->album[0] != '\0') ? track->album : "");
     }
     if (s_lbl_music_state != nullptr) {
-        lv_label_set_text(s_lbl_music_state, playing ? "Playing" : "Stopped");
+        lv_label_set_text(s_lbl_music_state, tr(playing ? "Playing" : "Stopped"));
         lv_obj_set_style_text_color(s_lbl_music_state,
                                     lv_color_hex(playing ? kColorGood : kColorSub), 0);
     }
@@ -1540,27 +1976,33 @@ void buildMusic()
         lv_obj_add_flag(s_lbl_music_icon, LV_OBJ_FLAG_HIDDEN);
     }
 
-    s_lbl_music_title = label(card, &s_font_music_20, kColorText);
+    s_lbl_music_title = label(card, &s_font_ui_20, kColorText);
     lv_obj_set_width(s_lbl_music_title, 270);
     lv_obj_align(s_lbl_music_title, LV_ALIGN_TOP_LEFT, 0, 162);
     lv_label_set_long_mode(s_lbl_music_title, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_lbl_music_title, "--");
+    lv_label_set_text(s_lbl_music_title, tr("--"));
 
-    s_lbl_music_artist = label(card, &s_font_music_16, kColorSub);
+    s_lbl_music_artist = label(card, &s_font_ui_16, kColorSub);
     lv_obj_set_width(s_lbl_music_artist, 270);
     lv_obj_align(s_lbl_music_artist, LV_ALIGN_TOP_LEFT, 0, 196);
     lv_label_set_long_mode(s_lbl_music_artist, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_lbl_music_artist, "");
+    lv_label_set_text(s_lbl_music_artist, tr(""));
 
-    s_lbl_music_album = label(card, &s_font_music_16, kColorDim);
+    s_lbl_music_album = label(card, &s_font_ui_16, kColorDim);
     lv_obj_set_width(s_lbl_music_album, 270);
     lv_obj_align(s_lbl_music_album, LV_ALIGN_TOP_LEFT, 0, 222);
     lv_label_set_long_mode(s_lbl_music_album, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_lbl_music_album, "");
+    lv_label_set_text(s_lbl_music_album, tr(""));
 
     s_lbl_music_state = label(card, &lv_font_montserrat_16, kColorSub);
     lv_obj_align(s_lbl_music_state, LV_ALIGN_BOTTOM_LEFT, 0, -2);
-    lv_label_set_text(s_lbl_music_state, "Stopped");
+    lv_label_set_text(s_lbl_music_state, tr("Stopped"));
+
+    // Stream format (rate / bit depth / channels), filled in by refreshMusic
+    // once the decoder reports it.
+    s_lbl_music_format = label(card, &lv_font_montserrat_16, kColorDim);
+    lv_obj_align(s_lbl_music_format, LV_ALIGN_BOTTOM_RIGHT, 0, -2);
+    lv_label_set_text(s_lbl_music_format, tr(""));
 
     // Right: scrollable track list.
     s_list_music = lv_list_create(scr);
@@ -1568,7 +2010,7 @@ void buildMusic()
     lv_obj_set_size(s_list_music, 436, 274);
     lv_obj_set_style_bg_color(s_list_music, lv_color_hex(kColorPanel), 0);
     lv_obj_set_style_border_color(s_list_music, lv_color_hex(kColorBorder), 0);
-    lv_obj_set_style_text_font(s_list_music, &s_font_music_16, 0);
+    lv_obj_set_style_text_font(s_list_music, &s_font_ui_16, 0);
     populateMusicList();
 
     button(scr, 24, 372, 150, 76, "Back", Action::Apps);
@@ -1601,6 +2043,108 @@ void musicToggle()
 
 // ---- Video call page --------------------------------------------------------
 
+void videoViewTask(void *)
+{
+    // Copy-out buffer for the local frame (PSRAM; freed on task exit).
+    uint8_t *local_jpeg = static_cast<uint8_t *>(
+        heap_caps_malloc(VIDEO_MAX_JPEG_BYTES, MALLOC_CAP_SPIRAM));
+    uint32_t remote_seq = 0;
+    uint32_t local_seq = 0;
+
+    while (s_video_view_run) {
+        bool worked = false;
+
+        const uint8_t *jpeg = nullptr;
+        size_t jpeg_size = 0;
+        if (VIDEO_AcquireFrame(&jpeg, &jpeg_size, &remote_seq)) {
+            CoverBitmap bmp = {};
+            if (COVER_DecodeJpeg(jpeg, jpeg_size, kVideoFrameDim, &bmp)) {
+                xSemaphoreTake(s_video_view_lock, portMAX_DELAY);
+                COVER_Free(&s_video_pending_remote); // UI missed one; drop it
+                s_video_pending_remote = bmp;
+                xSemaphoreGive(s_video_view_lock);
+            }
+            worked = true;
+        }
+
+        size_t local_size = 0;
+        if (local_jpeg != nullptr &&
+            VIDEO_CopyLocalFrame(local_jpeg, VIDEO_MAX_JPEG_BYTES, &local_size, &local_seq)) {
+            CoverBitmap bmp = {};
+            if (COVER_DecodeJpeg(local_jpeg, local_size, kVideoLocalDim, &bmp)) {
+                xSemaphoreTake(s_video_view_lock, portMAX_DELAY);
+                COVER_Free(&s_video_pending_local);
+                s_video_pending_local = bmp;
+                xSemaphoreGive(s_video_view_lock);
+            }
+            worked = true;
+        }
+
+        // Frames arrive at ~5 fps per direction; poll fast right after work
+        // (the other direction is often ready too), lazily otherwise.
+        vTaskDelay(pdMS_TO_TICKS(worked ? 10 : 40));
+    }
+
+    if (local_jpeg != nullptr) {
+        heap_caps_free(local_jpeg);
+    }
+    s_video_view_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void stopVideoView()
+{
+    s_video_view_run = false;
+    for (int i = 0; i < 100 && s_video_view_task != nullptr; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (s_video_view_lock != nullptr) {
+        xSemaphoreTake(s_video_view_lock, portMAX_DELAY);
+        COVER_Free(&s_video_pending_remote);
+        COVER_Free(&s_video_pending_local);
+        xSemaphoreGive(s_video_view_lock);
+    }
+}
+
+void startVideoView()
+{
+    if (s_video_view_lock == nullptr) {
+        s_video_view_lock = xSemaphoreCreateMutex();
+        if (s_video_view_lock == nullptr) {
+            return;
+        }
+    }
+    if (s_video_view_task != nullptr) {
+        return;
+    }
+    s_video_view_run = true;
+    if (xTaskCreatePinnedToCore(videoViewTask, "video_view", 6144, nullptr, 3,
+                                &s_video_view_task, 0) != pdPASS) {
+        s_video_view_run = false;
+        s_video_view_task = nullptr;
+        ESP_LOGE(TAG, "video view task create failed");
+    }
+}
+
+// Adopt a decoded bitmap from the worker into the shown bitmap + LVGL image.
+// UI-task only (lv_image_set_src is not thread-safe).
+void adoptVideoBitmap(lv_obj_t *img, CoverBitmap *shown, lv_image_dsc_t *dsc, CoverBitmap *pending)
+{
+    lv_image_set_src(img, nullptr);
+    COVER_Free(shown);
+    *shown = *pending;
+    memset(pending, 0, sizeof(*pending));
+    memset(dsc, 0, sizeof(*dsc));
+    dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
+    dsc->header.cf = LV_COLOR_FORMAT_RGB565;
+    dsc->header.w = shown->width;
+    dsc->header.h = shown->height;
+    dsc->header.stride = static_cast<uint32_t>(shown->width) * 2u;
+    dsc->data = shown->rgb565;
+    dsc->data_size = shown->bytes;
+    lv_image_set_src(img, dsc);
+}
+
 void refreshVideo()
 {
     if (s_lbl_video_status != nullptr) {
@@ -1611,29 +2155,32 @@ void refreshVideo()
         setLabel(s_lbl_video_status, s_shown_detail, sizeof(s_shown_detail), status);
     }
     if (s_btn_video_tx_label != nullptr) {
-        lv_label_set_text(s_btn_video_tx_label, VIDEO_TxEnabled() ? "Cam OFF" : "Cam ON");
+        lv_label_set_text(s_btn_video_tx_label, tr(VIDEO_TxEnabled() ? "Cam OFF" : "Cam ON"));
     }
 
-    const uint8_t *jpeg = nullptr;
-    size_t jpeg_size = 0;
-    if (s_img_video == nullptr ||
-        !VIDEO_AcquireFrame(&jpeg, &jpeg_size, &s_video_shown_seq)) {
+    // Camera off: drop the stale self-view so the "Local camera" hint shows.
+    if (s_img_video_local != nullptr && !VIDEO_TxEnabled() &&
+        s_video_local_bmp.rgb565 != nullptr) {
+        lv_image_set_src(s_img_video_local, nullptr);
+        COVER_Free(&s_video_local_bmp);
+    }
+
+    // Pick up freshly decoded frames; never block the UI task (the worker
+    // holds the lock only for a pointer swap). Adopting both in one pass
+    // lets a single LVGL render cover remote + local.
+    if (s_video_view_lock == nullptr ||
+        xSemaphoreTake(s_video_view_lock, 0) != pdTRUE) {
         return;
     }
-    lv_image_set_src(s_img_video, nullptr);
-    COVER_Free(&s_video_bmp);
-    if (!COVER_DecodeJpeg(jpeg, jpeg_size, kVideoFrameDim, &s_video_bmp)) {
-        return;
+    if (s_img_video != nullptr && s_video_pending_remote.rgb565 != nullptr) {
+        adoptVideoBitmap(s_img_video, &s_video_bmp, &s_video_dsc, &s_video_pending_remote);
     }
-    memset(&s_video_dsc, 0, sizeof(s_video_dsc));
-    s_video_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    s_video_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-    s_video_dsc.header.w = s_video_bmp.width;
-    s_video_dsc.header.h = s_video_bmp.height;
-    s_video_dsc.header.stride = static_cast<uint32_t>(s_video_bmp.width) * 2u;
-    s_video_dsc.data = s_video_bmp.rgb565;
-    s_video_dsc.data_size = s_video_bmp.bytes;
-    lv_image_set_src(s_img_video, &s_video_dsc);
+    if (s_img_video_local != nullptr && s_video_pending_local.rgb565 != nullptr &&
+        VIDEO_TxEnabled()) {
+        adoptVideoBitmap(s_img_video_local, &s_video_local_bmp, &s_video_local_dsc,
+                         &s_video_pending_local);
+    }
+    xSemaphoreGive(s_video_view_lock);
 }
 
 void buildVideo()
@@ -1643,27 +2190,35 @@ void buildVideo()
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
 
-    // Remote frame view (left) + status/controls (right).
+    // Remote frame view (left) + status/controls/self-view (right).
     lv_obj_t *frame_panel = panel(scr, 24, 78, 500, 274);
     s_img_video = lv_image_create(frame_panel);
     lv_obj_center(s_img_video);
     lv_obj_t *hint = label(frame_panel, &lv_font_montserrat_16, kColorDim);
     lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 6);
-    lv_label_set_text(hint, "Remote video");
+    lv_label_set_text(hint, tr("Remote video"));
     lv_obj_move_background(hint);
 
     s_lbl_video_status = label(scr, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_pos(s_lbl_video_status, 548, 96);
     lv_obj_set_width(s_lbl_video_status, 228);
-    lv_label_set_text(s_lbl_video_status, "TX off | RX idle");
+    lv_label_set_text(s_lbl_video_status, tr("TX off | RX idle"));
 
     lv_obj_t *toggle = button(scr, 548, 140, 226, 76, VIDEO_TxEnabled() ? "Cam OFF" : "Cam ON",
                               Action::VideoTx);
     s_btn_video_tx_label = lv_obj_get_child(toggle, 0);
 
+    // Local camera self-view under the toggle (VGA 4:3 scaled to <=144 px).
+    lv_obj_t *local_panel = panel(scr, 548, 232, 226, 140);
+    lv_obj_t *local_hint = label(local_panel, &lv_font_montserrat_16, kColorDim);
+    lv_obj_center(local_hint);
+    lv_label_set_text(local_hint, tr("Local camera"));
+    s_img_video_local = lv_image_create(local_panel);
+    lv_obj_center(s_img_video_local);
+
     button(scr, 24, 372, 230, 76, "Back", Action::Apps);
 
-    s_video_shown_seq = 0; // repaint the latest frame on entry
+    startVideoView();
     refreshVideo();
 }
 
@@ -1673,6 +2228,104 @@ void videoTxToggle()
         ESP_LOGW(TAG, "camera start failed");
     }
     s_last_refresh_ms = 0;
+}
+
+// ---- AI assistant page (xiaozhi) --------------------------------------------
+
+void refreshAiPage()
+{
+    if (s_lbl_ai_status != nullptr) {
+        char status[224];
+        AI_Describe(status, sizeof(status));
+        setLabel(s_lbl_ai_status, s_shown_ai_status, sizeof(s_shown_ai_status), status);
+    }
+    // While a listen turn is up the button doubles as the level indicator.
+    if (s_btn_ai_talk_label != nullptr && s_btn_ai_talk != nullptr) {
+        const bool listening = AI_IsListening();
+        lv_label_set_text(s_btn_ai_talk_label,
+                          tr(listening ? "Listening... release to send" : "Hold to Talk"));
+        lv_obj_set_style_bg_color(s_btn_ai_talk,
+                                  lv_color_hex(listening ? 0x1D634E : kColorPanel2), 0);
+    }
+}
+
+// Push-to-talk: press starts a listen turn (mic streams to the server),
+// release ends it and the reply plays through the speaker.
+void aiTalkEvent(lv_event_t *event)
+{
+    const lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED) {
+        if (!AI_StartListen()) {
+            if (s_btn_ai_talk_label != nullptr) {
+                lv_label_set_text(s_btn_ai_talk_label,
+                                  AI_IsEnabled() ? "Not connected" : "Enable the assistant first");
+            }
+            return;
+        }
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        AI_StopListen();
+    }
+    refreshAiPage();
+}
+
+void aiEnableEvent(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target_obj(event);
+    const bool want = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (!AI_SetEnabled(want)) {
+        // Enabling without a configured URL fails: snap the switch back.
+        if (want) {
+            lv_obj_remove_state(sw, LV_STATE_CHECKED);
+        }
+        formStatus("Set the server URL first (web portal Media page or AT+AI=wss://...,token).",
+                   kColorBad);
+    } else {
+        formStatus(want ? "Connecting..." : "Assistant disabled.", kColorSub);
+    }
+    s_last_refresh_ms = 0;
+}
+
+void buildAi()
+{
+    clearScreen();
+    s_page = Page::Ai;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 86, 750, 250);
+
+    fieldLabel(box, 0, 0, "xiaozhi AI Assistant");
+    s_lbl_ai_status = label(box, &s_font_ui_16, kColorText);
+    lv_obj_set_width(s_lbl_ai_status, 710);
+    lv_obj_set_pos(s_lbl_ai_status, 0, 26);
+    lv_label_set_long_mode(s_lbl_ai_status, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_lbl_ai_status, tr("--"));
+
+    fieldLabel(box, 0, 96, "Enable assistant");
+    s_sw_ai = lv_switch_create(box);
+    lv_obj_set_pos(s_sw_ai, 0, 120);
+    lv_obj_set_size(s_sw_ai, 64, 34);
+    if (AI_IsEnabled()) {
+        lv_obj_add_state(s_sw_ai, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(s_sw_ai, aiEnableEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_obj_set_pos(s_lbl_form_status, 0, 176);
+    lv_label_set_text(s_lbl_form_status,
+                      tr("Server URL / token: web portal Media page, or AT+AI=wss://...,token"));
+
+    button(scr, 24, 372, 190, 76, "Back", Action::Apps);
+    // Big push-to-talk button; needs its own press/release wiring instead of
+    // the shared CLICKED handler.
+    s_btn_ai_talk = button(scr, 230, 372, 544, 76, "Hold to Talk", Action::Ai);
+    lv_obj_remove_event_cb(s_btn_ai_talk, action);
+    lv_obj_add_event_cb(s_btn_ai_talk, aiTalkEvent, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(s_btn_ai_talk, aiTalkEvent, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(s_btn_ai_talk, aiTalkEvent, LV_EVENT_PRESS_LOST, nullptr);
+    s_btn_ai_talk_label = lv_obj_get_child(s_btn_ai_talk, 0);
+
+    refreshAiPage();
 }
 
 // ---- Games ------------------------------------------------------------------
@@ -1713,7 +2366,7 @@ void markAudioChanged()
 {
     updateAudioValueLabels();
     if (s_lbl_form_status != nullptr) {
-        lv_label_set_text(s_lbl_form_status, "Changed. Tap Save to persist.");
+        lv_label_set_text(s_lbl_form_status, tr("Changed. Tap Save to persist."));
         lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorWarn), 0);
     }
     s_last_refresh_ms = 0;
@@ -1785,7 +2438,7 @@ void scanWifiForDropdown()
 {
     if (s_wifi_scan_running) {
         if (s_lbl_form_status != nullptr) {
-            lv_label_set_text(s_lbl_form_status, "Scanning WiFi...");
+            lv_label_set_text(s_lbl_form_status, tr("Scanning WiFi..."));
             lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorWarn), 0);
         }
         return;
@@ -1794,7 +2447,7 @@ void scanWifiForDropdown()
     s_wifi_scan_complete = false;
     s_wifi_scan_ok = false;
     if (s_lbl_form_status != nullptr) {
-        lv_label_set_text(s_lbl_form_status, "Scanning WiFi...");
+        lv_label_set_text(s_lbl_form_status, tr("Scanning WiFi..."));
         lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorWarn), 0);
     }
     lv_timer_handler();
@@ -1807,7 +2460,7 @@ void scanWifiForDropdown()
         s_wifi_scan_running = false;
         s_wifi_scan_complete = false;
         if (s_lbl_form_status != nullptr) {
-            lv_label_set_text(s_lbl_form_status, "Scan failed: task create failed.");
+            lv_label_set_text(s_lbl_form_status, tr("Scan failed: task create failed."));
             lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorBad), 0);
         }
     }
@@ -1829,11 +2482,11 @@ void pollWifiScan()
                 lv_textarea_set_text(s_ta_wifi_ssid, s_wifi_option_ssids[0]);
             }
             char text[48] = {};
-            snprintf(text, sizeof(text), "Found %u WiFi networks.", static_cast<unsigned>(got));
+            snprintf(text, sizeof(text), tr("Found %u WiFi networks."), static_cast<unsigned>(got));
             lv_label_set_text(s_lbl_form_status, text);
             lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorGood), 0);
         } else {
-            lv_label_set_text(s_lbl_form_status, "Scan failed.");
+            lv_label_set_text(s_lbl_form_status, tr("Scan failed."));
             lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorBad), 0);
         }
     }
@@ -1898,7 +2551,7 @@ void resetAudioForm()
     if (ok) {
         buildAudio();
     } else if (s_lbl_form_status != nullptr) {
-        lv_label_set_text(s_lbl_form_status, "Reset failed.");
+        lv_label_set_text(s_lbl_form_status, tr("Reset failed."));
         lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(kColorBad), 0);
     }
 }
@@ -1976,11 +2629,71 @@ void saveRadioForm(const bool play)
         formStatus("Set a station URL first.", kColorBad);
         return;
     }
-    if (MUSIC_PlayFile(url)) {
+    // Tune through the favorites service when the URL is a favorite so
+    // next/prev keep stepping from the right entry.
+    const int fav = RADIO_FAV_IndexOfUrl(url);
+    const bool started = (fav >= 0) ? RADIO_FAV_PlayIndex(static_cast<size_t>(fav))
+                                    : MUSIC_PlayFile(url);
+    if (started) {
         formStatus("Tuning in...", kColorGood);
     } else {
         formStatus("Play failed.", kColorBad);
     }
+}
+
+// "+" button: store the name/URL fields as a favorite (updates the name in
+// place when the URL is already listed), then rebuild so the dropdown shows it.
+void radioFavAddForm()
+{
+    char name[RADIO_FAV_NAME_SIZE] = {};
+    char url[RADIO_FAV_URL_SIZE] = {};
+    snprintf(name, sizeof(name), "%s",
+             (s_ta_radio_name != nullptr) ? lv_textarea_get_text(s_ta_radio_name) : "");
+    snprintf(url, sizeof(url), "%s",
+             (s_ta_radio_url != nullptr) ? lv_textarea_get_text(s_ta_radio_url) : "");
+    const int existing = RADIO_FAV_IndexOfUrl(url);
+    int slot = -1;
+    if (!RADIO_FAV_Set(existing, name, url, &slot)) {
+        if (existing < 0 && RADIO_FAV_Count() >= RADIO_FAV_MAX) {
+            formStatus("Favorites list is full.", kColorBad);
+        } else {
+            formStatus("Add failed: URL must start with http:// or https://.", kColorBad);
+        }
+        return;
+    }
+    buildRadio();
+    if (s_dd_radio_fav != nullptr && slot >= 0) {
+        lv_dropdown_set_selected(s_dd_radio_fav, static_cast<uint32_t>(slot));
+        loadRadioFavForm(static_cast<size_t>(slot));
+    }
+    formStatus("Favorite saved.", kColorGood);
+}
+
+// Trash button: delete the favorite selected in the dropdown.
+void radioFavDelForm()
+{
+    if (RADIO_FAV_Count() == 0u) {
+        formStatus("No favorites to delete.", kColorBad);
+        return;
+    }
+    const uint32_t selected =
+        (s_dd_radio_fav != nullptr) ? lv_dropdown_get_selected(s_dd_radio_fav) : 0u;
+    if (!RADIO_FAV_Remove(selected)) {
+        formStatus("Delete failed.", kColorBad);
+        return;
+    }
+    buildRadio();
+    formStatus("Favorite deleted.", kColorGood);
+}
+
+// < / > buttons: retune to the previous/next favorite immediately.
+void radioFavStep(const bool next)
+{
+    if (!(next ? RADIO_FAV_Next() : RADIO_FAV_Prev())) {
+        formStatus("No favorites to switch. Add one with +.", kColorBad);
+        return;
+    }
+    buildRadio(); // refresh selection/fields; shows the Playing status line
 }
 
 // ---- Bluetooth headset page ------------------------------------------------
@@ -2014,7 +2727,7 @@ void btRowConnect(lv_event_t *event)
         NRL_BtHfp_ConnectIndex(static_cast<size_t>(v));
     }
     if (s_lbl_bt_status != nullptr) {
-        lv_label_set_text(s_lbl_bt_status, "Connecting...");
+        lv_label_set_text(s_lbl_bt_status, tr("Connecting..."));
         lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorWarn), 0);
     }
     s_last_refresh_ms = 0;
@@ -2028,7 +2741,7 @@ void btRowForget(lv_event_t *event)
     }
     NRL_BtHfp_RemoveSaved(static_cast<size_t>(v - kBtSavedTag));
     if (s_lbl_bt_status != nullptr) {
-        lv_label_set_text(s_lbl_bt_status, "Removed saved headset.");
+        lv_label_set_text(s_lbl_bt_status, tr("Removed saved headset."));
         lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorSub), 0);
     }
     // Don't rebuild the list from inside this row's own event; let refreshBtPage
@@ -2134,7 +2847,7 @@ void buildBt()
     s_lbl_bt_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_bt_status, 710);
     lv_obj_set_pos(s_lbl_bt_status, 0, 222);
-    lv_label_set_text(s_lbl_bt_status, "Turn on, Scan, then tap a headset. Saved ones reconnect automatically.");
+    lv_label_set_text(s_lbl_bt_status, tr("Turn on, Scan, then tap a headset. Saved ones reconnect automatically."));
 
     button(scr, 24, 372, 360, 76, "Back", Action::Config);
     button(scr, 414, 372, 360, 76, "Scan", Action::ScanBt);
@@ -2144,14 +2857,14 @@ void scanBtForDropdown()
 {
     if (!NRL_BtHfp_IsEnabled()) {
         if (s_lbl_bt_status != nullptr) {
-            lv_label_set_text(s_lbl_bt_status, "Turn Bluetooth on first.");
+            lv_label_set_text(s_lbl_bt_status, tr("Turn Bluetooth on first."));
             lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorWarn), 0);
         }
         return;
     }
     NRL_BtHfp_StartScan();
     if (s_lbl_bt_status != nullptr) {
-        lv_label_set_text(s_lbl_bt_status, "Scanning for headsets...");
+        lv_label_set_text(s_lbl_bt_status, tr("Scanning for headsets..."));
         lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorWarn), 0);
     }
 }
@@ -2262,6 +2975,7 @@ void action(lv_event_t *event)
         case Action::Video: buildVideo(); break;
         case Action::VideoTx: videoTxToggle(); break;
         case Action::Game: buildGame(); break;
+        case Action::Ai: buildAi(); break;
         case Action::SaveSmb: saveSmbForm(); break;
         case Action::ClearSmb: clearSmbForm(); break;
         case Action::SaveNanny: saveNannyForm(); break;
@@ -2272,6 +2986,10 @@ void action(lv_event_t *event)
             MUSIC_Stop();
             formStatus("Stopped.", kColorSub);
             break;
+        case Action::RadioFavAdd: radioFavAddForm(); break;
+        case Action::RadioFavDel: radioFavDelForm(); break;
+        case Action::RadioFavPrev: radioFavStep(false); break;
+        case Action::RadioFavNext: radioFavStep(true); break;
     }
     // Changes made from this UI are already on screen (with their status
     // message); consume the bump so refresh() doesn't rebuild over them.
@@ -2396,6 +3114,16 @@ void musicTargetEvent(lv_event_t *event)
     MUSIC_SetTarget(static_cast<int>(lv_dropdown_get_selected(dd)));
     formStatus("Playback target saved (applies from the next track).", kColorGood);
     s_cfg_gen_seen = CONFIG_NOTIFY_Generation(); // own change
+}
+
+// Language dropdown (Config page): persist the choice and rebuild the page so
+// every string re-renders in the new language immediately.
+void languageEvent(lv_event_t *event)
+{
+    lv_obj_t *dd = lv_event_get_target_obj(event);
+    setUiLang(static_cast<int>(lv_dropdown_get_selected(dd)));
+    buildConfig();
+    s_last_refresh_ms = 0;
 }
 
 // The Home "network" panel doubles as a hold-to-talk soft PTT: pressing anywhere
@@ -2649,10 +3377,16 @@ void refreshHome()
     } else {
         call_color = kColorDim;
     }
-    if (setLabel(s_lbl_caption, s_shown_caption, sizeof(s_shown_caption), caption)) {
+    if (setLabel(s_lbl_caption, s_shown_caption, sizeof(s_shown_caption), tr(caption))) {
         lv_obj_set_style_text_color(s_lbl_caption, lv_color_hex(color), 0);
     }
     setLabelColor(s_lbl_callsign, s_clr_callsign, call_color);
+
+    // Source audio codec of the incoming NRL stream (blank unless receiving).
+    const char *rx_codec = (has_caller)
+                               ? (NRLAudioBridge_GetRxCodec() == 1u ? "OPUS" : "G.711")
+                               : "";
+    setLabel(s_lbl_rx_codec, s_shown_rx_codec, sizeof(s_shown_rx_codec), rx_codec);
 
     char ip[96];
     uint32_t ip_color = kColorAccent;
@@ -2760,14 +3494,14 @@ void refreshDetailPage()
         nrlIpToString(nrlWifiStaIp(), sta, sizeof(sta));
         nrlIpToString(nrlWifiApIp(), ap, sizeof(ap));
         snprintf(text, sizeof(text),
-                 "SSID: %s\nMode: %s\nSTA IP: %s\nConfig AP: %s\n\nReset WiFi clears saved network credentials.",
+                 tr("SSID: %s\nMode: %s\nSTA IP: %s\nConfig AP: %s\n\nReset WiFi clears saved network credentials."),
                  (cfg && cfg->wifi_ssid[0]) ? cfg->wifi_ssid : "(not set)",
                  nrlWifiStaConnected() ? "STA connected" : "AP/config",
                  sta[0] ? sta : "---",
                  ap[0] ? ap : "192.168.4.1");
     } else if (s_page == Page::Station) {
         snprintf(text, sizeof(text),
-                 "Callsign: %s\nSSID: %u\nServer: %s:%u\n\nEdit station and server settings on the Station page.",
+                 tr("Callsign: %s\nSSID: %u\nServer: %s:%u\n\nEdit station and server settings on the Station page."),
                  (cfg && cfg->callsign[0]) ? cfg->callsign : "----",
                  cfg ? static_cast<unsigned>(cfg->callsign_ssid) : 0,
                  (cfg && cfg->server_host[0]) ? cfg->server_host : "---",
@@ -2775,7 +3509,7 @@ void refreshDetailPage()
     } else if (s_page == Page::Audio) {
         const int pct = cfg ? (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255 : 0;
         snprintf(text, sizeof(text),
-                 "Speaker volume: %d%%\nMic volume: %u\nAEC: %s\nNoise reduction: %s",
+                 tr("Speaker volume: %d%%\nMic volume: %u\nAEC: %s\nNoise reduction: %s"),
                  pct,
                  cfg ? static_cast<unsigned>(cfg->mic_volume) : 0,
                  (cfg && cfg->aec_enabled) ? "on" : "off",
@@ -2797,7 +3531,8 @@ void refresh()
         const bool form_page = s_page == Page::Wifi || s_page == Page::Station ||
                                s_page == Page::Audio || s_page == Page::Apps ||
                                s_page == Page::Nanny || s_page == Page::Smb ||
-                               s_page == Page::Radio || s_page == Page::EspNow;
+                               s_page == Page::Radio || s_page == Page::EspNow ||
+                               s_page == Page::Ai;
         const bool keyboard_open =
             s_keyboard != nullptr && !lv_obj_has_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
         if (!form_page) {
@@ -2831,6 +3566,9 @@ void refresh()
     if (s_page == Page::Video) {
         refreshVideo();
     }
+    if (s_page == Page::Ai) {
+        refreshAiPage();
+    }
 }
 
 // Rebuild the active page so a font-engine switch takes effect on every
@@ -2852,6 +3590,7 @@ void rebuildCurrentPage()
         case Page::EspNow: buildEspNow(); break;
         case Page::Video: buildVideo(); break;
         case Page::Game: buildGame(); break;
+        case Page::Ai: buildAi(); break;
     }
     s_last_refresh_ms = 0;
 }
@@ -2906,12 +3645,13 @@ extern "C" void Display_Init(void)
     if (!initPanel() || !initLvgl()) {
         return;
     }
-    // Music-page fonts: Montserrat primary with the generated CJK fallback
-    // so Chinese track tags render (lv_font_montserrat_* are const).
-    s_font_music_16 = lv_font_montserrat_16;
-    s_font_music_16.fallback = &lv_font_cjk_16;
-    s_font_music_20 = lv_font_montserrat_20;
-    s_font_music_20.fallback = &lv_font_cjk_20;
+    // UI fonts: Montserrat primary with the generated CJK fallback so any
+    // translated/Chinese text renders (lv_font_montserrat_* are const).
+    s_font_ui_16 = lv_font_montserrat_16;
+    s_font_ui_16.fallback = &lv_font_cjk_16;
+    s_font_ui_20 = lv_font_montserrat_20;
+    s_font_ui_20.fallback = &lv_font_cjk_20;
+    loadUiLang(); // restore saved language before the first page is built
     initTouch();
     buildHome();
     refresh();
@@ -3030,8 +3770,8 @@ extern "C" bool Display_SetCjkFontEngine(const int engine)
         return false;
     }
     if (engine == DISPLAY_CJK_FONT_BITMAP) {
-        s_font_music_16.fallback = &lv_font_cjk_16;
-        s_font_music_20.fallback = &lv_font_cjk_20;
+        s_font_ui_16.fallback = &lv_font_cjk_16;
+        s_font_ui_20.fallback = &lv_font_cjk_20;
         s_cjk_font_engine = DISPLAY_CJK_FONT_BITMAP;
         rebuildCurrentPage();
         return true;
@@ -3041,8 +3781,8 @@ extern "C" bool Display_SetCjkFontEngine(const int engine)
         if (!ensureFreetypeFonts()) {
             return false;
         }
-        s_font_music_16.fallback = s_ft_font_16;
-        s_font_music_20.fallback = s_ft_font_20;
+        s_font_ui_16.fallback = s_ft_font_16;
+        s_font_ui_20.fallback = s_ft_font_20;
         s_cjk_font_engine = DISPLAY_CJK_FONT_FREETYPE;
         rebuildCurrentPage();
         return true;

@@ -195,6 +195,11 @@ static bool ensure_net_capacity(const size_t samples)
 
 static volatile MusicTrackEndCb_t s_track_end_cb = nullptr;
 
+// Stream format of the current track for the UI's format line; written by
+// the player task when the first frame decodes, cleared when it exits.
+static MediaDecoderInfo s_stream_info = {};
+static volatile bool s_stream_info_valid = false;
+
 static void player_task(void *)
 {
     // Tags first (cheap header/tail reads), so the UI has title/cover as
@@ -280,6 +285,8 @@ static void player_task(void *)
                 net_start_us = esp_timer_get_time();
             }
             format_ready = true;
+            s_stream_info = info;
+            s_stream_info_valid = true;
             ESP_LOGI(TAG, "playing %s: %luHz %ubit %uch target=%s",
                      s_current_path,
                      static_cast<unsigned long>(info.sample_rate_hz),
@@ -371,6 +378,7 @@ static void player_task(void *)
         NRL_BtA2dp_RequestStop();
     }
 
+    s_stream_info_valid = false;
     s_playing = false;
     s_player_task = nullptr;
 
@@ -514,4 +522,23 @@ extern "C" void MUSIC_GetRadioUrl(char *out, const size_t out_size)
     if (out != nullptr && out_size > 0u) {
         snprintf(out, out_size, "%s", s_radio_url);
     }
+}
+
+extern "C" bool MUSIC_GetStreamInfo(uint32_t *sample_rate_hz,
+                                    uint8_t *bits_per_sample,
+                                    uint8_t *channels)
+{
+    if (!s_stream_info_valid) {
+        return false;
+    }
+    if (sample_rate_hz != nullptr) {
+        *sample_rate_hz = s_stream_info.sample_rate_hz;
+    }
+    if (bits_per_sample != nullptr) {
+        *bits_per_sample = s_stream_info.bits_per_sample;
+    }
+    if (channels != nullptr) {
+        *channels = s_stream_info.channels;
+    }
+    return true;
 }

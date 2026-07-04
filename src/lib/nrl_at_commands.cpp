@@ -14,6 +14,7 @@
 #include "services/video_call.h"
 #include "services/music_player.h"
 #include "services/music_playlist.h"
+#include "services/radio_favorites.h"
 #include "services/nanny.h"
 #include "services/storage_service.h"
 #include "driver/sci_serial.h"
@@ -35,9 +36,10 @@ static const char *TAG = "NRL";
 
 namespace {
 
+// value is sized for AT+RADIOADD=<name>,<url> (48-byte name + 200-byte URL).
 struct AtCommand {
     char command[32];
-    char value[128];
+    char value[256];
 };
 
 static bool stringEqualsIgnoreCase(const char *lhs, const char *rhs)
@@ -236,7 +238,7 @@ static bool decodeAtCommand(const uint8_t *payload, const size_t payload_size, A
         return false;
     }
 
-    char buffer[160];
+    char buffer[288];
     size_t copy_size = payload_size - 1u;
     if (copy_size >= sizeof(buffer)) {
         copy_size = sizeof(buffer) - 1u;
@@ -859,6 +861,150 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    // TF card maintenance. AT+SDMOUNT=1 retries the mount after a hot insert
+    // (AT+SDMOUNT=? reports state). AT+SDFORMAT=YES ERASES the card and
+    // formats it FAT in-device -- the rescue path for factory exFAT/NTFS
+    // cards this FatFs build cannot read (also sidesteps Windows' 32 GB
+    // FAT32 limit). Formatting a large card can block for tens of seconds.
+    if (stringEqualsIgnoreCase(command.command, "SDMOUNT")) {
+        const bool mounted = is_query ? STORAGE_SdMounted() : STORAGE_SdMountRetry();
+        if (!is_query && mounted) {
+            (void)PLAYLIST_Scan();
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SDMOUNT",
+                           mounted ? STORAGE_SdMountPoint() : "(not mounted)");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "SDFORMAT")) {
+        if (!stringEqualsIgnoreCase(command.value, "YES")) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SDFORMAT",
+                               "card will be ERASED; confirm with AT+SDFORMAT=YES");
+            return;
+        }
+        if (!STORAGE_SdFormat()) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "SDFORMAT");
+            return;
+        }
+        (void)PLAYLIST_Scan();
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SDFORMAT", "OK");
+        return;
+    }
+
+    // Net-radio favorite stations (services/radio_favorites.h):
+    //   AT+RADIOLIST=?      -> AT+RADIOCNT/RADIOCUR + AT+RADIO<i>=<name> lines
+    //   AT+RADIOLIST=<i>    -> one entry with its URL
+    //   AT+RADIOADD=<name>,<url>  (URL detected at the ",http" boundary so
+    //                              names may contain commas)
+    //   AT+RADIODEL=<i>
+    //   AT+RADIOPLAY=<i>    -> tune favorite i (AT+RADIOPLAY=? for status)
+    //   AT+RADIONEXT=1 / AT+RADIOPREV=1 -> switch station; AT+STOP stops.
+    if (stringEqualsIgnoreCase(command.command, "RADIOLIST")) {
+        char name[RADIO_FAV_NAME_SIZE];
+        char url[RADIO_FAV_URL_SIZE];
+        char line[300];
+        if (!is_query) {
+            unsigned long index = 0UL;
+            if (!parseUnsignedValue(command.value, &index) ||
+                !RADIO_FAV_Get(index, name, sizeof(name), url, sizeof(url))) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "RADIOLIST");
+                return;
+            }
+            snprintf(line, sizeof(line), "AT+RADIO%lu=%s,%s", index, name, url);
+            appendReplyLine(result->payload, sizeof(result->payload), &result->payload_size, line);
+            return;
+        }
+        const size_t count = RADIO_FAV_Count();
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "RADIOCNT",
+                           static_cast<unsigned>(count));
+        const int current = RADIO_FAV_CurrentIndex();
+        if (current >= 0) {
+            appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "RADIOCUR",
+                               static_cast<unsigned>(current));
+        }
+        for (size_t i = 0; i < count; ++i) {
+            if (!RADIO_FAV_Get(i, name, sizeof(name), nullptr, 0)) {
+                break;
+            }
+            snprintf(line, sizeof(line), "AT+RADIO%u=%s", static_cast<unsigned>(i), name);
+            appendReplyLine(result->payload, sizeof(result->payload), &result->payload_size, line);
+        }
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "RADIOADD")) {
+        char parse[sizeof(command.value)];
+        snprintf(parse, sizeof(parse), "%s", command.value);
+        char *url = nullptr;
+        if (strncmp(parse, "http://", 7) == 0 || strncmp(parse, "https://", 8) == 0) {
+            url = parse; // URL only, name defaults to the URL
+        } else {
+            char *split = strstr(parse, ",http");
+            if (split != nullptr) {
+                *split = '\0';
+                url = split + 1;
+            }
+        }
+        int index = -1;
+        if (url == nullptr ||
+            !RADIO_FAV_Set(-1, (url == parse) ? nullptr : parse, url, &index)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "RADIOADD");
+            return;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "RADIOADD",
+                           static_cast<unsigned>(index));
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "RADIODEL")) {
+        unsigned long index = 0UL;
+        if (is_query || !parseUnsignedValue(command.value, &index) ||
+            !RADIO_FAV_Remove(index)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "RADIODEL");
+            return;
+        }
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "RADIODEL",
+                           static_cast<unsigned>(index));
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "RADIOPLAY") ||
+        stringEqualsIgnoreCase(command.command, "RADIONEXT") ||
+        stringEqualsIgnoreCase(command.command, "RADIOPREV")) {
+        if (is_query) {
+            const int current = RADIO_FAV_CurrentIndex();
+            char name[RADIO_FAV_NAME_SIZE] = {};
+            char status[300];
+            if (current >= 0 && RADIO_FAV_Get(current, name, sizeof(name), nullptr, 0)) {
+                snprintf(status, sizeof(status), "%d,%s%s", current, name,
+                         MUSIC_IsPlaying() ? "" : " (stopped)");
+            } else {
+                snprintf(status, sizeof(status), "(none)");
+            }
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "RADIOPLAY", status);
+            return;
+        }
+        bool ok;
+        if (stringEqualsIgnoreCase(command.command, "RADIONEXT")) {
+            ok = RADIO_FAV_Next();
+        } else if (stringEqualsIgnoreCase(command.command, "RADIOPREV")) {
+            ok = RADIO_FAV_Prev();
+        } else {
+            unsigned long index = 0UL;
+            ok = parseUnsignedValue(command.value, &index) && RADIO_FAV_PlayIndex(index);
+        }
+        if (!ok) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", command.command);
+            return;
+        }
+        char name[RADIO_FAV_NAME_SIZE] = {};
+        (void)RADIO_FAV_Get(RADIO_FAV_CurrentIndex(), name, sizeof(name), nullptr, 0);
+        char line[300];
+        snprintf(line, sizeof(line), "AT+RADIOPLAY=%d,%s", RADIO_FAV_CurrentIndex(), name);
+        appendReplyLine(result->payload, sizeof(result->payload), &result->payload_size, line);
+        return;
+    }
+
     // Video call camera TX: AT+VIDEO=ON|OFF|? (RX is always passive; open
     // the LCD Video page to watch the remote side).
     if (stringEqualsIgnoreCase(command.command, "VIDEO")) {
@@ -897,7 +1043,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             }
         } else {
             char parse[224];
-            snprintf(parse, sizeof(parse), "%s", command.value);
+            snprintf(parse, sizeof(parse), "%.*s",
+                     static_cast<int>(sizeof(parse) - 1u), command.value);
             char *token = strchr(parse, ',');
             if (token != nullptr) {
                 *token++ = '\0';
@@ -1026,7 +1173,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         char parse[160];
-        snprintf(parse, sizeof(parse), "%s", command.value);
+        snprintf(parse, sizeof(parse), "%.*s",
+                 static_cast<int>(sizeof(parse) - 1u), command.value);
         char *comma = strrchr(parse, ',');
         unsigned long minutes = 0;
         if (comma == nullptr) {
@@ -1124,7 +1272,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             return;
         }
         char parse[192];
-        snprintf(parse, sizeof(parse), "%s", command.value);
+        snprintf(parse, sizeof(parse), "%.*s",
+                 static_cast<int>(sizeof(parse) - 1u), command.value);
         char *user = strchr(parse, ',');
         char *pass = nullptr;
         if (user != nullptr) {
