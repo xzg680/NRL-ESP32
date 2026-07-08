@@ -49,7 +49,7 @@ BOARDS = {
     "s31_korvo": dict(
         target="esp32s31",
         macro="NRL_BOARD_S31_KORVO",
-        sdkconfig=["sdkconfig.defaults"],
+        sdkconfig=["sdkconfig.defaults", "sdkconfig.defaults.esp32s31"],
         lvgl=True,
         extra=["-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"],
     ),

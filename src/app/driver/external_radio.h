@@ -88,6 +88,10 @@ struct ExternalRadioConfig {
     bool mic_hpf_enabled;
     // Route the project's voice through a Bluetooth headset (HFP). S31 only.
     bool bt_enabled;
+    // Master Wi-Fi enable. Off = free the shared 2.4 GHz radio for Bluetooth
+    // (so A2DP can stream music to the headset) at the cost of the network
+    // radio-voice link. Defaults ON. S31 only.
+    bool wifi_enabled;
     uint16_t ptt_timeout_s;
     // Battery-voltage calibration factor, in units of 1/1000 (1000 = 1.000x).
     // The raw ADC reading is multiplied by this divided by 1000 to compensate
@@ -155,6 +159,7 @@ bool EXTERNAL_RADIO_SetMicHpfEnabled(bool enabled, bool persist);
 // Enable/disable the Bluetooth-headset (HFP) voice link. Persists the choice and
 // brings the BT stack up/down immediately. No-op on non-S31 boards.
 bool EXTERNAL_RADIO_SetBtEnabled(bool enabled, bool persist);
+bool EXTERNAL_RADIO_SetWifiEnabled(bool enabled, bool persist);
 // PTT button auto-off / maximum continuous transmit time, in seconds. A short
 // press latches transmit on; it is forced off again after this many seconds.
 bool EXTERNAL_RADIO_SetPttTimeout(uint16_t value, bool persist);

@@ -365,6 +365,7 @@ static void applyDefaultAudioConfig(void)
     s_config.ai_noise_enabled = false;
     s_config.mic_hpf_enabled = true;
     s_config.bt_enabled = false;
+    s_config.wifi_enabled = true;
 }
 
 static void loadAdcRegisters(const uint8_t reg14,
@@ -660,6 +661,9 @@ static bool loadPersistedConfig(void)
         // (unlike the flags above) an unwritten 0 must read as false -- match the
         // explicit "on" sentinel instead of "not off".
         s_config.bt_enabled = persisted.reserved3[4] == kPersistedFlagOn;
+        // reserved3[5] holds the master Wi-Fi enable flag. Defaults ON, so an
+        // unwritten 0 (old configs) must read as true -- match the "off" sentinel.
+        s_config.wifi_enabled = persisted.reserved3[5] != kPersistedFlagOff;
         if (persisted.reserved3[3] == kPersistedAecRefMic) {
             s_config.aec_reference_source = EXTERNAL_RADIO_AEC_REF_MIC;
         } else if (persisted.reserved3[3] == kPersistedAecRefNetwork) {
@@ -762,6 +766,7 @@ static bool savePersistedConfig(void)
     persisted.reserved3[1] = s_config.mic_hpf_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[2] = s_config.ai_noise_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[4] = s_config.bt_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.reserved3[5] = s_config.wifi_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[3] = (s_config.aec_reference_source == EXTERNAL_RADIO_AEC_REF_MIC)
                                  ? kPersistedAecRefMic
                                  : kPersistedAecRefNetwork;
@@ -1396,6 +1401,19 @@ bool EXTERNAL_RADIO_SetBtEnabled(const bool enabled, const bool persist)
     EXTERNAL_RADIO_Init();
     s_config.bt_enabled = enabled;
     NRL_BtHfp_SetEnabled(enabled);
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetWifiEnabled(const bool enabled, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.wifi_enabled = enabled;
+    // The audio-bridge task owns the Wi-Fi state machine; it polls this flag in
+    // ensureWifiAndUdp() and brings Wi-Fi down (freeing the shared radio for
+    // Bluetooth/A2DP) or back up accordingly, so nothing else is done here.
     if (persist) {
         return savePersistedConfig();
     }

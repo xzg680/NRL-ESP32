@@ -43,6 +43,9 @@ WifiConnResult wifiEnsureConnected(const char *ssid, const char *pass, uint32_t 
 bool nrlWifiApStart(const char *ssid, uint8_t channel, uint8_t max_conn,
                     uint32_t ap_ip, uint32_t gw, uint32_t mask);
 bool nrlWifiApStop();
+// Stop the whole Wi-Fi radio (STA+AP -> WIFI_MODE_NULL / esp_wifi_stop), freeing
+// the shared radio and Wi-Fi RAM for Bluetooth A2DP. wifiEnsureConnected() restores.
+bool nrlWifiStopRadio();
 size_t nrlWifiApGetStationCount();
 
 // Synchronous scan. Fills the internal cache; consumers retrieve via

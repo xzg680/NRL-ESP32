@@ -24,10 +24,12 @@
 #include "s31_i2c.h"
 #include "status_io.h"
 
+#include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include <driver/gpio.h>
@@ -197,6 +199,7 @@ lv_obj_t *s_sw_aec = nullptr;
 lv_obj_t *s_sw_noise = nullptr;
 lv_obj_t *s_sw_mic_hpf = nullptr;
 lv_obj_t *s_sw_bt = nullptr;
+lv_obj_t *s_sw_wifi = nullptr;
 lv_obj_t *s_lbl_bt_status = nullptr;
 lv_obj_t *s_keyboard = nullptr;
 
@@ -1042,6 +1045,7 @@ void clearScreen()
     s_sw_noise = nullptr;
     s_sw_mic_hpf = nullptr;
     s_sw_bt = nullptr;
+    s_sw_wifi = nullptr;
     s_lbl_bt_status = nullptr;
     s_keyboard = nullptr;
     s_ta_smb_server = nullptr;
@@ -1776,6 +1780,30 @@ void musicListEvent(lv_event_t *event)
     s_last_refresh_ms = 0;
 }
 
+// Per-track storage icon, by matching the path against the storage mount-point
+// prefixes: SD-card / USB / Wi-Fi (network SMB share). Used as the list-row icon
+// so the user sees at a glance where each track lives. Falls back to the generic
+// audio note when the source is unknown.
+const char *musicSourceIcon(const char *path)
+{
+    if (path == nullptr) {
+        return LV_SYMBOL_AUDIO;
+    }
+    const char *sd = STORAGE_SdMountPoint();
+    const char *usb = STORAGE_UsbMountPoint();
+    const char *smb = STORAGE_SmbMountPoint();
+    if (sd != nullptr && sd[0] != '\0' && strncmp(path, sd, strlen(sd)) == 0) {
+        return LV_SYMBOL_SD_CARD;
+    }
+    if (usb != nullptr && usb[0] != '\0' && strncmp(path, usb, strlen(usb)) == 0) {
+        return LV_SYMBOL_USB;
+    }
+    if (smb != nullptr && smb[0] != '\0' && strncmp(path, smb, strlen(smb)) == 0) {
+        return LV_SYMBOL_WIFI;
+    }
+    return LV_SYMBOL_AUDIO;
+}
+
 void populateMusicList()
 {
     if (s_list_music == nullptr) {
@@ -1791,20 +1819,59 @@ void populateMusicList()
         lv_obj_set_style_text_color(empty, lv_color_hex(kColorSub), 0);
         return;
     }
+    // Radio contention: SMB (network TCP bulk) can't stream while Bluetooth holds
+    // the single shared radio, so hide network tracks while BT is on -- only local
+    // SD/USB are playable then. (Turn Bluetooth off to play SMB music.)
+    const bool bt_on = NRL_BtHfp_IsEnabled();
+    const char *smb_mp = STORAGE_SmbMountPoint();
+    const size_t smb_len = (smb_mp != nullptr) ? strlen(smb_mp) : 0u;
+    size_t shown = 0;
     for (size_t i = 0; i < count; ++i) {
-        lv_obj_t *btn = lv_list_add_button(s_list_music, LV_SYMBOL_AUDIO,
-                                           musicBasename(PLAYLIST_GetPath(i)));
+        const char *path = PLAYLIST_GetPath(i);
+        if (bt_on && smb_len > 0u && path != nullptr &&
+            strncmp(path, smb_mp, smb_len) == 0) {
+            continue;  // SMB track hidden while BT is on
+        }
+        lv_obj_t *btn = lv_list_add_button(s_list_music, musicSourceIcon(path),
+                                           musicBasename(path));
         lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel2), 0);
         lv_obj_set_style_text_color(btn, lv_color_hex(kColorText), 0);
         lv_obj_add_event_cb(btn, musicListEvent, LV_EVENT_CLICKED,
                             reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+        ++shown;
+    }
+    if (shown == 0u) {
+        lv_obj_t *empty = lv_list_add_text(
+            s_list_music,
+            tr(bt_on ? "Network music is hidden while Bluetooth is on. Turn Bluetooth off to play SMB."
+                     : "No tracks. Put files in /sdcard/music and Rescan."));
+        lv_obj_set_style_text_color(empty, lv_color_hex(kColorSub), 0);
     }
 }
 
+// True for common album-art filenames (case-insensitive): cover/folder/album/
+// front + .jpg/.jpeg. Matching by listing the directory once (below) means we
+// find the file whatever its case, without probing capitalised variants.
+bool isCoverFileName(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    if (dot == nullptr ||
+        (strcasecmp(dot, ".jpg") != 0 && strcasecmp(dot, ".jpeg") != 0)) {
+        return false;
+    }
+    const size_t stem_len = static_cast<size_t>(dot - name);
+    static const char *const kStems[] = {"cover", "folder", "album", "front"};
+    for (const char *stem : kStems) {
+        if (strlen(stem) == stem_len && strncasecmp(name, stem, stem_len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Album-art fallback: a cover image file sitting next to the track
-// (cover.jpg / folder.jpg / album.jpg / front.jpg -- FatFs matches case-
-// insensitively, SMB may not, so a capitalised variant is tried too).
-// JPEG only; the cover decoder has no PNG path.
+// (cover.jpg / folder.jpg / album.jpg / front.jpg). JPEG only; the cover
+// decoder has no PNG path.
 bool loadFolderCover(const char *track_path, CoverBitmap *out)
 {
     if (track_path == nullptr || track_path[0] == '\0') {
@@ -1816,42 +1883,77 @@ bool loadFolderCover(const char *track_path, CoverBitmap *out)
     }
     const size_t dir_len = static_cast<size_t>(slash - track_path);
 
+    // Heap scratch, NOT stack: loadFolderCover runs deep in the UI call chain
+    // (refreshMusic -> refreshMusicCover -> here -> COVER_DecodeJpeg), and the
+    // JPEG decoder is itself stack-heavy. Two 512 B path buffers on the stack of
+    // the caller task (nrl_main_loop, 6 KB) overflowed it and stack-protection
+    // faulted. Paths on the heap keep our stack footprint tiny.
+    constexpr size_t kPathCap = 512;
+    if (dir_len == 0u || dir_len >= kPathCap) {
+        return false;
+    }
+    char *dir_path = static_cast<char *>(malloc(kPathCap));
+    char *cover_path = static_cast<char *>(malloc(kPathCap));
+    if (dir_path == nullptr || cover_path == nullptr) {
+        free(dir_path);
+        free(cover_path);
+        return false;
+    }
+    memcpy(dir_path, track_path, dir_len);
+    dir_path[dir_len] = '\0';
+    cover_path[0] = '\0';
+
+    // One directory listing instead of six blind fopen() probes: on an SMB share
+    // each fopen is a network round-trip, so the old six-name probe stalled the
+    // UI for ~6 RTTs of "stuck entering music". opendir + a single readdir pass
+    // finds a cover file (case-insensitive) in one listing; then we open the
+    // one match.
+    DIR *dir = opendir(dir_path);
+    if (dir != nullptr) {
+        for (struct dirent *entry = readdir(dir); entry != nullptr; entry = readdir(dir)) {
+            if (entry->d_type == DT_DIR || entry->d_name[0] == '.') {
+                continue;
+            }
+            if (!isCoverFileName(entry->d_name)) {
+                continue;
+            }
+            const int n = snprintf(cover_path, kPathCap, "%s/%s", dir_path, entry->d_name);
+            if (n > 0 && static_cast<size_t>(n) < kPathCap) {
+                break;
+            }
+            cover_path[0] = '\0'; // pathologically long path; keep scanning
+        }
+        closedir(dir);
+    }
+    free(dir_path);
+    if (cover_path[0] == '\0') {
+        free(cover_path);
+        return false;
+    }
+
     constexpr size_t kFolderCoverMaxBytes = 1024 * 1024;
-    static const char *kCoverNames[] = {
-        "cover.jpg", "folder.jpg", "album.jpg", "front.jpg", "Cover.jpg", "Folder.jpg",
-    };
-    for (size_t i = 0; i < sizeof(kCoverNames) / sizeof(kCoverNames[0]); ++i) {
-        char path[280]; // track dir (<=255) + "/folder.jpg"
-        const int written = snprintf(path, sizeof(path), "%.*s/%s",
-                                     static_cast<int>(dir_len), track_path, kCoverNames[i]);
-        if (written <= 0 || static_cast<size_t>(written) >= sizeof(path)) {
-            continue;
-        }
-        FILE *file = fopen(path, "rb");
-        if (file == nullptr) {
-            continue;
-        }
-        bool ok = false;
-        if (fseek(file, 0, SEEK_END) == 0) {
-            const long size = ftell(file);
-            if (size > 0 && static_cast<size_t>(size) <= kFolderCoverMaxBytes &&
-                fseek(file, 0, SEEK_SET) == 0) {
-                uint8_t *data = static_cast<uint8_t *>(
-                    heap_caps_malloc(static_cast<size_t>(size), MALLOC_CAP_SPIRAM));
-                if (data != nullptr) {
-                    if (fread(data, 1, static_cast<size_t>(size), file) == static_cast<size_t>(size)) {
-                        ok = COVER_DecodeJpeg(data, static_cast<size_t>(size), kMusicCoverDim, out);
-                    }
-                    heap_caps_free(data);
+    FILE *file = fopen(cover_path, "rb");
+    free(cover_path);
+    if (file == nullptr) {
+        return false;
+    }
+    bool ok = false;
+    if (fseek(file, 0, SEEK_END) == 0) {
+        const long size = ftell(file);
+        if (size > 0 && static_cast<size_t>(size) <= kFolderCoverMaxBytes &&
+            fseek(file, 0, SEEK_SET) == 0) {
+            uint8_t *data = static_cast<uint8_t *>(
+                heap_caps_malloc(static_cast<size_t>(size), MALLOC_CAP_SPIRAM));
+            if (data != nullptr) {
+                if (fread(data, 1, static_cast<size_t>(size), file) == static_cast<size_t>(size)) {
+                    ok = COVER_DecodeJpeg(data, static_cast<size_t>(size), kMusicCoverDim, out);
                 }
+                heap_caps_free(data);
             }
         }
-        fclose(file);
-        if (ok) {
-            return true;
-        }
     }
-    return false;
+    fclose(file);
+    return ok;
 }
 
 void refreshMusicCover(const MediaTrackInfo *track)
@@ -1925,8 +2027,20 @@ void refreshMusic()
     s_shown_music_playing = playing;
 
     const MediaTrackInfo *track = MUSIC_GetTrackInfo();
-    if (track_changed) {
+    // Reload the cover art only when the *actual* track path changes -- not on
+    // every screen entry. buildMusic() forces track_changed (via s_shown_music_path
+    // = "\1") to repaint the text labels, but the cover reload runs
+    // refreshMusicCover -> loadFolderCover(), which does up to 6 sequential
+    // fopen() probes for cover files. When the library is on an SMB share those
+    // are 6 network round-trips on the UI thread -- seconds of "stuck entering
+    // music" every time. The bitmap is already cached (and re-attached by
+    // buildMusic), so gate the reload on a separate path so re-entering the same
+    // track is instant.
+    static char s_cover_path[256] = {};
+    const bool cover_stale = strncmp(path, s_cover_path, sizeof(s_cover_path)) != 0;
+    if (track_changed && cover_stale) {
         refreshMusicCover(track);
+        snprintf(s_cover_path, sizeof(s_cover_path), "%s", path);
     }
     if (s_lbl_music_title != nullptr) {
         const char *title = (track != nullptr && track->title[0] != '\0')
@@ -2714,6 +2828,22 @@ void btEnableEvent(lv_event_t *event)
     s_last_refresh_ms = 0;
 }
 
+void wifiEnableEvent(lv_event_t *event)
+{
+    lv_obj_t *obj = lv_event_get_target_obj(event);
+    const bool checked = lv_obj_has_state(obj, LV_STATE_CHECKED);
+    // Master Wi-Fi switch. Off frees the shared radio for Bluetooth A2DP (music
+    // to the headset) but stops the network radio-voice link -- a mode change.
+    EXTERNAL_RADIO_SetWifiEnabled(checked, true);
+    if (s_lbl_bt_status != nullptr) {
+        lv_label_set_text(s_lbl_bt_status,
+                          checked ? "Wi-Fi on: network radio available."
+                                  : "Wi-Fi off: radio freed for Bluetooth A2DP music.");
+        lv_obj_set_style_text_color(s_lbl_bt_status, lv_color_hex(kColorWarn), 0);
+    }
+    s_last_refresh_ms = 0;
+}
+
 // Row user-data encodes which list a row belongs to: saved rows are offset by
 // kBtSavedTag, scanned rows carry their raw index.
 constexpr intptr_t kBtSavedTag = 0x10000;
@@ -2833,6 +2963,20 @@ void buildBt()
     lv_obj_set_style_bg_color(s_sw_bt, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s_sw_bt, lv_color_hex(kColorText), LV_PART_KNOB);
     lv_obj_add_event_cb(s_sw_bt, btEnableEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // Master Wi-Fi switch, same row. Off = free the radio for Bluetooth A2DP
+    // music, at the cost of the network radio-voice link. Defaults ON.
+    fieldLabel(box, 400, 6, "Wi-Fi radio");
+    s_sw_wifi = lv_switch_create(box);
+    lv_obj_set_pos(s_sw_wifi, 646, 0);
+    lv_obj_set_size(s_sw_wifi, 64, 34);
+    if (cfg == nullptr || cfg->wifi_enabled) {
+        lv_obj_add_state(s_sw_wifi, LV_STATE_CHECKED);
+    }
+    lv_obj_set_style_bg_color(s_sw_wifi, lv_color_hex(kColorDim), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_sw_wifi, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_sw_wifi, lv_color_hex(kColorText), LV_PART_KNOB);
+    lv_obj_add_event_cb(s_sw_wifi, wifiEnableEvent, LV_EVENT_VALUE_CHANGED, nullptr);
 
     fieldLabel(box, 0, 58, "Headsets: tap to connect, long-press a saved one to delete");
     s_list_bt = lv_list_create(box);

@@ -581,6 +581,19 @@ bool nrlWifiApStop()
     return true;
 }
 
+// Master radio stop: deactivate STA + AP and drop to WIFI_MODE_NULL, which calls
+// esp_wifi_stop() -- freeing BOTH the shared 2.4 GHz radio AND WiFi's dynamic RAM
+// so Bluetooth A2DP can register and stream. wifiEnsureConnected() brings it back
+// (esp_wifi_start + reconnect) when the Wi-Fi master switch is turned on again.
+bool nrlWifiStopRadio()
+{
+    s_sta_active = false;
+    s_ap_active = false;
+    const bool ok = refreshMode();
+    ESP_LOGI(TAG, "Wi-Fi radio stopped (STA+AP down, RAM freed)");
+    return ok;
+}
+
 size_t nrlWifiApGetStationCount()
 {
     wifi_sta_list_t list = {};

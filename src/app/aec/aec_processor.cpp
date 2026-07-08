@@ -214,7 +214,9 @@ static bool afe_create_pipeline(bool enable_aec, bool enable_ai_noise) {
     memset(&s_down, 0, sizeof(s_down));
 
     s_running = true;
-    if (xTaskCreatePinnedToCore(aec_fetch_task, "aec_fetch", 8192, nullptr, 9,
+    // 4 KB stack: measured peak use is <1 KB (uxTaskGetStackHighWaterMark), so 4 KB
+    // keeps ~4x margin while returning 4 KB of scarce internal RAM to the BT stack.
+    if (xTaskCreatePinnedToCore(aec_fetch_task, "aec_fetch", 4096, nullptr, 9,
                                 &s_fetch_task, 1) != pdPASS) {
         ESP_LOGE(TAG, "fetch task create failed");
         s_running = false;

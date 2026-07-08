@@ -7,6 +7,7 @@
 #include "lib/nrl_audio_bridge.h"
 #include "lib/nrl_bt_hfp.h"
 #include "media/media_decoder.h"
+#include "services/storage_service.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -414,6 +415,17 @@ extern "C" void MUSIC_Init(void)
 extern "C" bool MUSIC_PlayFile(const char *path)
 {
     if (path == nullptr || path[0] == '\0' || strlen(path) >= kMaxPathLen) {
+        return false;
+    }
+
+    // Radio contention: SMB (network TCP bulk) cannot stream while Bluetooth holds
+    // the single shared radio (SMB2 I/O timeouts). Refuse network tracks while BT
+    // is on -- covers auto-advance / prev-next / AT, not just the UI. Local
+    // SD/USB playback is unaffected. (The UI also hides SMB tracks while BT is on.)
+    const char *smb_mp = STORAGE_SmbMountPoint();
+    if (smb_mp != nullptr && smb_mp[0] != '\0' &&
+        strncmp(path, smb_mp, strlen(smb_mp)) == 0 && NRL_BtHfp_IsEnabled()) {
+        ESP_LOGW(TAG, "refusing SMB track while Bluetooth is on (radio contention): %s", path);
         return false;
     }
 

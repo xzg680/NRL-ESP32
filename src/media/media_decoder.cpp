@@ -9,6 +9,7 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
 #include <freertos/task.h>
 
 #include <stdio.h>
@@ -31,9 +32,17 @@ constexpr size_t kInitialOutBufferBytes = 32 * 1024;
 // round-trips (~1.2 KB per request, see smb_vfs.cpp), so network jitter fed
 // straight into the decode loop is audible as stutter. A filler task keeps
 // this ring topped up; the decoder then reads from memory and rides out
-// latency spikes (128 KB ~= 3 s of 320 kbps MP3).
-constexpr size_t kRingBytes = 128 * 1024;
-constexpr size_t kRingFillChunk = 8 * 1024;
+// latency spikes. This chip has 16 MB PSRAM, so the ring is generous:
+// 2 MB ~= 50 s of 320 kbps MP3, or ~2-3 s of lossless FLAC -- enough to ride
+// out SMB throughput dips (worsened here by the trimmed Wi-Fi buffers that free
+// internal RAM for Bluetooth). read_source() decodes as soon as the first bytes
+// land, so a larger ring adds no start-up delay -- the filler just keeps more
+// ahead. 1 MB (~6 s of CD-rate audio) is generous while still allocating as one
+// contiguous PSRAM block even when the framebuffers/cover art have fragmented
+// PSRAM. The refill chunk is large so a drained ring recovers in fewer filler
+// iterations (each source read is still split to ~1.2 KB inside smb_vfs).
+constexpr size_t kRingBytes = 1 * 1024 * 1024;
+constexpr size_t kRingFillChunk = 32 * 1024;
 
 constexpr size_t kHlsMaxSegments = 8;
 constexpr size_t kHlsPlaylistBytes = 16 * 1024;
@@ -555,7 +564,10 @@ static void ring_filler_task(void *arg)
         d->ring_head = (head + got) % kRingBytes;
     }
     d->ring_running = false;
-    vTaskDelete(nullptr);
+    // Created with a PSRAM stack (xTaskCreatePinnedToCoreWithCaps), so it must be
+    // torn down with the caps-aware delete; vTaskDeleteWithCaps(NULL) self-deletes
+    // safely (IDF spawns a tiny cleanup task to free the external stack).
+    vTaskDeleteWithCaps(nullptr);
 }
 
 // Start the read-ahead ring; on failure the decoder falls back to direct
@@ -572,10 +584,16 @@ static void ring_start(MediaDecoder *d)
     d->ring_stop = false;
     d->ring_running = true;
     d->ring_wait_full = (d->file != nullptr);
-    // 8 KB stack (same as the player task, enough for lwIP + TLS): internal
-    // RAM is tight since the Phase-4 features landed and a 10 KB stack no
-    // longer reliably allocates.
-    if (xTaskCreatePinnedToCore(ring_filler_task, "mdec_fill", 8192, d, 5, nullptr, 0) != pdPASS) {
+    // PSRAM stack: this task only does source reads (SMB over the network / SD via
+    // SDMMC / HTTP) -- none of which touch the internal SPI flash, and flash
+    // auto-suspend keeps the cache alive anyway -- so its stack is safe in PSRAM.
+    // Keeping it out of internal RAM lets it create even while Bluetooth holds its
+    // 40 KB internal reserve; the old 8 KB internal stack failed to allocate with
+    // BT on, dropping SMB playback back to unbuffered direct reads (stutter). Only
+    // a ~700 B TCB stays internal. If even the PSRAM stack can't be had, fall back
+    // to direct reads (correct, just stutter-prone).
+    if (xTaskCreatePinnedToCoreWithCaps(ring_filler_task, "mdec_fill", 8192, d, 5,
+                                        nullptr, 0, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGW(TAG, "read-ahead task create failed; using direct reads");
         d->ring_running = false;
         heap_caps_free(d->ring);

@@ -25,8 +25,11 @@
 #include <esp_wifi.h>
 #include <nvs.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+
+#include <esp_heap_caps.h>
 #include <lwip/netdb.h>
 #include <lwip/sockets.h>
 
@@ -584,6 +587,25 @@ static bool ensureWifiAndUdp(void)
     }
 
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    // Master Wi-Fi switch: when off, keep the STA link down so the shared 2.4 GHz
+    // radio is free for Bluetooth (so A2DP can stream music to the headset). The
+    // network radio-voice link is intentionally unavailable in this mode.
+    static bool s_wifi_master_off_applied = false;
+    if (config != nullptr && !config->wifi_enabled) {
+        if (!s_wifi_master_off_applied) {
+            s_wifi_master_off_applied = true;
+            // Full stop (not just disconnect): frees the shared radio AND WiFi's
+            // RAM, so Bluetooth A2DP can register + stream music to the headset.
+            nrlWifiStopRadio();
+            ESP_LOGI(TAG, "[NRL] Wi-Fi master switch OFF -- radio+RAM freed for Bluetooth/A2DP");
+        }
+        return false;
+    }
+    if (s_wifi_master_off_applied) {
+        s_wifi_master_off_applied = false;
+        s_next_wifi_retry_ms = 0u;  // re-enabled: reconnect promptly
+        ESP_LOGI(TAG, "[NRL] Wi-Fi master switch ON -- reconnecting");
+    }
     const char *wifi_ssid = (config != nullptr) ? config->wifi_ssid : NRL_AUDIO_WIFI_SSID;
     const char *wifi_password = (config != nullptr) ? config->wifi_password : NRL_AUDIO_WIFI_PASSWORD;
     const char *server_host = (config != nullptr) ? config->server_host : NRL_AUDIO_SERVER_HOST;
@@ -1254,6 +1276,13 @@ bool NRLAudioBridge_Init(void)
     // esp_opus_dec_decode / libopus) runs inline on this task and its peak
     // stack, on top of the UDP recv + packet-parse baseline, overflows an
     // 8 KB stack (stack-protection fault on the first received Opus frame).
+    // Stack stays in internal RAM. Moving it to PSRAM (with auto-suspend it is
+    // safe from the cache-disable angle) was measured to be counterproductive:
+    // freeing this 16 KB internal region let other allocations scatter into it
+    // and *fragmented* the heap, dropping the largest contiguous internal block
+    // from ~32 KB to ~10 KB -- and the Classic BT controller's pool needs a large
+    // *contiguous* block, so BT then couldn't start at all. Total free is not the
+    // constraint here; contiguity is.
     if (xTaskCreatePinnedToCore(bridgeTask, "nrl_audio_bridge", 16384, nullptr,
                                 2, &s_bridge_task, 0) != pdPASS) {
         ESP_LOGI(TAG,"[NRL] failed to create bridge task");

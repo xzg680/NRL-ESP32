@@ -253,7 +253,12 @@ esp_err_t bsp_audio_init(const i2s_std_config_t *i2s_config)
      * underruns right through it -- audible as strictly periodic stutter
      * during hi-fi playback. 8x735 frames = 133 ms at 44.1 kHz rides it
      * out (~24 KB DMA RAM per direction). The voice path only queues
-     * real-time 20 ms chunks, so its latency is unaffected. */
+     * real-time 20 ms chunks, so its latency is unaffected.
+     * NOTE: do NOT cut this to free RAM for Bluetooth -- this codec I2S is
+     * created lazily when audio first plays, well after BT is enabled, so
+     * trimming it does nothing for the BT-enable internal-RAM budget; it only
+     * starves the audio path (measured: cutting to 4x caused SCO underrun,
+     * core-1 pegged at 100%, and silent BT audio). Free BT RAM elsewhere. */
     chan_cfg.dma_desc_num = 8;
     chan_cfg.dma_frame_num = 735;
     ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &s_audio_tx_chan, &s_audio_rx_chan),

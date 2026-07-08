@@ -2,6 +2,13 @@
 # These reach the app build only; the 2nd-stage bootloader uses
 # sdkconfig.bootloader.defaults, so none of this can boot-loop it.
 #
+# --- CPU speed: 320 MHz (ESP32-S31 default) ---
+# The shared defaults keep S3-class boards at 240 MHz. S31 supports 320 MHz and
+# its ESP-IDF Kconfig defaults to that speed, so override the shared setting here.
+# CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240 is not set
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_320=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=320
+
 # --- PSRAM speed: 250 MHz (matches the official esp32-s31-korvo example) ---
 # The RGB panel streams its framebuffer straight from PSRAM via GDMA with NO
 # bounce buffer (display_s31.cpp). At the 200 MHz default the PSRAM can't feed the
@@ -44,12 +51,29 @@ CONFIG_BT_BLUEDROID_ENABLED=y
 CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
 # Allow one (e)SCO link for HFP voice -- the controller default is 0 (no audio).
 CONFIG_BT_CTRL_BR_EDR_MAX_SYNC_CONN=1
+# Single-headset device: we only ever use ONE peer link, so shrink the host
+# link table (default 4) and the controller's ACL RX queue (default 6) -- each
+# entry is internal RAM. MAX_ACL_CONN must stay at 2 though: dropping the
+# controller to 1 ACL slot stopped the boot-time OOM but broke connecting
+# entirely -- the page/inbound collision handling has no spare slot, so every
+# connect returned HCI "Conn Limit Exceeded" (0x09) and no headset could link.
+# 2 is the functional floor; the internal RAM it needs is freed by the Wi-Fi
+# trims below (buffer pools + AMPDU off).
+CONFIG_BT_CTRL_BR_EDR_MAX_ACL_CONN=2
+CONFIG_BT_ACL_CONNECTIONS=2
+CONFIG_BT_CTRL_BR_EDR_ACLU_RX_BUF_NB=4
 # SCO/voice PCM travels over HCI so the app receives/sends it via data callbacks.
 CONFIG_BT_CTRL_BR_EDR_SCO_DATA_PATH_HCI=y
 # Bluedroid Classic profiles: HFP Audio Gateway (voice) + A2DP source
 # (music to the headset; app-side SBC encoding via esp_audio_codec).
 CONFIG_BT_CLASSIC_ENABLED=y
 CONFIG_BT_A2DP_ENABLE=y
+# A2DP SOURCE uses the app-encoded-SBC (external codec) model: nrl_bt_hfp.cpp
+# encodes SBC via esp_sbc_enc and ships frames with esp_a2d_source_audio_data_send
+# + esp_a2d_source_register_stream_endpoint. Those APIs REQUIRE this flag -- without
+# it the endpoint register fails ("UNKNOWN ERROR"), which is why music never reached
+# the BT headset. Enabling it also drops Bluedroid's internal SBC encoder (saves RAM).
+CONFIG_BT_A2DP_USE_EXTERNAL_CODEC=y
 CONFIG_BT_HFP_ENABLE=y
 CONFIG_BT_HFP_AG_ENABLE=y
 # CONFIG_BT_HFP_CLIENT_ENABLE is not set
@@ -57,6 +81,47 @@ CONFIG_BT_HFP_AG_ENABLE=y
 # match the project's 8 kHz G.711 pipeline (no resample); WBS 16 kHz left off.
 CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
 # CONFIG_BT_HFP_WBS_ENABLE is not set
+# Bluedroid allocates its host workqueue and profile objects when the user turns
+# BT on. The S31 UI/media build keeps internal RAM busy by then, so let BT move
+# PSRAM-capable allocations out of internal RAM and keep the small internal
+# blocks available for task/queue resources such as bt_workqueue.
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
+# The real bottleneck: this chip boots with only ~211 KB of internal DRAM, and by
+# the time the user turns BT on the app is down to ~38 KB free / 29 KB largest
+# block -- too little for Classic BT (the controller's mempool + Bluedroid's
+# bt_workqueue, all FreeRTOS tasks/queues whose stacks MUST live in internal
+# RAM), so startup fails and the stack aborts. BT_ALLOCATION_FROM_SPIRAM_FIRST
+# alone doesn't help because the shortfall is internal-only resources.
+# (SPIRAM_TRY_ALLOCATE_WIFI_LWIP was tried and made it WORSE: Wi-Fi's RX/TX DMA
+# buffers can't live in PSRAM, so it hit "wifi:mem fail" and starved internal RAM
+# down to <1 KB. Do not re-enable it.)
+#
+# Instead free internal RAM by trimming Wi-Fi's buffer pools. The app carries
+# only low-bandwidth G.711 voice (UDP) plus config traffic, so the stock buffer
+# counts are wildly oversized here; cutting them reclaims tens of KB of internal
+# RAM for the BT stack with no audible effect on the voice path.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=2
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8
+# Keep AMPDU RX ON but with the smallest Block-Ack window (RX_BA_WIN=2 above).
+# Turning aggregation fully OFF was tried and caused continuous WiFi stutter: the
+# AP kept trying to set up Block-Ack and our side kept tearing it down
+# ("[ADDBA] RX DELBA reason:37" churn), destabilising the voice link. Leaving RX
+# aggregation on with a 2-deep window keeps the AP happy while holding only a
+# tiny reorder buffer. TX aggregation stays off (we send only small voice frames,
+# so TX A-MPDU buys nothing and its buffers are pure overhead here).
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=y
+# CONFIG_ESP_WIFI_AMPDU_TX_ENABLED is not set
+
+# --- LVGL SW-render stacks: 4 KB each (was 8 KB) to free internal RAM ---
+# Two SW draw units (CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2) each own a render thread
+# whose stack is internal RAM. Measured peak use is <1 KB per thread
+# (uxTaskGetStackHighWaterMark) -- FreeType is disabled so there is no deep
+# glyph-render path -- so 8 KB each was ~14 KB of pure waste. 4 KB keeps ~3 KB
+# margin and returns 8 KB of internal RAM for BT + concurrent music decode.
+CONFIG_LV_DRAW_THREAD_STACK_SIZE=4096
 # Wi-Fi/BT coexistence: UDP voice (Wi-Fi) and SCO (BT) share the single radio.
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 
