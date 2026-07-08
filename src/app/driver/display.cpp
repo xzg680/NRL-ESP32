@@ -36,6 +36,7 @@
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD == NRL_BOARD_GEZIPAI
 
 #include "../../lib/nrl_audio_bridge.h"
+#include "../../services/espnow_link.h"
 #include "external_radio.h"
 #include "status_io.h"
 
@@ -743,6 +744,13 @@ void refreshCaller()
     unsigned voice_ssid = 0u;
     const bool rx = NRLAudioBridge_GetRemoteCaller(voice_call, sizeof(voice_call), &voice_ssid);
     const bool tx = STATUS_IO_IsSqlActive();
+    const bool espnow_mode = ESPNOW_LINK_GetPttMode() == 1u;
+    const bool espnow_tx = espnow_mode && tx && ESPNOW_LINK_IsEnabled();
+    const bool espnow_rx = ESPNOW_LINK_IsReceiving();
+    char espnow_peer[16] = {};
+    if (espnow_rx) {
+        ESPNOW_LINK_GetLastPeer(espnow_peer, sizeof(espnow_peer));
+    }
 
     // While a voice stream is actually being received, the main area shows the
     // remote caller. Otherwise it shows this device's own callsign/SSID, read
@@ -752,6 +760,9 @@ void refreshCaller()
     if (rx && voice_call[0] != '\0') {
         snprintf(call_text, sizeof(call_text), "%s", voice_call);
         snprintf(ssid_text, sizeof(ssid_text), "SSID %u", voice_ssid);
+    } else if (espnow_rx && espnow_peer[0] != '\0') {
+        snprintf(call_text, sizeof(call_text), "%s", espnow_peer);
+        snprintf(ssid_text, sizeof(ssid_text), "ESP-NOW");
     } else {
         const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
         if (cfg != nullptr && cfg->callsign[0] != '\0') {
@@ -770,7 +781,13 @@ void refreshCaller()
     // Status caption above the callsign. Transmitting while also receiving is
     // shown as full duplex; otherwise TX wins over RX wins over standby.
     int state;
-    if (tx && rx) {
+    if (espnow_tx && espnow_rx) {
+        state = 6;  // ESP-NOW full duplex
+    } else if (espnow_tx) {
+        state = 5;  // ESP-NOW transmit
+    } else if (espnow_rx) {
+        state = 7;  // ESP-NOW receive
+    } else if (tx && rx) {
         state = 4;  // full duplex
     } else if (tx) {
         state = 3;  // transmitting
@@ -786,6 +803,18 @@ void refreshCaller()
         uint32_t caption_color;
         uint32_t call_color;
         switch (state) {
+            case 7:
+                caption = "ESP-NOW RX";  caption_color = kColorDuplex;
+                call_color = kColorCallLive;
+                break;
+            case 6:
+                caption = "ESP-NOW FDX"; caption_color = kColorDuplex;
+                call_color = kColorCallLive;
+                break;
+            case 5:
+                caption = "ESP-NOW TX";  caption_color = kColorDuplex;
+                call_color = kColorCallIdle;
+                break;
             case 4:
                 caption = "FULL DUPLEX";  caption_color = kColorDuplex;
                 call_color = kColorCallLive;
@@ -927,7 +956,15 @@ void refreshIp()
     unsigned rx_ssid = 0u;
     const bool rx = NRLAudioBridge_GetRemoteCaller(rx_call, sizeof(rx_call), &rx_ssid);
     const bool tx = STATUS_IO_IsSqlActive();
-    if (tx || rx) {
+    const bool espnow_mode = ESPNOW_LINK_GetPttMode() == 1u;
+    const bool espnow_tx = espnow_mode && tx && ESPNOW_LINK_IsEnabled();
+    const bool espnow_rx = ESPNOW_LINK_IsReceiving();
+    if (espnow_tx || espnow_rx) {
+        snprintf(ip_text, sizeof(ip_text), "%s %s",
+                 "ESP-NOW",
+                 (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
+        color = kColorDuplex;
+    } else if (tx || rx) {
         // Transmitting or receiving voice -> show the configured NRL server
         // host (the host string as configured, not a resolved IP address).
         const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
@@ -936,6 +973,10 @@ void refreshIp()
                                : "---";
         snprintf(ip_text, sizeof(ip_text), "%s", host);
         color = tx ? kColorTx : kColorAccent;
+    } else if (espnow_mode) {
+        snprintf(ip_text, sizeof(ip_text), "PTT ESP-NOW %s",
+                 (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
+        color = ESPNOW_LINK_IsEnabled() ? kColorDuplex : kColorApWarn;
     } else if (nrlWifiStaConnected()) {
         char sta_buf[16] = {};
         nrlIpToString(nrlWifiStaIp(), sta_buf, sizeof(sta_buf));

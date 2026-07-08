@@ -1149,7 +1149,6 @@ static esp_err_t handleAudioPage(httpd_req_t *req)
     return ESP_OK;
 }
 
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
 static esp_err_t handleMediaPage(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -1167,7 +1166,6 @@ static esp_err_t handleMediaPage(httpd_req_t *req)
                    true);
     return ESP_OK;
 }
-#endif
 
 static esp_err_t handleScan(httpd_req_t *req)
 {
@@ -1751,7 +1749,6 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
     return ESP_OK;
 }
 
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
 // Echo the full media config back as {"ok":..,"fields":{..}} from live
 // state, so the page always reflects on-device truth after a save (the
 // media fields live outside ExternalRadioConfig, so sendSavedFieldsJson
@@ -1786,7 +1783,9 @@ static void sendMediaSavedJson(const bool ok)
         body += "\"";
     };
     appendField("music_target", std::to_string(MUSIC_GetTarget()), true);
+    appendField("voice_codec", std::to_string(NRLAudioBridge_GetVoiceCodec()));
     appendField("espnow_enabled", ESPNOW_LINK_IsEnabled() ? "1" : "0");
+    appendField("ptt_mode", std::to_string(ESPNOW_LINK_GetPttMode()));
     appendField("beacon_enabled", beacon_armed ? "1" : "0");
     appendField("beacon_path", beacon_path);
     appendField("beacon_interval", beacon_armed ? std::to_string(beacon_interval) : std::string(""));
@@ -1848,6 +1847,19 @@ static esp_err_t handleSaveMedia(httpd_req_t *req)
         if (ok) {
             NRLAudioBridge_SetVoiceCodec(static_cast<uint8_t>(value));
             ESP_LOGI(TAG, "media: voice codec=%s", value == 1UL ? "opus" : "g711");
+        }
+    }
+    if (ok && s_server.hasArg("ptt_mode")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("ptt_mode"), &value) && value <= 1UL;
+        if (ok) {
+            if (value == 1UL && !ESPNOW_LINK_IsEnabled()) {
+                ok = ESPNOW_LINK_SetEnabled(true);
+            }
+            if (ok) {
+                ESPNOW_LINK_SetPttMode(static_cast<uint8_t>(value));
+            }
+            ESP_LOGI(TAG, "media: ptt mode=%s", value == 1UL ? "espnow" : "nrl");
         }
     }
     if (ok && s_server.hasArg("espnow_present")) {
@@ -1920,7 +1932,6 @@ static esp_err_t handleSaveMedia(httpd_req_t *req)
     sendMediaSavedJson(ok);
     return ESP_OK;
 }
-#endif // NRL_BOARD_S31_KORVO
 
 static esp_err_t handleUpdatePage(httpd_req_t *req)
 {
@@ -2135,10 +2146,8 @@ static void ensureServerRunning()
         { "/scan",                 HTTP_GET,  handleScan },
         { "/save_wifi",            HTTP_POST, handleSaveWifi },
         { "/save_nrl",             HTTP_POST, handleSaveNrl },
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
         { "/media",                HTTP_GET,  handleMediaPage },
         { "/save_media",           HTTP_POST, handleSaveMedia },
-#endif
         { "/update",               HTTP_GET,  handleUpdatePage },
         { "/update",               HTTP_POST, handleUpdate },
         { "/portal.css",           HTTP_GET,  handlePortalCss },

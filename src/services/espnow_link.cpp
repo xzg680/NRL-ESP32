@@ -4,7 +4,9 @@
 #include "driver/board_pins.h"
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
+#include "lib/nrl_audio_bridge.h"
 #include "lib/nrl_g711.h"
+#include "media/opus_voice.h"
 #include "services/config_notify.h"
 
 #include <esp_log.h>
@@ -24,20 +26,30 @@ namespace {
 
 constexpr const char *kNvsNamespace = "espnow";
 
-// Packet layout: magic(4) type(1) callsign(6) ssid(1) payload(G.711 A-law).
+// Packet layout: magic(4) type(1) callsign(6) ssid(1) payload.
+// Type 1 = G.711 A-law, type 8 = shared NRL Opus voice framing.
 constexpr uint8_t kMagic[4] = {'N', 'R', 'L', 'E'};
 constexpr uint8_t kTypeVoice = 1;
+constexpr uint8_t kTypeOpusVoice = 8;
 constexpr size_t kHeaderBytes = 12;
 constexpr size_t kVoiceBytes = 160; // 20 ms at 8 kHz
 constexpr size_t kPacketBytes = kHeaderBytes + kVoiceBytes;
 static_assert(kPacketBytes <= ESP_NOW_MAX_DATA_LEN, "packet exceeds ESP-NOW MTU");
+constexpr size_t kEspNowPayloadMax = ESP_NOW_MAX_DATA_LEN - kHeaderBytes;
+constexpr uint32_t kOpusFrameMs = 20u;
+constexpr size_t kOpusFrameSamples = (OPUS_VOICE_SAMPLE_RATE / 1000u) * kOpusFrameMs;
 
 static const uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 static volatile bool s_enabled = false;
+static volatile uint8_t s_ptt_mode = 0;       // 0 = NRL, 1 = ESP-NOW
 static bool s_espnow_inited = false;
 static uint8_t s_tx_packet[kPacketBytes];
 static size_t s_tx_fill = kHeaderBytes;
+static int16_t s_opus_tx_stage[kOpusFrameSamples];
+static size_t s_opus_tx_fill = 0u;
+static OpusVoiceEnc *s_opus_enc = nullptr;
+static OpusVoiceDec *s_opus_dec = nullptr;
 static char s_last_peer[16] = {};
 static volatile bool s_ptt_held = false;      // dedicated ESP-NOW hold-to-talk
 static volatile int64_t s_last_rx_us = 0;     // last voice frame arrival
@@ -63,30 +75,98 @@ static bool load_enabled(void)
     return en != 0;
 }
 
-// Router sink: mic frames (8 kHz, router-converted) -> G.711 -> broadcast.
-// Keying: the S31 touch UI has a dedicated ESP-NOW PTT (the NRL PTT no
-// longer simulcasts here); radio-gateway boards without a touch UI keep the
-// squelch-relay gate. Runs in the audio task.
+static void save_ptt_mode(const uint8_t mode)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "ptt", mode <= 1u ? mode : 0u);
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+static uint8_t load_ptt_mode(void)
+{
+    nvs_handle_t nvs;
+    uint8_t mode = 0;
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &nvs) == ESP_OK) {
+        (void)nvs_get_u8(nvs, "ptt", &mode);
+        nvs_close(nvs);
+    }
+    return mode <= 1u ? mode : 0u;
+}
+
+static void reset_tx_accumulators(void)
+{
+    s_tx_fill = kHeaderBytes;
+    s_opus_tx_fill = 0u;
+}
+
+static bool espnow_keyed(void)
+{
+    return s_ptt_held || (s_ptt_mode == 1u && STATUS_IO_IsSqlActive());
+}
+
+static void send_g711_16k(const int16_t *samples, const size_t sample_count)
+{
+    for (size_t i = 0; i + 1u < sample_count; i += 2u) {
+        const int32_t a = samples[i];
+        const int32_t b = samples[i + 1u];
+        s_tx_packet[s_tx_fill++] = NRL_G711_EncodeALaw(static_cast<int16_t>((a + b) / 2));
+        if (s_tx_fill >= kPacketBytes) {
+            s_tx_fill = kHeaderBytes;
+            s_tx_packet[4] = kTypeVoice;
+            (void)esp_now_send(kBroadcastMac, s_tx_packet, kPacketBytes);
+        }
+    }
+}
+
+static void send_opus_16k(const int16_t *samples, const size_t sample_count)
+{
+    if (s_opus_enc == nullptr) {
+        s_opus_enc = OPUS_VOICE_EncOpen(kOpusFrameMs);
+        if (s_opus_enc == nullptr) {
+            return;
+        }
+    }
+    for (size_t i = 0; i < sample_count; ++i) {
+        s_opus_tx_stage[s_opus_tx_fill++] = samples[i];
+        if (s_opus_tx_fill < kOpusFrameSamples) {
+            continue;
+        }
+        s_opus_tx_fill = 0u;
+        uint8_t frame[OPUS_VOICE_MAX_FRAME_BYTES];
+        const int encoded = OPUS_VOICE_EncProcess(s_opus_enc, s_opus_tx_stage,
+                                                  kOpusFrameSamples, frame, sizeof(frame));
+        if (encoded <= 0 || static_cast<size_t>(encoded) > kEspNowPayloadMax) {
+            continue;
+        }
+        uint8_t packet[ESP_NOW_MAX_DATA_LEN];
+        memcpy(packet, s_tx_packet, kHeaderBytes);
+        packet[4] = kTypeOpusVoice;
+        memcpy(packet + kHeaderBytes, frame, static_cast<size_t>(encoded));
+        (void)esp_now_send(kBroadcastMac, packet, kHeaderBytes + static_cast<size_t>(encoded));
+    }
+}
+
+// Router sink: mic frames (16 kHz, router-converted) -> selected codec ->
+// broadcast. Keying follows the configured PTT mode or the dedicated S31
+// ESP-NOW touch PTT. Runs in the audio task.
 static void espnow_sink_write(uint8_t /*source_id*/,
                               const int16_t *samples,
                               size_t sample_count,
                               void *)
 {
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
-    const bool keyed = s_ptt_held;
-#else
-    const bool keyed = STATUS_IO_IsSqlActive();
-#endif
-    if (!s_enabled || !keyed) {
-        s_tx_fill = kHeaderBytes; // drop partial packet on key release
+    if (!s_enabled || !espnow_keyed()) {
+        reset_tx_accumulators(); // drop partial packets on key release
         return;
     }
-    for (size_t i = 0; i < sample_count; ++i) {
-        s_tx_packet[s_tx_fill++] = NRL_G711_EncodeALaw(samples[i]);
-        if (s_tx_fill >= kPacketBytes) {
-            s_tx_fill = kHeaderBytes;
-            (void)esp_now_send(kBroadcastMac, s_tx_packet, kPacketBytes);
-        }
+    if (NRLAudioBridge_GetVoiceCodec() == 1u) {
+        s_tx_fill = kHeaderBytes;
+        send_opus_16k(samples, sample_count);
+    } else {
+        s_opus_tx_fill = 0u;
+        send_g711_16k(samples, sample_count);
     }
 }
 
@@ -97,7 +177,8 @@ static void espnow_recv_cb(const esp_now_recv_info_t * /*info*/,
 {
     if (!s_enabled || data == nullptr ||
         len <= static_cast<int>(kHeaderBytes) ||
-        memcmp(data, kMagic, sizeof(kMagic)) != 0 || data[4] != kTypeVoice) {
+        memcmp(data, kMagic, sizeof(kMagic)) != 0 ||
+        (data[4] != kTypeVoice && data[4] != kTypeOpusVoice)) {
         return;
     }
 
@@ -112,8 +193,25 @@ static void espnow_recv_cb(const esp_now_recv_info_t * /*info*/,
     s_last_rx_us = esp_timer_get_time();
 
     const size_t payload = static_cast<size_t>(len) - kHeaderBytes;
-    int16_t pcm[ESP_NOW_MAX_DATA_LEN];
-    const size_t n = (payload < sizeof(pcm) / sizeof(pcm[0])) ? payload : sizeof(pcm) / sizeof(pcm[0]);
+    if (data[4] == kTypeOpusVoice) {
+        if (s_opus_dec == nullptr) {
+            s_opus_dec = OPUS_VOICE_DecOpen(kOpusFrameMs);
+            if (s_opus_dec == nullptr) {
+                return;
+            }
+        }
+        int16_t pcm[kOpusFrameSamples];
+        const int decoded = OPUS_VOICE_DecProcess(s_opus_dec, data + kHeaderBytes, payload,
+                                                  pcm, kOpusFrameSamples);
+        if (decoded > 0) {
+            AudioRouter_PushFrame(AUDIO_SRC_ESPNOW, OPUS_VOICE_SAMPLE_RATE, pcm,
+                                  static_cast<size_t>(decoded));
+        }
+        return;
+    }
+
+    int16_t pcm[kVoiceBytes];
+    const size_t n = (payload < kVoiceBytes) ? payload : kVoiceBytes;
     for (size_t i = 0; i < n; ++i) {
         pcm[i] = NRL_G711_DecodeALaw(data[kHeaderBytes + i]);
     }
@@ -164,12 +262,12 @@ static bool espnow_bring_up(void)
     }
     NRL_G711_Init();
     fill_tx_header();
-    AudioRouter_RegisterSink(AUDIO_SINK_ESPNOW, 8000u, espnow_sink_write, nullptr);
+    AudioRouter_RegisterSink(AUDIO_SINK_ESPNOW, OPUS_VOICE_SAMPLE_RATE, espnow_sink_write, nullptr);
     AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_ESPNOW, true);
     AudioRouter_SetRoute(AUDIO_SRC_BT_HFP_MIC, AUDIO_SINK_ESPNOW, true);
     AudioRouter_SetRoute(AUDIO_SRC_ESPNOW, AUDIO_SINK_SPEAKER, true);
     s_espnow_inited = true;
-    ESP_LOGI(TAG, "voice link up (broadcast, G.711 20ms frames)");
+    ESP_LOGI(TAG, "voice link up (broadcast, G.711/type1 or Opus/type8)");
     return true;
 }
 
@@ -194,6 +292,7 @@ static void espnow_deferred_enable_task(void *)
 
 extern "C" void ESPNOW_LINK_Init(void)
 {
+    s_ptt_mode = load_ptt_mode();
     if (load_enabled()) {
         if (espnow_bring_up()) {
             s_enabled = true;
@@ -215,7 +314,7 @@ extern "C" bool ESPNOW_LINK_SetEnabled(const bool enabled)
     } else {
         s_enabled = false;
         s_ptt_held = false;
-        s_tx_fill = kHeaderBytes;
+        reset_tx_accumulators();
     }
     save_enabled(enabled);
     CONFIG_NOTIFY_Bump();
@@ -227,6 +326,21 @@ extern "C" bool ESPNOW_LINK_IsEnabled(void)
     return s_enabled;
 }
 
+extern "C" void ESPNOW_LINK_SetPttMode(const uint8_t mode)
+{
+    s_ptt_mode = mode <= 1u ? mode : 0u;
+    if (s_ptt_mode == 0u) {
+        s_ptt_held = false;
+    }
+    save_ptt_mode(s_ptt_mode);
+    CONFIG_NOTIFY_Bump();
+}
+
+extern "C" uint8_t ESPNOW_LINK_GetPttMode(void)
+{
+    return s_ptt_mode;
+}
+
 extern "C" void ESPNOW_LINK_SetPtt(const bool held)
 {
     s_ptt_held = held && s_enabled;
@@ -234,7 +348,7 @@ extern "C" void ESPNOW_LINK_SetPtt(const bool held)
 
 extern "C" bool ESPNOW_LINK_PttActive(void)
 {
-    return s_ptt_held;
+    return s_enabled && espnow_keyed();
 }
 
 extern "C" bool ESPNOW_LINK_IsReceiving(void)

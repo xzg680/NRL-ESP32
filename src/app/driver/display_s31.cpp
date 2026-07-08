@@ -77,6 +77,7 @@ constexpr uint32_t kColorDuplex = 0xA78BFA;
 constexpr const char *kCallsignPlaceholder = "----------";
 constexpr size_t kStationFieldChars = 10u;
 constexpr size_t kWifiOptionCount = 12u;  // max scanned SSIDs listed in the dropdown
+constexpr size_t kMusicListMaxRows = 96u; // keep LVGL list layout bounded on large libraries
 
 enum class Page : uint8_t {
     Home,
@@ -1826,11 +1827,29 @@ void populateMusicList()
     const char *smb_mp = STORAGE_SmbMountPoint();
     const size_t smb_len = (smb_mp != nullptr) ? strlen(smb_mp) : 0u;
     size_t shown = 0;
+    size_t playable = 0;
+    const int current = PLAYLIST_CurrentIndex();
+    size_t start = 0u;
+    if (current > 0 && count > kMusicListMaxRows) {
+        start = static_cast<size_t>(current);
+        if (start > kMusicListMaxRows / 2u) {
+            start -= kMusicListMaxRows / 2u;
+        } else {
+            start = 0u;
+        }
+        if (start + kMusicListMaxRows > count) {
+            start = count - kMusicListMaxRows;
+        }
+    }
     for (size_t i = 0; i < count; ++i) {
         const char *path = PLAYLIST_GetPath(i);
         if (bt_on && smb_len > 0u && path != nullptr &&
             strncmp(path, smb_mp, smb_len) == 0) {
             continue;  // SMB track hidden while BT is on
+        }
+        ++playable;
+        if (i < start || shown >= kMusicListMaxRows) {
+            continue;
         }
         lv_obj_t *btn = lv_list_add_button(s_list_music, musicSourceIcon(path),
                                            musicBasename(path));
@@ -1846,6 +1865,14 @@ void populateMusicList()
             tr(bt_on ? "Network music is hidden while Bluetooth is on. Turn Bluetooth off to play SMB."
                      : "No tracks. Put files in /sdcard/music and Rescan."));
         lv_obj_set_style_text_color(empty, lv_color_hex(kColorSub), 0);
+    } else if (playable > shown) {
+        char text[64];
+        snprintf(text, sizeof(text), "Showing %u-%u of %u",
+                 static_cast<unsigned>(start + 1u),
+                 static_cast<unsigned>(start + shown),
+                 static_cast<unsigned>(playable));
+        lv_obj_t *more = lv_list_add_text(s_list_music, text);
+        lv_obj_set_style_text_color(more, lv_color_hex(kColorSub), 0);
     }
 }
 
@@ -2949,7 +2976,7 @@ void buildBt()
     s_page = Page::Bt;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    lv_obj_t *box = panel(scr, 24, 86, 750, 250);
+    lv_obj_t *box = panel(scr, 24, 86, 750, 270);
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
 
     fieldLabel(box, 0, 6, "Bluetooth headset");
@@ -2981,7 +3008,7 @@ void buildBt()
     fieldLabel(box, 0, 58, "Headsets: tap to connect, long-press a saved one to delete");
     s_list_bt = lv_list_create(box);
     lv_obj_set_pos(s_list_bt, 0, 82);
-    lv_obj_set_size(s_list_bt, 710, 132);
+    lv_obj_set_size(s_list_bt, 710, 122);
     lv_obj_set_style_radius(s_list_bt, 6, 0);
     lv_obj_set_style_bg_color(s_list_bt, lv_color_hex(kColorPanel2), 0);
     lv_obj_set_style_border_color(s_list_bt, lv_color_hex(kColorBorder), 0);
@@ -2989,8 +3016,10 @@ void buildBt()
     setBtDeviceList();
 
     s_lbl_bt_status = label(box, &lv_font_montserrat_16, kColorSub);
-    lv_obj_set_width(s_lbl_bt_status, 710);
-    lv_obj_set_pos(s_lbl_bt_status, 0, 222);
+    lv_obj_set_pos(s_lbl_bt_status, 0, 216);
+    lv_obj_set_size(s_lbl_bt_status, 710, 44);
+    lv_obj_set_style_text_line_space(s_lbl_bt_status, 2, 0);
+    lv_label_set_long_mode(s_lbl_bt_status, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_lbl_bt_status, tr("Turn on, Scan, then tap a headset. Saved ones reconnect automatically."));
 
     button(scr, 24, 372, 360, 76, "Back", Action::Config);

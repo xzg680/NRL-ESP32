@@ -407,6 +407,9 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
     replaceToken(html, "{{CODEC_G711_SELECTED}}", codec == 0u ? " selected" : "");
     replaceToken(html, "{{CODEC_OPUS_SELECTED}}", codec == 1u ? " selected" : "");
     replaceToken(html, "{{ESPNOW_CHECKED}}", checkedAttr(ESPNOW_LINK_IsEnabled()));
+    const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
+    replaceToken(html, "{{PTT_MODE_NRL_SELECTED}}", ptt_mode == 0u ? " selected" : "");
+    replaceToken(html, "{{PTT_MODE_ESPNOW_SELECTED}}", ptt_mode == 1u ? " selected" : "");
 
     char ai_url[160] = {};
     char ai_token[96] = {};
@@ -468,7 +471,34 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
     replaceToken(html, "{{SMB_STATUS}}", htmlEscape(smb_status));
     return html;
 #else
-    return std::string();
+    std::string html =
+        "<section class=\"panel\">"
+        "<div class=\"section-head\"><h2 data-i18n=\"voiceLink\">Voice Link</h2></div>"
+        "<div class=\"grid\">"
+        "<form class=\"item-form\" method=\"post\" action=\"/save_media\"><label data-i18n=\"pttMode\">PTT Mode</label>"
+        "<select name=\"ptt_mode\" onchange=\"submitSwitch(this)\">"
+        "<option value=\"0\"{{PTT_MODE_NRL_SELECTED}} data-i18n=\"pttModeNrl\">NRL network PTT</option>"
+        "<option value=\"1\"{{PTT_MODE_ESPNOW_SELECTED}} data-i18n=\"pttModeEspnow\">ESP-NOW PTT</option>"
+        "</select></form>"
+        "<form class=\"item-form\" method=\"post\" action=\"/save_media\"><label data-i18n=\"voiceCodec\">NRL Voice Codec (TX)</label>"
+        "<select name=\"voice_codec\" onchange=\"submitSwitch(this)\">"
+        "<option value=\"0\"{{CODEC_G711_SELECTED}} data-i18n=\"codecG711\">G.711 8 kHz (compatible)</option>"
+        "<option value=\"1\"{{CODEC_OPUS_SELECTED}} data-i18n=\"codecOpus\">Opus 16 kHz wideband</option>"
+        "</select></form>"
+        "</div></section>"
+        "<section class=\"panel\"><div class=\"section-head\"><h2 data-i18n=\"espnowLabel\">ESP-NOW Intercom</h2></div>"
+        "<div class=\"grid\"><form class=\"item-form\" method=\"post\" action=\"/save_media\">"
+        "<label data-i18n=\"espnowLabel\">ESP-NOW Intercom</label><input type=\"hidden\" name=\"espnow_present\" value=\"1\">"
+        "<label class=\"hint\"><input type=\"checkbox\" name=\"espnow_enabled\" value=\"1\" onchange=\"submitSwitch(this)\" {{ESPNOW_CHECKED}}>"
+        "<span data-i18n=\"espnowText\">Off-grid voice link between nearby devices</span></label></form></div></section>";
+    const uint8_t codec = NRLAudioBridge_GetVoiceCodec();
+    replaceToken(html, "{{CODEC_G711_SELECTED}}", codec == 0u ? " selected" : "");
+    replaceToken(html, "{{CODEC_OPUS_SELECTED}}", codec == 1u ? " selected" : "");
+    replaceToken(html, "{{ESPNOW_CHECKED}}", checkedAttr(ESPNOW_LINK_IsEnabled()));
+    const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
+    replaceToken(html, "{{PTT_MODE_NRL_SELECTED}}", ptt_mode == 0u ? " selected" : "");
+    replaceToken(html, "{{PTT_MODE_ESPNOW_SELECTED}}", ptt_mode == 1u ? " selected" : "");
+    return html;
 #endif
 }
 
@@ -485,16 +515,11 @@ std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *conf
     replaceToken(html, "{{NETWORK_ACTIVE}}", state.network_active ? "active" : "");
     replaceToken(html, "{{DEVICE_ACTIVE}}", state.device_active ? "active" : "");
     replaceToken(html, "{{AUDIO_ACTIVE}}", state.audio_active ? "active" : "");
-    // Media / nanny tab only exists on the S31 (media stack is S31-only).
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
     {
         std::string media_tab = std::string(kWifiConfigPortalMediaTabTemplate);
         replaceToken(media_tab, "{{MEDIA_ACTIVE}}", state.media_active ? "active" : "");
         replaceToken(html, "{{MEDIA_TAB}}", media_tab);
     }
-#else
-    replaceToken(html, "{{MEDIA_TAB}}", std::string(""));
-#endif
     replaceToken(html, "{{AP_IP}}", ipToString(nrlWifiApIp()));
     replaceToken(html, "{{STA_IP}}", staIpOrNotConnected(nrlWifiStaIp()));
     replaceToken(html, "{{SSID_OPTIONS}}", "");

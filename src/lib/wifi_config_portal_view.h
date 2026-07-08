@@ -31,8 +31,8 @@ std::string WifiConfigPortalView_BuildNetworkSection(const ExternalRadioConfig *
                                                      size_t scan_count);
 std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *config);
 std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *config);
-// Media / nanny page (S31 only; returns "" elsewhere): playback target,
-// nanny beacon, net radio, SMB network share, ESP-NOW intercom.
+// Media / voice-link page: S31 gets the full media stack; gezipai/bh4tdv get
+// the PTT target, NRL codec and ESP-NOW intercom controls.
 std::string WifiConfigPortalView_BuildMediaSections(void);
 std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
                                                  const WifiConfigPortalPageState &state,

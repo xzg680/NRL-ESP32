@@ -1,7 +1,10 @@
 """Fetch the LVGL graphics library into components/lvgl/ if it is missing.
 
 Behavior:
-  * If components/lvgl/lvgl.h already exists, nothing happens.
+  * If components/lvgl/lvgl.h already exists and its lv_version.h matches the
+    pinned LVGL_VERSION, nothing happens.
+  * If components/lvgl exists but has a different version, it is replaced with
+    the pinned LVGL_VERSION.
   * Otherwise, downloads the pinned LVGL_VERSION tarball from GitHub with a
     visible byte-by-byte progress line and bounded socket timeouts so the
     build never silently hangs on a stalled connection.
@@ -37,7 +40,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
-DEFAULT_VERSION = "9.3.0"
+DEFAULT_VERSION = "9.5.0"
 LVGL_VERSION = os.environ.get("LVGL_VERSION", DEFAULT_VERSION)
 DEFAULT_URL = f"https://github.com/lvgl/lvgl/archive/refs/tags/v{LVGL_VERSION}.tar.gz"
 LVGL_URL = os.environ.get("LVGL_FETCH_URL", DEFAULT_URL)
@@ -73,6 +76,7 @@ def _resolve_project_dir() -> Path:
 PROJECT_DIR = _resolve_project_dir()
 DEST_DIR = PROJECT_DIR / "components" / "lvgl"
 MARKER_FILE = DEST_DIR / "lvgl.h"
+VERSION_FILE = DEST_DIR / "lv_version.h"
 
 
 def _log(msg: str) -> None:
@@ -81,6 +85,27 @@ def _log(msg: str) -> None:
 
 def _is_installed() -> bool:
     return MARKER_FILE.is_file()
+
+
+def _installed_version() -> str | None:
+    if not VERSION_FILE.is_file():
+        return None
+    try:
+        text = VERSION_FILE.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 3 and parts[0] == "#define":
+            values[parts[1]] = parts[2]
+    major = values.get("LVGL_VERSION_MAJOR")
+    minor = values.get("LVGL_VERSION_MINOR")
+    patch = values.get("LVGL_VERSION_PATCH")
+    if major is None or minor is None or patch is None:
+        return None
+    return f"{major}.{minor}.{patch}"
 
 
 def _download(url: str, dest: Path) -> None:
@@ -157,8 +182,12 @@ def _print_manual_fallback(reason: str) -> None:
 
 def fetch_lvgl() -> None:
     if _is_installed():
-        _log(f"already installed at {DEST_DIR}, skipping download")
-        return
+        installed = _installed_version()
+        if installed == LVGL_VERSION:
+            _log(f"already installed at {DEST_DIR} (v{installed}), skipping download")
+            return
+        _log(f"installed LVGL is v{installed or 'unknown'}, replacing with v{LVGL_VERSION}")
+        shutil.rmtree(DEST_DIR)
 
     if SKIP_FETCH:
         _print_manual_fallback("LVGL_SKIP_FETCH=1, refused to auto-download")

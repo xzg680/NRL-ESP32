@@ -15,6 +15,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +29,11 @@ void ESPNOW_LINK_Init(void);
 bool ESPNOW_LINK_SetEnabled(bool enabled);
 
 bool ESPNOW_LINK_IsEnabled(void);
+
+// Physical/user PTT target. 0 = normal NRL uplink, 1 = ESP-NOW uplink.
+// Persisted in NVS. RX still works for both links regardless of this mode.
+void ESPNOW_LINK_SetPttMode(uint8_t mode);
+uint8_t ESPNOW_LINK_GetPttMode(void);
 
 // Dedicated hold-to-talk for the ESP-NOW link (S31 touch UI): while held,
 // mic audio broadcasts over ESP-NOW, independent of the NRL PTT. On boards

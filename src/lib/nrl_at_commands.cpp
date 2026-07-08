@@ -186,6 +186,7 @@ static bool appendSupportedAtList(uint8_t *payload,
     char sci_config[32] = "9600,8,N,1";
     char wifi_pass[32] = "(empty)";
     char hp_drive[4] = "OFF";
+    char ptt_mode[8] = "NRL";
     char wifi_ip[16] = "0.0.0.0";
     char wifi_mask[16] = "0.0.0.0";
     char wifi_gw[16] = "0.0.0.0";
@@ -194,6 +195,8 @@ static bool appendSupportedAtList(uint8_t *payload,
         formatSciConfig(config->sci, sci_config, sizeof(sci_config));
         formatMaskedSecret(config->wifi_password, wifi_pass, sizeof(wifi_pass));
         snprintf(hp_drive, sizeof(hp_drive), "%s", config->hp_drive_enabled ? "ON" : "OFF");
+        snprintf(ptt_mode, sizeof(ptt_mode), "%s",
+                 (ESPNOW_LINK_GetPttMode() == 1u) ? "ESPNOW" : "NRL");
         const bool show_dhcp_values = config->wifi_dhcp_enabled && nrlWifiStaConnected();
         ipText(currentWifiIpValue(config->wifi_ip, nrlWifiStaIp(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
         ipText(currentWifiIpValue(config->wifi_netmask, nrlWifiStaNetmask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
@@ -225,6 +228,11 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendUnsignedLine(payload, capacity, used, "MIC_GAIN", (config != nullptr) ? config->mic_volume : 0u) &&
            appendUnsignedLine(payload, capacity, used, "VOLUME", (config != nullptr) ? config->line_out_volume : 0u) &&
            appendKeyValueLine(payload, capacity, used, "HP_DRIVE", hp_drive) &&
+           appendKeyValueLine(payload, capacity, used, "CODEC",
+                              (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711") &&
+           appendKeyValueLine(payload, capacity, used, "ESPNOW",
+                              ESPNOW_LINK_IsEnabled() ? "ON" : "OFF") &&
+           appendKeyValueLine(payload, capacity, used, "PTT_MODE", ptt_mode) &&
 #if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
            appendKeyValueLine(payload, capacity, used, "AEC",
                               (config != nullptr && config->aec_enabled) ? "ON" : "OFF") &&
@@ -1149,6 +1157,41 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         }
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ESPNOW",
                            enabled ? "ON" : "OFF");
+        return;
+    }
+
+    // Physical/user PTT target:
+    //   AT+PTT_MODE=NRL     -> existing NRL uplink behavior
+    //   AT+PTT_MODE=ESPNOW  -> the same PTT/SQL gate broadcasts over ESP-NOW
+    if (stringEqualsIgnoreCase(command.command, "PTT_MODE")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "PTT_MODE", (ESPNOW_LINK_GetPttMode() == 1u) ? "ESPNOW" : "NRL");
+            return;
+        }
+        uint8_t mode = 0xFFu;
+        if (stringEqualsIgnoreCase(command.value, "NRL") ||
+            stringEqualsIgnoreCase(command.value, "NET") ||
+            stringEqualsIgnoreCase(command.value, "NETWORK")) {
+            mode = 0u;
+        } else if (stringEqualsIgnoreCase(command.value, "ESPNOW") ||
+                   stringEqualsIgnoreCase(command.value, "ESP-NOW")) {
+            mode = 1u;
+        }
+        if (mode > 1u) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", "PTT_MODE");
+            return;
+        }
+        if (mode == 1u && !ESPNOW_LINK_IsEnabled() &&
+            !ESPNOW_LINK_SetEnabled(true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", "ESPNOW");
+            return;
+        }
+        ESPNOW_LINK_SetPttMode(mode);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "PTT_MODE", (mode == 1u) ? "ESPNOW" : "NRL");
         return;
     }
 

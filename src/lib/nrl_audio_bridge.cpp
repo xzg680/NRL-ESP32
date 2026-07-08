@@ -18,6 +18,7 @@
 #include "driver/external_radio.h"
 #include "driver/sci_serial.h"
 #include "driver/status_io.h"
+#include "services/espnow_link.h"
 
 #include <esp_log.h>
 #include <esp_system.h>
@@ -413,6 +414,9 @@ static volatile bool s_media_uplink_active = false;
 // window (see stopDownlinkPlayback).
 static bool uplinkGateOpen(void)
 {
+    if (ESPNOW_LINK_GetPttMode() == 1u) {
+        return false;
+    }
     if (!STATUS_IO_IsSqlActive()) {
         return false;
     }
