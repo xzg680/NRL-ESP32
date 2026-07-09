@@ -61,6 +61,8 @@ static bool s_i2s_ready = false;
 static bool s_i2s_driver_installed = false;
 static i2s_chan_handle_t s_i2s_tx = nullptr;
 static i2s_chan_handle_t s_i2s_rx = nullptr;
+static bool s_i2s_tx_enabled = false;
+static bool s_i2s_rx_enabled = false;
 static TaskHandle_t s_passthrough_task = nullptr;
 static volatile bool s_passthrough_running = false;
 static AUDIO_Mode_t s_audio_mode = AUDIO_MODE_RECEIVE;
@@ -160,15 +162,29 @@ static inline void mic_hpf_apply(int16_t *frame, const size_t count) {
     s_mic_hpf2_y2 = y22;
 }
 
+static bool i2s_channel_is_enabled(const i2s_chan_handle_t channel) {
+    if (channel == nullptr) {
+        return false;
+    }
+    i2s_chan_info_t info = {};
+    return i2s_channel_get_info(channel, &info) == ESP_OK && info.is_enabled;
+}
+
 static void i2s_teardown(void) {
     if (s_i2s_tx != nullptr) {
-        (void)i2s_channel_disable(s_i2s_tx);
+        if (s_i2s_tx_enabled && i2s_channel_is_enabled(s_i2s_tx)) {
+            (void)i2s_channel_disable(s_i2s_tx);
+        }
+        s_i2s_tx_enabled = false;
         (void)i2s_del_channel(s_i2s_tx);
         s_i2s_tx = nullptr;
     }
 
     if (s_i2s_rx != nullptr) {
-        (void)i2s_channel_disable(s_i2s_rx);
+        if (s_i2s_rx_enabled && i2s_channel_is_enabled(s_i2s_rx)) {
+            (void)i2s_channel_disable(s_i2s_rx);
+        }
+        s_i2s_rx_enabled = false;
         (void)i2s_del_channel(s_i2s_rx);
         s_i2s_rx = nullptr;
     }
@@ -197,6 +213,8 @@ static bool i2s_setup(void) {
     if (s_i2s_driver_installed || s_i2s_tx != nullptr || s_i2s_rx != nullptr) {
         i2s_teardown();
     }
+    s_i2s_tx_enabled = false;
+    s_i2s_rx_enabled = false;
 
     i2s_chan_config_t channel_config = I2S_CHANNEL_DEFAULT_CONFIG(kI2sPort, I2S_ROLE_MASTER);
     // Keep only a few 10 ms DMA frames queued. Larger rings hide scheduling
@@ -248,6 +266,7 @@ static bool i2s_setup(void) {
         i2s_teardown();
         return false;
     }
+    s_i2s_tx_enabled = true;
 
     err = i2s_channel_enable(s_i2s_rx);
     if (err != ESP_OK) {
@@ -255,6 +274,7 @@ static bool i2s_setup(void) {
         i2s_teardown();
         return false;
     }
+    s_i2s_rx_enabled = true;
 
     s_i2s_ready = true;
     i2s_clear_dma();

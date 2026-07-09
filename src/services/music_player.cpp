@@ -179,6 +179,25 @@ static bool ensure_stereo_capacity(const size_t bytes)
     return true;
 }
 
+static size_t pcm24le_to_pcm32le_stereo(const uint8_t *src, const size_t bytes, int32_t *dst)
+{
+    if (src == nullptr || dst == nullptr) {
+        return 0;
+    }
+    const size_t samples = bytes / 3u;
+    for (size_t i = 0; i < samples; ++i) {
+        const uint8_t *p = src + i * 3u;
+        int32_t sample = static_cast<int32_t>(p[0]) |
+                         (static_cast<int32_t>(p[1]) << 8) |
+                         (static_cast<int32_t>(p[2]) << 16);
+        if ((sample & 0x00800000) != 0) {
+            sample |= static_cast<int32_t>(0xFF000000);
+        }
+        dst[i] = sample << 8;
+    }
+    return samples * sizeof(int32_t);
+}
+
 static bool ensure_net_capacity(const size_t samples)
 {
     if (s_net_capacity >= samples) {
@@ -249,8 +268,12 @@ static void player_task(void *)
                 ESP_LOGE(TAG, "no format info from decoder");
                 break;
             }
-            if (info.bits_per_sample != 16u || (info.channels != 1u && info.channels != 2u)) {
-                ESP_LOGE(TAG, "unsupported PCM: %ubit %uch (16-bit 1/2ch only for now)",
+            const bool speaker_24bit =
+                info.bits_per_sample == 24u && info.channels == 2u &&
+                to_local && !to_net;
+            if ((info.bits_per_sample != 16u && !speaker_24bit) ||
+                (info.channels != 1u && info.channels != 2u)) {
+                ESP_LOGE(TAG, "unsupported PCM: %ubit %uch (16-bit 1/2ch, or speaker 24-bit stereo)",
                          static_cast<unsigned>(info.bits_per_sample),
                          static_cast<unsigned>(info.channels));
                 break;
@@ -258,7 +281,8 @@ static void player_task(void *)
             if (to_local) {
                 // Preferred local device: BT headset (A2DP) when selected and
                 // reachable, otherwise the onboard hi-fi speaker.
-                if (s_output == MUSIC_OUTPUT_BT && NRL_BtA2dp_RequestStart()) {
+                if (s_output == MUSIC_OUTPUT_BT && info.bits_per_sample == 16u &&
+                    NRL_BtA2dp_RequestStart()) {
                     for (int i = 0; i < 40 && !NRL_BtA2dp_IsStreaming() && !s_stop_requested; ++i) {
                         vTaskDelay(pdMS_TO_TICKS(100)); // connect + negotiate + start
                     }
@@ -270,7 +294,8 @@ static void player_task(void *)
                     }
                 }
                 if (!bt_active) {
-                    if (!ES8389_HifiAcquire(info.sample_rate_hz, 16u, 2u)) {
+                    const uint8_t speaker_bits = speaker_24bit ? 32u : 16u;
+                    if (!ES8389_HifiAcquire(info.sample_rate_hz, speaker_bits, 2u)) {
                         ESP_LOGE(TAG, "hi-fi speaker unavailable (wrong board, or voice busy)");
                         break;
                     }
@@ -340,6 +365,19 @@ static void player_task(void *)
                 break;
             }
         } else if (to_local) {
+            if (info.bits_per_sample == 24u && info.channels == 2u) {
+                const size_t out_bytes = (bytes / 3u) * sizeof(int32_t);
+                if (!ensure_stereo_capacity(out_bytes)) {
+                    ESP_LOGE(TAG, "pcm32 buffer alloc failed");
+                    break;
+                }
+                const size_t converted = pcm24le_to_pcm32le_stereo(
+                    pcm, bytes, reinterpret_cast<int32_t *>(s_stereo_buffer));
+                if (converted == 0u || !ES8389_HifiWrite(s_stereo_buffer, converted)) {
+                    break;
+                }
+                continue;
+            }
             if (info.channels == 2u) {
                 if (!ES8389_HifiWrite(pcm, bytes)) {
                     break;

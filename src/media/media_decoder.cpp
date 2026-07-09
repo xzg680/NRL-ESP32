@@ -24,6 +24,10 @@ namespace {
 // frame parsers before reporting progress; at 8 KB it stalled with a full
 // buffer and playback ended after the first fraction of a second.
 constexpr size_t kRawBufferBytes = 32 * 1024;
+// The elementary FLAC parser is happier when fed like Espressif's simple
+// decoder tests: small raw chunks, then keep passing the unconsumed window.
+// Larger 32 KB chunks are still needed by TS/HLS demux.
+constexpr size_t kFlacRawChunkBytes = 512;
 // FLAC blocks can decode to ~64 KB of PCM at hi-res; start smaller and grow
 // on ESP_AUDIO_ERR_BUFF_NOT_ENOUGH as the decoder reports its needed size.
 constexpr size_t kInitialOutBufferBytes = 32 * 1024;
@@ -75,6 +79,7 @@ struct MediaDecoder {
     esp_http_client_handle_t http;   // ...HTTP(S) stream source (net radio)...
     HlsStream *hls;                  // ...or HLS (m3u8) segment stream
     esp_audio_simple_dec_handle_t handle;
+    esp_audio_simple_dec_type_t type;
     uint8_t *raw_buffer;
     uint8_t *out_buffer;
     size_t out_capacity;
@@ -88,6 +93,11 @@ struct MediaDecoder {
     uint8_t sniff[16];
     size_t sniff_len;
     size_t sniff_off;
+    // Synthetic leading bytes for file sources. Used by FLAC to preserve
+    // STREAMINFO while skipping large metadata/cover blocks before audio.
+    uint8_t prefix[42];
+    size_t prefix_len;
+    size_t prefix_off;
     // Read-ahead ring (file + HLS sources): a filler task streams the source
     // into PSRAM so SMB/segment latency spikes don't starve the decode loop.
     uint8_t *ring;
@@ -186,6 +196,93 @@ static esp_audio_simple_dec_type_t detect_type_from_header(const uint8_t *header
         }
     }
     return ESP_AUDIO_SIMPLE_DEC_TYPE_NONE;
+}
+
+struct FlacStreamInfo {
+    uint32_t sample_rate_hz;
+    uint8_t bits_per_sample;
+    uint8_t channels;
+    uint8_t streaminfo[34];
+    long audio_offset;
+};
+
+static bool read_file_exact(FILE *f, void *dst, const size_t n)
+{
+    return fread(dst, 1, n, f) == n;
+}
+
+static bool flac_read_stream_info(FILE *f, FlacStreamInfo *info)
+{
+    if (f == nullptr || info == nullptr) {
+        return false;
+    }
+    const long saved = ftell(f);
+    uint8_t magic[4];
+    uint8_t bh[4];
+    bool ok = false;
+
+    if (saved >= 0 &&
+        fseek(f, 0, SEEK_SET) == 0 &&
+        read_file_exact(f, magic, sizeof(magic)) &&
+        memcmp(magic, "fLaC", 4) == 0) {
+        bool last = false;
+        bool got_streaminfo = false;
+        while (!last && read_file_exact(f, bh, sizeof(bh))) {
+            last = (bh[0] & 0x80u) != 0u;
+            const uint8_t type = bh[0] & 0x7Fu;
+            const uint32_t block_len = (static_cast<uint32_t>(bh[1]) << 16) |
+                                       (static_cast<uint32_t>(bh[2]) << 8) | bh[3];
+            if (block_len > 16u * 1024u * 1024u) {
+                last = false;
+                break;
+            }
+            if (type == 0u && block_len >= sizeof(info->streaminfo)) {
+                if (!read_file_exact(f, info->streaminfo, sizeof(info->streaminfo))) {
+                    break;
+                }
+                if (block_len > sizeof(info->streaminfo) &&
+                    fseek(f, static_cast<long>(block_len - sizeof(info->streaminfo)), SEEK_CUR) != 0) {
+                    break;
+                }
+                got_streaminfo = true;
+            } else if (fseek(f, static_cast<long>(block_len), SEEK_CUR) != 0) {
+                break;
+            }
+        }
+        const long audio_offset = ftell(f);
+        if (last && got_streaminfo && audio_offset > 0) {
+            const uint8_t *si = info->streaminfo;
+            info->sample_rate_hz = (static_cast<uint32_t>(si[10]) << 12) |
+                                   (static_cast<uint32_t>(si[11]) << 4) |
+                                   (si[12] >> 4);
+            info->channels = static_cast<uint8_t>(((si[12] >> 1) & 0x07u) + 1u);
+            info->bits_per_sample = static_cast<uint8_t>(
+                (((si[12] & 0x01u) << 4) | (si[13] >> 4)) + 1u);
+            info->audio_offset = audio_offset;
+            ok = info->sample_rate_hz > 0u && info->channels > 0u && info->bits_per_sample > 0u;
+        }
+    }
+
+    if (saved >= 0) {
+        (void)fseek(f, saved, SEEK_SET);
+    }
+    return ok;
+}
+
+static void flac_install_compact_prefix(MediaDecoder *d, const FlacStreamInfo *info)
+{
+    if (d == nullptr || info == nullptr || info->audio_offset <= 0) {
+        return;
+    }
+    memcpy(d->prefix, "fLaC", 4);
+    d->prefix[4] = 0x80u; // last metadata block, STREAMINFO
+    d->prefix[5] = 0;
+    d->prefix[6] = 0;
+    d->prefix[7] = sizeof(info->streaminfo);
+    memcpy(d->prefix + 8, info->streaminfo, sizeof(info->streaminfo));
+    d->prefix_len = 8u + sizeof(info->streaminfo);
+    d->prefix_off = 0;
+    (void)fseek(d->file, info->audio_offset, SEEK_SET);
 }
 
 static bool grow_out_buffer(MediaDecoder *d, const size_t needed)
@@ -507,6 +604,12 @@ static HlsStream *hls_open(const char *url, volatile bool *stop)
 static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, const size_t size)
 {
     size_t total = 0;
+    while (total < size && d->prefix_off < d->prefix_len) {
+        dst[total++] = d->prefix[d->prefix_off++];
+    }
+    if (total == size) {
+        return total;
+    }
     while (total < size && d->sniff_off < d->sniff_len) {
         dst[total++] = d->sniff[d->sniff_off++];
     }
@@ -730,6 +833,19 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
         MEDIA_DECODER_Close(d);
         return nullptr;
     }
+    d->type = type;
+
+    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC && d->file != nullptr) {
+        FlacStreamInfo flac = {};
+        if (flac_read_stream_info(d->file, &flac)) {
+            flac_install_compact_prefix(d, &flac);
+            ESP_LOGI(TAG, "FLAC streaminfo: %luHz %ubit %uch, audio offset=%ld",
+                     static_cast<unsigned long>(flac.sample_rate_hz),
+                     static_cast<unsigned>(flac.bits_per_sample),
+                     static_cast<unsigned>(flac.channels),
+                     flac.audio_offset);
+        }
+    }
 
     d->raw_buffer = static_cast<uint8_t *>(heap_caps_malloc(kRawBufferBytes, MALLOC_CAP_SPIRAM));
     d->out_buffer = static_cast<uint8_t *>(heap_caps_malloc(kInitialOutBufferBytes, MALLOC_CAP_SPIRAM));
@@ -788,7 +904,10 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
             if (d->eof) {
                 return 0;
             }
-            d->raw_fill = read_source(d, d->raw_buffer, kRawBufferBytes);
+            const size_t raw_want = (d->type == ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC)
+                                        ? kFlacRawChunkBytes
+                                        : kRawBufferBytes;
+            d->raw_fill = read_source(d, d->raw_buffer, raw_want);
             d->raw_offset = 0;
             if (d->raw_fill == 0u) {
                 d->eof = true;
@@ -797,7 +916,7 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
             // Live HTTP streams legitimately return short reads; only local
             // files treat one as end-of-stream (FLAC needs the eos flag to
             // flush its tail).
-            if (d->file != nullptr && d->raw_fill < kRawBufferBytes) {
+            if (d->file != nullptr && d->raw_fill < raw_want) {
                 d->eof = true;
             }
         }

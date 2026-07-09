@@ -77,7 +77,7 @@ constexpr uint32_t kColorDuplex = 0xA78BFA;
 constexpr const char *kCallsignPlaceholder = "----------";
 constexpr size_t kStationFieldChars = 10u;
 constexpr size_t kWifiOptionCount = 12u;  // max scanned SSIDs listed in the dropdown
-constexpr size_t kMusicListMaxRows = 96u; // keep LVGL list layout bounded on large libraries
+constexpr size_t kMusicListMaxRows = 48u; // keep LVGL list layout bounded on large libraries
 
 enum class Page : uint8_t {
     Home,
@@ -120,6 +120,7 @@ enum class Action : intptr_t {
     MusicNext,
     MusicPrev,
     MusicRescan,
+    MusicMode,
     Radio,
     Nanny,
     Smb,
@@ -162,6 +163,10 @@ volatile bool s_wifi_scan_running = false;
 volatile bool s_wifi_scan_complete = false;
 volatile bool s_wifi_scan_ok = false;
 TaskHandle_t s_wifi_scan_task = nullptr;
+volatile bool s_music_scan_running = false;
+volatile bool s_music_scan_complete = false;
+volatile size_t s_music_scan_count = 0;
+TaskHandle_t s_music_scan_task = nullptr;
 
 esp_lcd_panel_handle_t s_panel = nullptr;
 lv_display_t *s_disp = nullptr;
@@ -239,6 +244,7 @@ lv_obj_t *s_lbl_music_album = nullptr;
 lv_obj_t *s_lbl_music_state = nullptr;
 lv_obj_t *s_lbl_music_format = nullptr;
 lv_obj_t *s_btn_music_toggle_label = nullptr;
+lv_obj_t *s_btn_music_mode_label = nullptr;
 lv_obj_t *s_list_music = nullptr;
 lv_obj_t *s_img_music_cover = nullptr;
 lv_obj_t *s_lbl_music_icon = nullptr;
@@ -252,6 +258,16 @@ bool s_shown_music_playing = false;
 CoverBitmap s_music_cover_bmp = {};
 lv_image_dsc_t s_music_cover_dsc = {};
 constexpr uint16_t kMusicCoverDim = 152;
+TaskHandle_t s_music_cover_task = nullptr;
+SemaphoreHandle_t s_music_cover_lock = nullptr;
+uint32_t s_music_cover_req_seq = 0;
+uint32_t s_music_cover_pending_seq = 0;
+char s_music_cover_req_path[256] = {};
+uint8_t *s_music_cover_req_jpeg = nullptr;
+size_t s_music_cover_req_jpeg_size = 0;
+CoverBitmap s_music_cover_pending = {};
+char s_music_cover_pending_path[256] = {};
+char s_music_cover_loaded_path[256] = {};
 
 // Video-call page: remote JPEG frames decode through the same cover decoder
 // into this bitmap; s_video_shown_seq tracks the last rendered frame.
@@ -493,9 +509,7 @@ void touchRead(lv_indev_t *, lv_indev_data_t *data)
     if (s_touch == nullptr || data == nullptr) {
         return;
     }
-    uint16_t x = 0;
-    uint16_t y = 0;
-    uint16_t strength = 0;
+    esp_lcd_touch_point_data_t points[1] = {};
     uint8_t count = 0;
     const int64_t t0 = esp_timer_get_time();
     esp_lcd_touch_read_data(s_touch);
@@ -505,10 +519,10 @@ void touchRead(lv_indev_t *, lv_indev_data_t *data)
         // long read here means another task parked on the bus mutex.
         ESP_LOGW(TAG, "touch read blocked %lums", static_cast<unsigned long>(dt_ms));
     }
-    const bool pressed = esp_lcd_touch_get_coordinates(s_touch, &x, &y, &strength, &count, 1);
-    if (pressed && count > 0) {
-        data->point.x = static_cast<int16_t>(x);
-        data->point.y = static_cast<int16_t>(y);
+    const esp_err_t err = esp_lcd_touch_get_data(s_touch, points, &count, 1);
+    if (err == ESP_OK && count > 0) {
+        data->point.x = static_cast<int16_t>(points[0].x);
+        data->point.y = static_cast<int16_t>(points[0].y);
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
@@ -1072,6 +1086,7 @@ void clearScreen()
     s_lbl_music_format = nullptr;
     s_shown_music_format[0] = '\0';
     s_btn_music_toggle_label = nullptr;
+    s_btn_music_mode_label = nullptr;
     s_list_music = nullptr;
     s_img_music_cover = nullptr;
     s_lbl_music_icon = nullptr;
@@ -1773,6 +1788,8 @@ const char *musicBasename(const char *path)
     return (slash != nullptr) ? slash + 1 : path;
 }
 
+void populateMusicList();
+
 void musicListEvent(lv_event_t *event)
 {
     const size_t index = static_cast<size_t>(
@@ -1781,28 +1798,33 @@ void musicListEvent(lv_event_t *event)
     s_last_refresh_ms = 0;
 }
 
-// Per-track storage icon, by matching the path against the storage mount-point
-// prefixes: SD-card / USB / Wi-Fi (network SMB share). Used as the list-row icon
-// so the user sees at a glance where each track lives. Falls back to the generic
-// audio note when the source is unknown.
-const char *musicSourceIcon(const char *path)
+void musicFavoriteEvent(lv_event_t *event)
 {
-    if (path == nullptr) {
-        return LV_SYMBOL_AUDIO;
+    const size_t index = static_cast<size_t>(
+        reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
+    const char *path = PLAYLIST_GetPath(index);
+    if (PLAYLIST_ToggleFavorite(path)) {
+        populateMusicList();
     }
-    const char *sd = STORAGE_SdMountPoint();
-    const char *usb = STORAGE_UsbMountPoint();
-    const char *smb = STORAGE_SmbMountPoint();
-    if (sd != nullptr && sd[0] != '\0' && strncmp(path, sd, strlen(sd)) == 0) {
-        return LV_SYMBOL_SD_CARD;
+    s_last_refresh_ms = 0;
+}
+
+void musicDirEvent(lv_event_t *event)
+{
+    const size_t index = static_cast<size_t>(
+        reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
+    if (PLAYLIST_EnterDir(index)) {
+        populateMusicList();
     }
-    if (usb != nullptr && usb[0] != '\0' && strncmp(path, usb, strlen(usb)) == 0) {
-        return LV_SYMBOL_USB;
+    s_last_refresh_ms = 0;
+}
+
+void musicUpEvent(lv_event_t *)
+{
+    if (PLAYLIST_Up()) {
+        populateMusicList();
     }
-    if (smb != nullptr && smb[0] != '\0' && strncmp(path, smb, strlen(smb)) == 0) {
-        return LV_SYMBOL_WIFI;
-    }
-    return LV_SYMBOL_AUDIO;
+    s_last_refresh_ms = 0;
 }
 
 void populateMusicList()
@@ -1811,12 +1833,33 @@ void populateMusicList()
         return;
     }
     lv_obj_clean(s_list_music);
+    size_t rows_used = 0;
+    if (!PLAYLIST_AtRoot()) {
+        lv_obj_t *up = lv_list_add_button(s_list_music, LV_SYMBOL_LEFT, "..");
+        lv_obj_set_style_bg_color(up, lv_color_hex(kColorPanel2), 0);
+        lv_obj_set_style_text_color(up, lv_color_hex(kColorSub), 0);
+        lv_obj_add_event_cb(up, musicUpEvent, LV_EVENT_CLICKED, nullptr);
+        ++rows_used;
+    }
+
+    const size_t dir_count = PLAYLIST_DirCount();
+    for (size_t i = 0; i < dir_count && rows_used < kMusicListMaxRows; ++i) {
+        const char *name = PLAYLIST_GetDirName(i);
+        lv_obj_t *btn = lv_list_add_button(s_list_music, LV_SYMBOL_DIRECTORY,
+                                           (name != nullptr && name[0] != '\0') ? name : "(dir)");
+        lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel2), 0);
+        lv_obj_set_style_text_color(btn, lv_color_hex(kColorText), 0);
+        lv_obj_add_event_cb(btn, musicDirEvent, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+        ++rows_used;
+    }
+
     const size_t count = PLAYLIST_Count();
-    if (count == 0u) {
+    if (count == 0u && dir_count == 0u) {
         lv_obj_t *empty = lv_list_add_text(s_list_music,
-                                           tr(STORAGE_SdMounted()
-                                                  ? "No tracks. Put files in /sdcard/music and Rescan."
-                                                  : "No TF card mounted."));
+                                           tr(PLAYLIST_AtRoot()
+                                                  ? "No storage mounted."
+                                                  : "No tracks or subdirectories."));
         lv_obj_set_style_text_color(empty, lv_color_hex(kColorSub), 0);
         return;
     }
@@ -1826,19 +1869,21 @@ void populateMusicList()
     const bool bt_on = NRL_BtHfp_IsEnabled();
     const char *smb_mp = STORAGE_SmbMountPoint();
     const size_t smb_len = (smb_mp != nullptr) ? strlen(smb_mp) : 0u;
-    size_t shown = 0;
+    size_t track_shown = 0;
     size_t playable = 0;
     const int current = PLAYLIST_CurrentIndex();
     size_t start = 0u;
-    if (current > 0 && count > kMusicListMaxRows) {
+    const size_t track_row_budget =
+        (rows_used >= kMusicListMaxRows) ? 0u : (kMusicListMaxRows - rows_used);
+    if (current > 0 && count > track_row_budget && track_row_budget > 0u) {
         start = static_cast<size_t>(current);
-        if (start > kMusicListMaxRows / 2u) {
-            start -= kMusicListMaxRows / 2u;
+        if (start > track_row_budget / 2u) {
+            start -= track_row_budget / 2u;
         } else {
             start = 0u;
         }
-        if (start + kMusicListMaxRows > count) {
-            start = count - kMusicListMaxRows;
+        if (start + track_row_budget > count) {
+            start = count - track_row_budget;
         }
     }
     for (size_t i = 0; i < count; ++i) {
@@ -1848,32 +1893,99 @@ void populateMusicList()
             continue;  // SMB track hidden while BT is on
         }
         ++playable;
-        if (i < start || shown >= kMusicListMaxRows) {
+        if (i < start || rows_used >= kMusicListMaxRows) {
             continue;
         }
-        lv_obj_t *btn = lv_list_add_button(s_list_music, musicSourceIcon(path),
-                                           musicBasename(path));
+        char row[128];
+        snprintf(row, sizeof(row), "%s%s",
+                 PLAYLIST_IsFavorite(path) ? "* " : "",
+                 musicBasename(path));
+        lv_obj_t *btn = lv_list_add_button(s_list_music, LV_SYMBOL_AUDIO, row);
         lv_obj_set_style_bg_color(btn, lv_color_hex(kColorPanel2), 0);
         lv_obj_set_style_text_color(btn, lv_color_hex(kColorText), 0);
         lv_obj_add_event_cb(btn, musicListEvent, LV_EVENT_CLICKED,
                             reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
-        ++shown;
+        lv_obj_add_event_cb(btn, musicFavoriteEvent, LV_EVENT_LONG_PRESSED,
+                            reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+        ++track_shown;
+        ++rows_used;
     }
-    if (shown == 0u) {
+    if (rows_used == 0u) {
         lv_obj_t *empty = lv_list_add_text(
             s_list_music,
             tr(bt_on ? "Network music is hidden while Bluetooth is on. Turn Bluetooth off to play SMB."
-                     : "No tracks. Put files in /sdcard/music and Rescan."));
+                     : "No tracks or subdirectories."));
         lv_obj_set_style_text_color(empty, lv_color_hex(kColorSub), 0);
-    } else if (playable > shown) {
+    } else if (playable > track_shown) {
         char text[64];
         snprintf(text, sizeof(text), "Showing %u-%u of %u",
                  static_cast<unsigned>(start + 1u),
-                 static_cast<unsigned>(start + shown),
+                 static_cast<unsigned>(start + track_shown),
                  static_cast<unsigned>(playable));
         lv_obj_t *more = lv_list_add_text(s_list_music, text);
         lv_obj_set_style_text_color(more, lv_color_hex(kColorSub), 0);
     }
+}
+
+void showMusicListStatus(const char *text, const uint32_t color)
+{
+    if (s_list_music == nullptr) {
+        return;
+    }
+    lv_obj_clean(s_list_music);
+    lv_obj_t *line = lv_list_add_text(s_list_music, tr(text));
+    lv_obj_set_style_text_color(line, lv_color_hex(color), 0);
+}
+
+void musicScanTask(void *)
+{
+    const size_t count = PLAYLIST_Scan();
+    s_music_scan_count = count;
+    s_music_scan_complete = true;
+    s_music_scan_running = false;
+    s_music_scan_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void startMusicRescan()
+{
+    if (s_music_scan_running) {
+        showMusicListStatus("Scanning...", kColorWarn);
+        return;
+    }
+
+    s_music_scan_complete = false;
+    s_music_scan_count = 0;
+    showMusicListStatus("Scanning...", kColorWarn);
+    lv_timer_handler();
+
+    s_music_scan_running = true;
+    const BaseType_t created = xTaskCreatePinnedToCore(musicScanTask, "music_scan_ui", 12288,
+                                                       nullptr, 4, &s_music_scan_task, 0);
+    if (created != pdPASS) {
+        s_music_scan_task = nullptr;
+        s_music_scan_running = false;
+        s_music_scan_complete = false;
+        showMusicListStatus("Scan failed: task create failed.", kColorBad);
+    }
+}
+
+void pollMusicScan()
+{
+    if (!s_music_scan_complete) {
+        return;
+    }
+    s_music_scan_complete = false;
+
+    if (s_page == Page::Music) {
+        populateMusicList();
+        if (s_music_scan_count == 0u && PLAYLIST_DirCount() == 0u) {
+            showMusicListStatus(PLAYLIST_AtRoot() ? "No storage mounted."
+                                                  : "No tracks or subdirectories.",
+                                kColorSub);
+        }
+    }
+    s_last_refresh_ms = 0;
 }
 
 // True for common album-art filenames (case-insensitive): cover/folder/album/
@@ -1910,11 +2022,9 @@ bool loadFolderCover(const char *track_path, CoverBitmap *out)
     }
     const size_t dir_len = static_cast<size_t>(slash - track_path);
 
-    // Heap scratch, NOT stack: loadFolderCover runs deep in the UI call chain
-    // (refreshMusic -> refreshMusicCover -> here -> COVER_DecodeJpeg), and the
-    // JPEG decoder is itself stack-heavy. Two 512 B path buffers on the stack of
-    // the caller task (nrl_main_loop, 6 KB) overflowed it and stack-protection
-    // faulted. Paths on the heap keep our stack footprint tiny.
+    // Heap scratch, NOT stack: loadFolderCover may decode several JPEG probes,
+    // and the decoder is itself stack-heavy. Keep the path scratch off the
+    // caller stack; on S31 this normally runs in the cover worker task.
     constexpr size_t kPathCap = 512;
     if (dir_len == 0u || dir_len >= kPathCap) {
         return false;
@@ -1983,31 +2093,28 @@ bool loadFolderCover(const char *track_path, CoverBitmap *out)
     return ok;
 }
 
-void refreshMusicCover(const MediaTrackInfo *track)
+void setMusicCoverPlaceholder()
 {
     if (s_img_music_cover == nullptr || s_lbl_music_icon == nullptr) {
         return;
     }
-
-    // Detach the widget before releasing the old bitmap it may reference.
     lv_image_set_src(s_img_music_cover, nullptr);
     lv_obj_add_flag(s_img_music_cover, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_lbl_music_icon, LV_OBJ_FLAG_HIDDEN);
     COVER_Free(&s_music_cover_bmp);
+}
 
-    bool have_cover = false;
-    if (track != nullptr && track->cover_type == MEDIA_COVER_JPEG &&
-        track->cover_data != nullptr && track->cover_size > 0u) {
-        have_cover = COVER_DecodeJpeg(track->cover_data, track->cover_size,
-                                      kMusicCoverDim, &s_music_cover_bmp);
+void applyMusicCoverBitmap(CoverBitmap *bmp)
+{
+    if (s_img_music_cover == nullptr || s_lbl_music_icon == nullptr || bmp == nullptr ||
+        bmp->rgb565 == nullptr) {
+        return;
     }
-    if (!have_cover) {
-        // No usable embedded art: try a cover image file in the track's folder.
-        have_cover = loadFolderCover(MUSIC_CurrentPath(), &s_music_cover_bmp);
-    }
-    if (!have_cover) {
-        return; // keep the placeholder icon
-    }
+
+    lv_image_set_src(s_img_music_cover, nullptr);
+    COVER_Free(&s_music_cover_bmp);
+    s_music_cover_bmp = *bmp;
+    memset(bmp, 0, sizeof(*bmp));
 
     memset(&s_music_cover_dsc, 0, sizeof(s_music_cover_dsc));
     s_music_cover_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -2023,10 +2130,154 @@ void refreshMusicCover(const MediaTrackInfo *track)
     lv_obj_add_flag(s_lbl_music_icon, LV_OBJ_FLAG_HIDDEN);
 }
 
+void musicCoverTask(void *)
+{
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        char path[sizeof(s_music_cover_req_path)] = {};
+        uint8_t *jpeg = nullptr;
+        size_t jpeg_size = 0;
+        uint32_t seq = 0;
+
+        xSemaphoreTake(s_music_cover_lock, portMAX_DELAY);
+        seq = s_music_cover_req_seq;
+        snprintf(path, sizeof(path), "%s", s_music_cover_req_path);
+        jpeg = s_music_cover_req_jpeg;
+        jpeg_size = s_music_cover_req_jpeg_size;
+        s_music_cover_req_jpeg = nullptr;
+        s_music_cover_req_jpeg_size = 0;
+        xSemaphoreGive(s_music_cover_lock);
+
+        CoverBitmap bmp = {};
+        bool have_cover = false;
+        if (jpeg != nullptr && jpeg_size > 0u) {
+            have_cover = COVER_DecodeJpeg(jpeg, jpeg_size, kMusicCoverDim, &bmp);
+        }
+        if (jpeg != nullptr) {
+            heap_caps_free(jpeg);
+        }
+        if (!have_cover) {
+            have_cover = loadFolderCover(path, &bmp);
+        }
+
+        xSemaphoreTake(s_music_cover_lock, portMAX_DELAY);
+        if (seq == s_music_cover_req_seq && path[0] != '\0') {
+            COVER_Free(&s_music_cover_pending);
+            if (have_cover) {
+                s_music_cover_pending = bmp;
+                memset(&bmp, 0, sizeof(bmp));
+            }
+            snprintf(s_music_cover_pending_path, sizeof(s_music_cover_pending_path), "%s", path);
+            s_music_cover_pending_seq = seq;
+        }
+        xSemaphoreGive(s_music_cover_lock);
+        COVER_Free(&bmp);
+    }
+}
+
+void ensureMusicCoverTask()
+{
+    if (s_music_cover_lock == nullptr) {
+        s_music_cover_lock = xSemaphoreCreateMutex();
+        if (s_music_cover_lock == nullptr) {
+            return;
+        }
+    }
+    if (s_music_cover_task == nullptr) {
+        if (xTaskCreatePinnedToCore(musicCoverTask, "music_cover", 6144,
+                                    nullptr, 3, &s_music_cover_task, 0) != pdPASS) {
+            s_music_cover_task = nullptr;
+        }
+    }
+}
+
+void requestMusicCoverDecode(const char *path, const MediaTrackInfo *track)
+{
+    if (path == nullptr || path[0] == '\0') {
+        return;
+    }
+    ensureMusicCoverTask();
+    if (s_music_cover_lock == nullptr || s_music_cover_task == nullptr) {
+        return;
+    }
+
+    uint8_t *cover_copy = nullptr;
+    size_t cover_size = 0;
+    if (track != nullptr && track->cover_type == MEDIA_COVER_JPEG &&
+        track->cover_data != nullptr && track->cover_size > 0u) {
+        cover_copy = static_cast<uint8_t *>(
+            heap_caps_malloc(track->cover_size, MALLOC_CAP_SPIRAM));
+        if (cover_copy != nullptr) {
+            memcpy(cover_copy, track->cover_data, track->cover_size);
+            cover_size = track->cover_size;
+        }
+    }
+
+    xSemaphoreTake(s_music_cover_lock, portMAX_DELAY);
+    ++s_music_cover_req_seq;
+    snprintf(s_music_cover_req_path, sizeof(s_music_cover_req_path), "%s", path);
+    if (s_music_cover_req_jpeg != nullptr) {
+        heap_caps_free(s_music_cover_req_jpeg);
+    }
+    s_music_cover_req_jpeg = cover_copy;
+    s_music_cover_req_jpeg_size = cover_size;
+    xSemaphoreGive(s_music_cover_lock);
+
+    xTaskNotifyGive(s_music_cover_task);
+}
+
+void adoptMusicCover()
+{
+    if (s_img_music_cover == nullptr || s_music_cover_lock == nullptr) {
+        return;
+    }
+
+    CoverBitmap bmp = {};
+    char path[sizeof(s_music_cover_pending_path)] = {};
+    uint32_t seq = 0;
+    xSemaphoreTake(s_music_cover_lock, portMAX_DELAY);
+    if (s_music_cover_pending_seq != 0u) {
+        seq = s_music_cover_pending_seq;
+        s_music_cover_pending_seq = 0;
+        snprintf(path, sizeof(path), "%s", s_music_cover_pending_path);
+        bmp = s_music_cover_pending;
+        memset(&s_music_cover_pending, 0, sizeof(s_music_cover_pending));
+        s_music_cover_pending_path[0] = '\0';
+    }
+    xSemaphoreGive(s_music_cover_lock);
+
+    if (seq == 0u) {
+        return;
+    }
+    if (strcmp(path, MUSIC_CurrentPath()) != 0) {
+        COVER_Free(&bmp);
+        return;
+    }
+    if (bmp.rgb565 != nullptr) {
+        applyMusicCoverBitmap(&bmp);
+    } else {
+        setMusicCoverPlaceholder();
+    }
+    snprintf(s_music_cover_loaded_path, sizeof(s_music_cover_loaded_path), "%s", path);
+}
+
+void refreshMusicCover(const MediaTrackInfo *track, const char *path)
+{
+    if (path == nullptr || path[0] == '\0' ||
+        strcmp(path, s_music_cover_loaded_path) == 0) {
+        return;
+    }
+    setMusicCoverPlaceholder();
+    s_music_cover_loaded_path[0] = '\0';
+    requestMusicCoverDecode(path, track);
+}
+
 void refreshMusic()
 {
     const bool playing = MUSIC_IsPlaying();
     const char *path = MUSIC_CurrentPath();
+    adoptMusicCover();
 
     // Stream format line: the decoder only knows rate/depth/channels a
     // moment after playback starts (no track/state change fires then), so
@@ -2063,11 +2314,8 @@ void refreshMusic()
     // music" every time. The bitmap is already cached (and re-attached by
     // buildMusic), so gate the reload on a separate path so re-entering the same
     // track is instant.
-    static char s_cover_path[256] = {};
-    const bool cover_stale = strncmp(path, s_cover_path, sizeof(s_cover_path)) != 0;
-    if (track_changed && cover_stale) {
-        refreshMusicCover(track);
-        snprintf(s_cover_path, sizeof(s_cover_path), "%s", path);
+    if (track_changed) {
+        refreshMusicCover(track, path);
     }
     if (s_lbl_music_title != nullptr) {
         const char *title = (track != nullptr && track->title[0] != '\0')
@@ -2090,6 +2338,10 @@ void refreshMusic()
     }
     if (s_btn_music_toggle_label != nullptr) {
         lv_label_set_text(s_btn_music_toggle_label, playing ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY);
+    }
+    if (s_btn_music_mode_label != nullptr) {
+        lv_label_set_text(s_btn_music_mode_label,
+                          PLAYLIST_GetRepeatMode() == PLAYLIST_REPEAT_ONE ? "One" : "List");
     }
 }
 
@@ -2154,14 +2406,18 @@ void buildMusic()
     lv_obj_set_style_text_font(s_list_music, &s_font_ui_16, 0);
     populateMusicList();
 
-    button(scr, 24, 372, 150, 76, "Back", Action::Apps);
-    button(scr, 190, 372, 120, 76, LV_SYMBOL_PREV, Action::MusicPrev);
-    lv_obj_t *toggle = button(scr, 326, 372, 120, 76,
+    button(scr, 24, 372, 120, 76, "Back", Action::Apps);
+    button(scr, 158, 372, 96, 76, LV_SYMBOL_PREV, Action::MusicPrev);
+    lv_obj_t *toggle = button(scr, 268, 372, 96, 76,
                               MUSIC_IsPlaying() ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY,
                               Action::MusicToggle);
     s_btn_music_toggle_label = lv_obj_get_child(toggle, 0);
-    button(scr, 462, 372, 120, 76, LV_SYMBOL_NEXT, Action::MusicNext);
-    button(scr, 598, 372, 178, 76, "Rescan", Action::MusicRescan);
+    button(scr, 378, 372, 96, 76, LV_SYMBOL_NEXT, Action::MusicNext);
+    lv_obj_t *mode = button(scr, 488, 372, 120, 76,
+                            PLAYLIST_GetRepeatMode() == PLAYLIST_REPEAT_ONE ? "One" : "List",
+                            Action::MusicMode);
+    s_btn_music_mode_label = lv_obj_get_child(mode, 0);
+    button(scr, 622, 372, 154, 76, "Rescan", Action::MusicRescan);
 
     // Prime the now-playing card.
     s_shown_music_path[0] = '\1'; // force refreshMusic to repaint
@@ -2179,6 +2435,15 @@ void musicToggle()
         (void)PLAYLIST_PlayIndex(static_cast<size_t>(current));
     } else {
         (void)PLAYLIST_Next();
+    }
+}
+
+void musicModeToggle()
+{
+    (void)PLAYLIST_ToggleRepeatMode();
+    if (s_btn_music_mode_label != nullptr) {
+        lv_label_set_text(s_btn_music_mode_label,
+                          PLAYLIST_GetRepeatMode() == PLAYLIST_REPEAT_ONE ? "One" : "List");
     }
 }
 
@@ -3136,9 +3401,9 @@ void action(lv_event_t *event)
         case Action::MusicToggle: musicToggle(); break;
         case Action::MusicNext: (void)PLAYLIST_Next(); break;
         case Action::MusicPrev: (void)PLAYLIST_Prev(); break;
+        case Action::MusicMode: musicModeToggle(); break;
         case Action::MusicRescan:
-            (void)PLAYLIST_Scan();
-            populateMusicList();
+            startMusicRescan();
             break;
         case Action::Radio: buildRadio(); break;
         case Action::Nanny: buildNanny(); break;
@@ -3844,6 +4109,7 @@ extern "C" void Display_Poll(void)
         lv_obj_invalidate(lv_screen_active()); // repaint after the FB benchmark
     }
     pollWifiScan();
+    pollMusicScan();
     // Update the top-bar volume every poll (~20 ms) so a physical volume key held
     // down shows each 1% step live, matching the soft buttons. setLabel no-ops
     // when the value is unchanged, so this is cheap. The full refresh below stays

@@ -24,12 +24,19 @@ namespace {
 
 constexpr int kMaxOpenFiles = 8;
 constexpr int kSmbTimeoutSeconds = 10;
+constexpr size_t kMaxSmbText = 128;
 
 // libsmb2's context is not thread safe; the player task, playlist scan and
 // metadata parser all issue calls, so every operation takes this lock.
 static SemaphoreHandle_t s_lock = nullptr;
 static struct smb2_context *s_smb = nullptr;
 static struct smb2fh *s_files[kMaxOpenFiles] = {};
+static int s_open_dirs = 0;
+static bool s_smb_bad = false;
+static char s_server[kMaxSmbText] = {};
+static char s_share[kMaxSmbText] = {};
+static char s_user[kMaxSmbText] = {};
+static char s_password[kMaxSmbText] = {};
 
 // DIR wrapper handed back through the VFS: newlib requires the first member
 // to be the plain DIR the VFS layer fills in.
@@ -52,15 +59,98 @@ public:
     ~LockGuard() { xSemaphoreGive(s_lock); }
 };
 
-static int vfs_open(const char *path, const int flags, int)
+static bool smb_error_is_connection_loss(const char *error)
+{
+    return error != nullptr &&
+           (strstr(error, "smb2_service failed") != nullptr ||
+            strstr(error, "SMB2_STATUS_IO_TIMEOUT") != nullptr ||
+            strstr(error, "Not Connected") != nullptr ||
+            strstr(error, "POLLHUP") != nullptr ||
+            strstr(error, "socket error") != nullptr);
+}
+
+static bool smb_has_open_handles_locked(void)
+{
+    if (s_open_dirs > 0) {
+        return true;
+    }
+    for (int i = 0; i < kMaxOpenFiles; ++i) {
+        if (s_files[i] != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void smb_destroy_context_locked(void)
+{
+    if (s_smb == nullptr) {
+        return;
+    }
+    for (int i = 0; i < kMaxOpenFiles; ++i) {
+        s_files[i] = nullptr;
+    }
+    smb2_destroy_context(s_smb);
+    s_smb = nullptr;
+}
+
+static bool smb_connect_locked(void)
+{
+    if (smb_has_open_handles_locked()) {
+        ESP_LOGW(TAG, "defer reconnect while SMB handles are open");
+        return false;
+    }
+    smb_destroy_context_locked();
+    s_smb_bad = false;
+
+    s_smb = smb2_init_context();
+    if (s_smb == nullptr) {
+        return false;
+    }
+    smb2_set_timeout(s_smb, kSmbTimeoutSeconds);
+    smb2_set_security_mode(s_smb, SMB2_NEGOTIATE_SIGNING_ENABLED);
+    if (s_password[0] != '\0') {
+        smb2_set_password(s_smb, s_password);
+    }
+
+    const char *login = (s_user[0] != '\0') ? s_user : "guest";
+    if (smb2_connect_share(s_smb, s_server, s_share, login) < 0) {
+        ESP_LOGE(TAG, "connect //%s/%s failed: %s", s_server, s_share, smb2_get_error(s_smb));
+        smb_destroy_context_locked();
+        return false;
+    }
+    return true;
+}
+
+static bool smb_ensure_connected_locked(void)
+{
+    if (s_smb != nullptr && !s_smb_bad) {
+        return true;
+    }
+    if (smb_has_open_handles_locked()) {
+        errno = EIO;
+        return false;
+    }
+    if (s_server[0] == '\0' || s_share[0] == '\0') {
+        errno = ENODEV;
+        return false;
+    }
+    ESP_LOGW(TAG, "SMB connection stale, reconnecting //%s/%s", s_server, s_share);
+    if (!smb_connect_locked()) {
+        errno = ENODEV;
+        return false;
+    }
+    return true;
+}
+
+static int vfs_open(void *, const char *path, const int flags, int)
 {
     if ((flags & (O_WRONLY | O_RDWR | O_CREAT)) != 0) {
         errno = EROFS; // read-only backend
         return -1;
     }
     LockGuard lock;
-    if (s_smb == nullptr) {
-        errno = ENODEV;
+    if (!smb_ensure_connected_locked()) {
         return -1;
     }
     int fd = -1;
@@ -76,7 +166,18 @@ static int vfs_open(const char *path, const int flags, int)
     }
     struct smb2fh *fh = smb2_open(s_smb, smb_path(path), O_RDONLY);
     if (fh == nullptr) {
-        ESP_LOGW(TAG, "open %s: %s", path, smb2_get_error(s_smb));
+        const char *error = smb2_get_error(s_smb);
+        if (smb_error_is_connection_loss(error)) {
+            ESP_LOGW(TAG, "open %s failed, reconnecting: %s", path, error);
+            if (!smb_has_open_handles_locked() && smb_connect_locked()) {
+                fh = smb2_open(s_smb, smb_path(path), O_RDONLY);
+            } else {
+                s_smb_bad = true;
+            }
+        }
+    }
+    if (fh == nullptr) {
+        ESP_LOGW(TAG, "open %s: %s", path, (s_smb != nullptr) ? smb2_get_error(s_smb) : "not connected");
         errno = ENOENT;
         return -1;
     }
@@ -84,10 +185,10 @@ static int vfs_open(const char *path, const int flags, int)
     return fd;
 }
 
-static ssize_t vfs_read(const int fd, void *dst, const size_t size)
+static ssize_t vfs_read(void *, const int fd, void *dst, const size_t size)
 {
     LockGuard lock;
-    if (s_smb == nullptr || fd < 0 || fd >= kMaxOpenFiles || s_files[fd] == nullptr) {
+    if (s_smb == nullptr || s_smb_bad || fd < 0 || fd >= kMaxOpenFiles || s_files[fd] == nullptr) {
         errno = EBADF;
         return -1;
     }
@@ -104,6 +205,10 @@ static ssize_t vfs_read(const int fd, void *dst, const size_t size)
         const int got = smb2_read(s_smb, s_files[fd], out + done,
                                   static_cast<uint32_t>(want));
         if (got < 0) {
+            const char *error = smb2_get_error(s_smb);
+            if (smb_error_is_connection_loss(error)) {
+                s_smb_bad = true;
+            }
             if (done > 0) {
                 break; // hand back what we already have
             }
@@ -118,10 +223,10 @@ static ssize_t vfs_read(const int fd, void *dst, const size_t size)
     return static_cast<ssize_t>(done);
 }
 
-static off_t vfs_lseek(const int fd, const off_t offset, const int whence)
+static off_t vfs_lseek(void *, const int fd, const off_t offset, const int whence)
 {
     LockGuard lock;
-    if (s_smb == nullptr || fd < 0 || fd >= kMaxOpenFiles || s_files[fd] == nullptr) {
+    if (s_smb == nullptr || s_smb_bad || fd < 0 || fd >= kMaxOpenFiles || s_files[fd] == nullptr) {
         errno = EBADF;
         return -1;
     }
@@ -134,29 +239,32 @@ static off_t vfs_lseek(const int fd, const off_t offset, const int whence)
     return static_cast<off_t>(pos);
 }
 
-static int vfs_close(const int fd)
+static int vfs_close(void *, const int fd)
 {
     LockGuard lock;
     if (fd < 0 || fd >= kMaxOpenFiles || s_files[fd] == nullptr) {
         errno = EBADF;
         return -1;
     }
-    if (s_smb != nullptr) {
+    if (s_smb != nullptr && !s_smb_bad) {
         (void)smb2_close(s_smb, s_files[fd]);
     }
     s_files[fd] = nullptr;
     return 0;
 }
 
-static int vfs_fstat(const int fd, struct stat *st)
+static int vfs_fstat(void *, const int fd, struct stat *st)
 {
     LockGuard lock;
-    if (s_smb == nullptr || fd < 0 || fd >= kMaxOpenFiles || s_files[fd] == nullptr) {
+    if (s_smb == nullptr || s_smb_bad || fd < 0 || fd >= kMaxOpenFiles || s_files[fd] == nullptr) {
         errno = EBADF;
         return -1;
     }
     struct smb2_stat_64 smb_st = {};
     if (smb2_fstat(s_smb, s_files[fd], &smb_st) < 0) {
+        if (smb_error_is_connection_loss(smb2_get_error(s_smb))) {
+            s_smb_bad = true;
+        }
         errno = EIO;
         return -1;
     }
@@ -166,15 +274,17 @@ static int vfs_fstat(const int fd, struct stat *st)
     return 0;
 }
 
-static int vfs_stat(const char *path, struct stat *st)
+static int vfs_stat(void *, const char *path, struct stat *st)
 {
     LockGuard lock;
-    if (s_smb == nullptr) {
-        errno = ENODEV;
+    if (!smb_ensure_connected_locked()) {
         return -1;
     }
     struct smb2_stat_64 smb_st = {};
     if (smb2_stat(s_smb, smb_path(path), &smb_st) < 0) {
+        if (smb_error_is_connection_loss(smb2_get_error(s_smb))) {
+            s_smb_bad = true;
+        }
         errno = ENOENT;
         return -1;
     }
@@ -185,14 +295,24 @@ static int vfs_stat(const char *path, struct stat *st)
     return 0;
 }
 
-static DIR *vfs_opendir(const char *path)
+static DIR *vfs_opendir(void *, const char *path)
 {
     LockGuard lock;
-    if (s_smb == nullptr) {
-        errno = ENODEV;
+    if (!smb_ensure_connected_locked()) {
         return nullptr;
     }
     struct smb2dir *smb_dir = smb2_opendir(s_smb, smb_path(path));
+    if (smb_dir == nullptr) {
+        const char *error = smb2_get_error(s_smb);
+        if (smb_error_is_connection_loss(error)) {
+            ESP_LOGW(TAG, "opendir %s failed, reconnecting: %s", path, error);
+            if (!smb_has_open_handles_locked() && smb_connect_locked()) {
+                smb_dir = smb2_opendir(s_smb, smb_path(path));
+            } else {
+                s_smb_bad = true;
+            }
+        }
+    }
     if (smb_dir == nullptr) {
         errno = ENOENT;
         return nullptr;
@@ -204,14 +324,15 @@ static DIR *vfs_opendir(const char *path)
         return nullptr;
     }
     dir->smb_dir = smb_dir;
+    ++s_open_dirs;
     return &dir->dir;
 }
 
-static struct dirent *vfs_readdir(DIR *pdir)
+static struct dirent *vfs_readdir(void *, DIR *pdir)
 {
     LockGuard lock;
     SmbVfsDir *dir = reinterpret_cast<SmbVfsDir *>(pdir);
-    if (s_smb == nullptr || dir == nullptr || dir->smb_dir == nullptr) {
+    if (s_smb == nullptr || s_smb_bad || dir == nullptr || dir->smb_dir == nullptr) {
         return nullptr;
     }
     const struct smb2dirent *ent;
@@ -227,7 +348,7 @@ static struct dirent *vfs_readdir(DIR *pdir)
     return nullptr;
 }
 
-static int vfs_closedir(DIR *pdir)
+static int vfs_closedir(void *, DIR *pdir)
 {
     LockGuard lock;
     SmbVfsDir *dir = reinterpret_cast<SmbVfsDir *>(pdir);
@@ -235,8 +356,11 @@ static int vfs_closedir(DIR *pdir)
         errno = EBADF;
         return -1;
     }
-    if (s_smb != nullptr && dir->smb_dir != nullptr) {
+    if (s_smb != nullptr && !s_smb_bad && dir->smb_dir != nullptr) {
         smb2_closedir(s_smb, dir->smb_dir);
+    }
+    if (s_open_dirs > 0) {
+        --s_open_dirs;
     }
     free(dir);
     return 0;
@@ -250,16 +374,16 @@ static bool register_vfs(void)
         return true;
     }
     esp_vfs_t vfs = {};
-    vfs.flags = ESP_VFS_FLAG_DEFAULT;
-    vfs.open = vfs_open;
-    vfs.read = vfs_read;
-    vfs.lseek = vfs_lseek;
-    vfs.close = vfs_close;
-    vfs.fstat = vfs_fstat;
-    vfs.stat = vfs_stat;
-    vfs.opendir = vfs_opendir;
-    vfs.readdir = vfs_readdir;
-    vfs.closedir = vfs_closedir;
+    vfs.flags = ESP_VFS_FLAG_CONTEXT_PTR;
+    vfs.open_p = vfs_open;
+    vfs.read_p = vfs_read;
+    vfs.lseek_p = vfs_lseek;
+    vfs.close_p = vfs_close;
+    vfs.fstat_p = vfs_fstat;
+    vfs.stat_p = vfs_stat;
+    vfs.opendir_p = vfs_opendir;
+    vfs.readdir_p = vfs_readdir;
+    vfs.closedir_p = vfs_closedir;
     if (esp_vfs_register(SMB_VFS_MOUNT_POINT, &vfs, nullptr) != ESP_OK) {
         ESP_LOGE(TAG, "vfs register failed");
         return false;
@@ -287,48 +411,48 @@ extern "C" bool SMB_VFS_Mount(const char *server, const char *share,
         return false;
     }
 
+    snprintf(s_server, sizeof(s_server), "%s", server);
+    snprintf(s_share, sizeof(s_share), "%s", share);
+    snprintf(s_user, sizeof(s_user), "%s", (user != nullptr) ? user : "");
+    snprintf(s_password, sizeof(s_password), "%s", (password != nullptr) ? password : "");
+
     LockGuard lock;
-    s_smb = smb2_init_context();
-    if (s_smb == nullptr) {
+    if (!smb_connect_locked()) {
         return false;
     }
-    smb2_set_timeout(s_smb, kSmbTimeoutSeconds);
-    smb2_set_security_mode(s_smb, SMB2_NEGOTIATE_SIGNING_ENABLED);
-    if (password != nullptr && password[0] != '\0') {
-        smb2_set_password(s_smb, password);
-    }
-    const char *login = (user != nullptr && user[0] != '\0') ? user : "guest";
-    if (smb2_connect_share(s_smb, server, share, login) < 0) {
-        ESP_LOGE(TAG, "connect //%s/%s failed: %s", server, share, smb2_get_error(s_smb));
-        smb2_destroy_context(s_smb);
-        s_smb = nullptr;
-        return false;
-    }
-    ESP_LOGI(TAG, "//%s/%s mounted at %s (user=%s)", server, share, SMB_VFS_MOUNT_POINT, login);
+    ESP_LOGI(TAG, "//%s/%s mounted at %s (user=%s)", s_server, s_share, SMB_VFS_MOUNT_POINT,
+             (s_user[0] != '\0') ? s_user : "guest");
     return true;
 }
 
 extern "C" void SMB_VFS_Unmount(void)
 {
-    if (s_lock == nullptr || s_smb == nullptr) {
+    if (s_lock == nullptr) {
         return;
     }
     LockGuard lock;
-    for (int i = 0; i < kMaxOpenFiles; ++i) {
-        if (s_files[i] != nullptr) {
-            (void)smb2_close(s_smb, s_files[i]);
-            s_files[i] = nullptr;
-        }
+    if (smb_has_open_handles_locked()) {
+        ESP_LOGW(TAG, "unmount deferred: SMB handles still open");
+        s_smb_bad = true;
+        return;
     }
-    (void)smb2_disconnect_share(s_smb);
-    smb2_destroy_context(s_smb);
-    s_smb = nullptr;
+    if (s_smb != nullptr && !s_smb_bad) {
+        for (int i = 0; i < kMaxOpenFiles; ++i) {
+            if (s_files[i] != nullptr) {
+                (void)smb2_close(s_smb, s_files[i]);
+                s_files[i] = nullptr;
+            }
+        }
+        (void)smb2_disconnect_share(s_smb);
+    }
+    smb_destroy_context_locked();
+    s_smb_bad = false;
     ESP_LOGI(TAG, "unmounted");
 }
 
 extern "C" bool SMB_VFS_Mounted(void)
 {
-    return s_smb != nullptr;
+    return s_smb != nullptr && !s_smb_bad;
 }
 
 #else // !S31

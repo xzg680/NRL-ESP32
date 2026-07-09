@@ -9,6 +9,8 @@
 
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
+#include <driver/i2s_common.h>
+#include <driver/i2s_types.h>
 #include <esp_codec_dev.h>
 #include <esp_codec_dev_defaults.h>
 #include <esp_err.h>
@@ -101,7 +103,10 @@ static bool es8389_create_codec(i2s_chan_handle_t tx_handle, i2s_chan_handle_t r
     }
 
     esp_codec_dev_cfg_t dev_cfg = {};
-    dev_cfg.dev_type = ESP_CODEC_DEV_TYPE_IN_OUT;
+    // ES8389 is used as the DAC/PA path on S31. Capture is handled by the
+    // separate ES7210/direct-I2S path, so keep codec-dev output-only; otherwise
+    // hi-fi playback also tries to reconfigure RX and logs failed 96 kHz clocks.
+    dev_cfg.dev_type = ESP_CODEC_DEV_TYPE_OUT;
     dev_cfg.codec_if = codec_if;
     dev_cfg.data_if = s_data_if;
     s_codec = esp_codec_dev_new(&dev_cfg);
@@ -113,25 +118,52 @@ static bool es8389_create_codec(i2s_chan_handle_t tx_handle, i2s_chan_handle_t r
     return true;
 }
 
-// Re-apply the persisted volume/gain after every esp_codec_dev_open (the
-// codec-dev layer resets its notion of volume on close).
+// Re-apply the persisted volume after every esp_codec_dev_open (the codec-dev
+// layer resets its notion of volume on close).
 static void es8389_apply_config_levels(void) {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     if (config != nullptr) {
         ES8389_SetOutputVolume(config->line_out_volume);
-        ES8389_SetInputGain(config->mic_volume);
     } else {
         (void)esp_codec_dev_set_out_vol(s_codec, kDefaultOutVolume);
-        (void)esp_codec_dev_set_in_gain(s_codec, kDefaultInGain);
+    }
+}
+
+static bool i2s_channel_enabled(const i2s_chan_handle_t channel) {
+    if (channel == nullptr) {
+        return false;
+    }
+    i2s_chan_info_t info = {};
+    return i2s_channel_get_info(channel, &info) == ESP_OK && info.is_enabled;
+}
+
+static void es8389_enable_i2s_for_codec_open(void) {
+    i2s_chan_handle_t tx_handle = nullptr;
+    i2s_chan_handle_t rx_handle = nullptr;
+    if (!AUDIO_GetI2SHandles(&tx_handle, &rx_handle)) {
+        return;
+    }
+    if (tx_handle != nullptr && !i2s_channel_enabled(tx_handle)) {
+        (void)i2s_channel_enable(tx_handle);
+    }
+    if (rx_handle != nullptr && !i2s_channel_enabled(rx_handle)) {
+        (void)i2s_channel_enable(rx_handle);
     }
 }
 
 static bool es8389_open_codec(void) {
+    // esp_codec_dev_open()->set_fmt() unconditionally disables the I2S
+    // channels before reconfiguring them. After a prior esp_codec_dev_close()
+    // they are already disabled, which otherwise prints noisy
+    // "channel has not been enabled yet" errors for both TX and RX.
+    es8389_enable_i2s_for_codec_open();
+
     esp_codec_dev_sample_info_t sample_cfg = {};
     sample_cfg.bits_per_sample = 16;
     sample_cfg.channel = kChannels;
     sample_cfg.channel_mask = kChannelMask;
     sample_cfg.sample_rate = kSampleRate;
+    sample_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
 
     if (esp_codec_dev_open(s_codec, &sample_cfg) != ESP_CODEC_DEV_OK) {
         ESP_LOGE(TAG, "open codec failed");
@@ -139,10 +171,6 @@ static bool es8389_open_codec(void) {
     }
     if (esp_codec_dev_set_out_vol(s_codec, kDefaultOutVolume) != ESP_CODEC_DEV_OK) {
         ESP_LOGE(TAG, "set output volume failed");
-        return false;
-    }
-    if (esp_codec_dev_set_in_gain(s_codec, kDefaultInGain) != ESP_CODEC_DEV_OK) {
-        ESP_LOGE(TAG, "set input gain failed");
         return false;
     }
     return true;
@@ -206,14 +234,11 @@ extern "C" bool ES8389_SetOutputVolume(const uint8_t value) {
 }
 
 extern "C" bool ES8389_SetInputGain(const uint8_t value) {
+    (void)value;
     if (s_codec == nullptr) {
         return false;
     }
-    // Same 0-255 -> 0..42 dB mapping as the ES7210 mic PGA (3 dB steps), so
-    // the shared mic-volume setting behaves alike across all board variants.
-    const unsigned step = (static_cast<unsigned>(value) * 14u + 127u) / 255u;
-    const float gain_db = static_cast<float>(step) * 3.0f;
-    return esp_codec_dev_set_in_gain(s_codec, gain_db) == ESP_CODEC_DEV_OK;
+    return true;
 }
 
 extern "C" bool ES8389_HifiAcquire(const uint32_t sample_rate_hz,
@@ -243,6 +268,8 @@ extern "C" bool ES8389_HifiAcquire(const uint32_t sample_rate_hz,
     sample_cfg.channel = channels;
     sample_cfg.channel_mask = (channels == 2u) ? 0x03 : 0x01;
     sample_cfg.sample_rate = sample_rate_hz;
+    sample_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    es8389_enable_i2s_for_codec_open();
     if (esp_codec_dev_open(s_codec, &sample_cfg) != ESP_CODEC_DEV_OK) {
         ESP_LOGE(TAG, "hifi: open %luHz/%ubit/%uch failed",
                  static_cast<unsigned long>(sample_rate_hz),

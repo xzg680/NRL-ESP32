@@ -45,6 +45,8 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 # provisioning (it has the touchscreen config UI + SoftAP portal instead).
 # ble_config.cpp and the esp-nimble-cpp component are compiled out for S31 (see
 # src/lib/ble_config.cpp guard and src/CMakeLists.txt).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
 # CONFIG_BT_NIMBLE_ENABLED is not set
 CONFIG_BT_BLUEDROID_ENABLED=y
 # Controller in BR/EDR-only mode (Classic). Auto-enables BT_CTRL_BREDR_ENABLE.
@@ -185,6 +187,22 @@ CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
 CONFIG_LV_OS_FREERTOS=y
 CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
 CONFIG_LV_DRAW_THREAD_PRIO=6
+
+# --- LVGL draw acceleration experiments (S31 only) ---
+# S31 has Espressif PPA and RISC-V SIMD support. PPA can offload fill/blend/image
+# work from lv_timer_handler; RVV enables LVGL's RISC-V vector blend path where
+# the compiler/CPU path supports it, with LVGL's software emulation as fallback.
+# Keep the draw buffer aligned to the S31 DCache line so PPA buffer operations
+# are cache-safe. PPA also msyncs the whole draw buffer, so the stride must be
+# cache-line aligned too; otherwise partial buffers can have sizes like 0x4420,
+# which trips esp_cache_msync even when the start address is aligned.
+CONFIG_LV_DRAW_BUF_STRIDE_ALIGN=64
+CONFIG_LV_DRAW_BUF_ALIGN=64
+CONFIG_LV_USE_PPA=y
+CONFIG_LV_USE_PPA_IMG=y
+CONFIG_LV_PPA_BURST_LENGTH=128
+# CONFIG_LV_DRAW_SW_ASM_NONE is not set
+CONFIG_LV_DRAW_SW_ASM_RISCV_V=y
 
 # --- LVGL FreeType binding: disabled (S31) ---
 # The FreeType vector CJK engine was a comparison experiment (AT+FONT=FT);

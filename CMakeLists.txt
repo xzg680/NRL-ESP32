@@ -44,6 +44,18 @@ if(NRL_NATIVE_BUILD)
     endif()
 endif()
 
+# ESP-IDF 6.2 currently reports an internal NimBLE bool default written as
+# `default 0` (treated as `n`). Keep normal builds quiet without patching the
+# user's ESP-IDF install; set KCONFIG_REPORT_VERBOSITY=default/verbose outside
+# CMake when a full Kconfig report is needed.
+if(NOT DEFINED ENV{KCONFIG_REPORT_VERBOSITY})
+    set(ENV{KCONFIG_REPORT_VERBOSITY} "quiet")
+endif()
+if(NOT DEFINED CMAKE_MESSAGE_LOG_LEVEL)
+    set(CMAKE_MESSAGE_LOG_LEVEL ERROR CACHE STRING
+        "Suppress noisy ESP-IDF 6.2 component-validation warnings by default")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(nrl-esp32)
 
@@ -68,6 +80,24 @@ if(IDF_TARGET STREQUAL "esp32s31")
     # and library, so wire them up here instead of patching the vendored tree.
     idf_component_get_property(lvgl_lib lvgl COMPONENT_LIB)
     idf_component_get_property(freetype_lib espressif__freetype COMPONENT_LIB)
+    idf_component_get_property(ppa_lib esp_driver_ppa COMPONENT_LIB)
+    idf_component_get_property(esp_mm_lib esp_mm COMPONENT_LIB)
+    if(lvgl_lib)
+        # LVGL 9.5.0's Espressif PPA backend checks the P4-style L2 cache line
+        # Kconfig, while S31 exposes only the L1 DCache line size. They are both
+        # 64 bytes on this board, so provide the missing alias for LVGL only.
+        target_compile_definitions(${lvgl_lib} PRIVATE
+            CONFIG_CACHE_L2_CACHE_LINE_SIZE=CONFIG_CACHE_L1_DCACHE_LINE_SIZE)
+        target_compile_options(${lvgl_lib} PRIVATE -Wno-unused-variable)
+        # The vendored LVGL ESP CMake helper declares these for PPA, but this
+        # project consumes LVGL as a plain IDF component, so provide them here.
+        if(ppa_lib)
+            target_link_libraries(${lvgl_lib} PUBLIC ${ppa_lib})
+        endif()
+        if(esp_mm_lib)
+            target_link_libraries(${lvgl_lib} PUBLIC ${esp_mm_lib})
+        endif()
+    endif()
     if(lvgl_lib AND freetype_lib)
         target_link_libraries(${lvgl_lib} PUBLIC ${freetype_lib})
     endif()

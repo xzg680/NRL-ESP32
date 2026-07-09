@@ -49,11 +49,25 @@ BOARDS = {
     "s31_korvo": dict(
         target="esp32s31",
         macro="NRL_BOARD_S31_KORVO",
-        sdkconfig=["sdkconfig.defaults", "sdkconfig.defaults.esp32s31"],
+        sdkconfig=["sdkconfig.defaults"],
         lvgl=True,
         extra=["-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"],
     ),
 }
+
+
+def patch_managed_components():
+    """Apply tiny local Kconfig cleanups to downloaded managed components.
+
+    These files live under managed_components/ and are not committed here. The
+    component manager may recreate them, so keep the patch idempotent and cheap.
+    """
+    esp_sr_kconfig = REPO / "managed_components" / "espressif__esp-sr" / "Kconfig.projbuild"
+    if esp_sr_kconfig.exists():
+        text = esp_sr_kconfig.read_text(encoding="utf-8")
+        patched = text.replace("default False", "default n")
+        if patched != text:
+            esp_sr_kconfig.write_text(patched, encoding="utf-8", newline="")
 
 
 def main():
@@ -70,6 +84,7 @@ def main():
         subprocess.run(
             [sys.executable, str(REPO / "scripts" / "fetch_lvgl.py")], check=True
         )
+    patch_managed_components()
 
     idf_path = os.environ.get("IDF_PATH")
     if not idf_path:
