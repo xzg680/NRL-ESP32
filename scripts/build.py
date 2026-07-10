@@ -9,6 +9,8 @@ export.sh so `idf.py` is on PATH):
 Examples:
     python scripts/build.py gezipai build
     python scripts/build.py s31_korvo flash monitor -p COM5
+    python scripts/build.py s31_function_coreboard flash monitor -p COM5
+    
     python scripts/build.py bh4tdv fullclean
     python scripts/build.py gezipai menuconfig
 

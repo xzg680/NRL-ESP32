@@ -108,7 +108,12 @@ if(IDF_TARGET STREQUAL "esp32s31")
     idf_component_get_property(smb2_lib sahlberg__libsmb2 COMPONENT_LIB)
     if(smb2_lib)
         target_compile_options(${smb2_lib} PRIVATE -std=gnu17 -Wno-error
-                               -Wno-implicit-function-declaration)
+                               -include "${CMAKE_CURRENT_LIST_DIR}/cmake/libsmb2_preinclude.h"
+                               -Wno-implicit-function-declaration
+                               -Wno-array-parameter
+                               -Wno-missing-field-initializers
+                               -Wno-unused-variable
+                               -Wno-implicit-fallthrough)
     endif()
 endif()
 

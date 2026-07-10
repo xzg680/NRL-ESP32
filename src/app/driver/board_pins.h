@@ -176,10 +176,11 @@
 #define NRL_PIN_BTN_VOL_DOWN    -1
 #define NRL_PIN_BTN_PTT         -1
 
-// Single addressable RGB status LED, level-shifted through an inverting NMOS.
+// Single addressable WS2812 RGB status LED. GPIO60 is wired directly to DIN;
+// WS2812 timing must not be inverted.
 #define NRL_HAS_WS2812_STATUS   1
 #define NRL_PIN_WS2812_STATUS   60
-#define NRL_WS2812_INVERT_OUT   1
+#define NRL_WS2812_INVERT_OUT   0
 #define NRL_PIN_LED_PTT         -1
 #define NRL_PIN_LED_AUDIO       -1
 #define NRL_PIN_LED_NET         -1

@@ -130,7 +130,9 @@ SemaphoreHandle_t s_poll_mutex = nullptr;
 
 #if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
 adc_oneshot_unit_handle_t s_button_adc = nullptr;
+#if NRL_BOARD != NRL_BOARD_S31_KORVO
 adc_cali_handle_t s_button_adc_cali = nullptr;
+#endif
 bool s_button_adc_ready = false;
 bool s_button_adc_cali_ready = false;
 
