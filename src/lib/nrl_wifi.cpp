@@ -920,7 +920,7 @@ namespace
 NetProbeResult internetProbeCN(uint32_t timeout_ms)
 {
     NetProbeResult r;
-    if (!wifiIsConnected())
+    if (!nrlNetworkConnected())
     {
         return r;
     }

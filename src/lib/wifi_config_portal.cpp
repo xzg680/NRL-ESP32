@@ -467,7 +467,7 @@ static void shutdownDnsAndAp()
 
 static void manageApLifecycle()
 {
-    const bool sta_connected = nrlWifiStaConnected();
+    const bool sta_connected = nrlNetworkConnected();
     const unsigned long now = nowMsCfg();
 
     if (sta_connected) {
@@ -477,8 +477,8 @@ static void manageApLifecycle()
             s_ap_close_scheduled = true;
             s_ap_close_at_ms = now + kApCloseDelayMs;
             char ip_buf[16] = {};
-            nrlIpToString(nrlWifiStaIp(), ip_buf, sizeof(ip_buf));
-            ESP_LOGI(TAG, "STA connected sta_ip=%s, AP will close in %lu ms",
+            nrlIpToString(nrlNetworkIp(), ip_buf, sizeof(ip_buf));
+            ESP_LOGI(TAG, "network connected ip=%s, AP will close in %lu ms",
                      ip_buf, static_cast<unsigned long>(kApCloseDelayMs));
         }
         if (s_ap_close_scheduled && static_cast<int32_t>(now - s_ap_close_at_ms) >= 0) {

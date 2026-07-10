@@ -291,7 +291,7 @@ extern "C" const char *STORAGE_UsbMountPoint(void)
 // ---------------------------------------------------------------------------
 // SMB network share backend (libsmb2 via services/smb_vfs, S31 only)
 // ---------------------------------------------------------------------------
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 
 #include "lib/nrl_net_compat.h"
 #include "services/config_notify.h"
@@ -356,7 +356,7 @@ static void smb_mount_task(void *)
 {
     while (true) {
         s_smb_task_restart = false;
-        while (!nrlWifiStaConnected() && !s_smb_task_restart) {
+        while (!nrlNetworkConnected() && !s_smb_task_restart) {
             vTaskDelay(pdMS_TO_TICKS(2000));
         }
         if (!s_smb_task_restart) {
@@ -532,8 +532,8 @@ extern "C" bool STORAGE_Init(void)
         storage_start_usb_host();
     }
 #endif
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
-    // SMB share configured earlier: mount once WiFi is up (deferred task).
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+    // SMB share configured earlier: mount once either network is up.
     static bool smb_started = false;
     if (!smb_started && smb_load_config()) {
         smb_started = true;

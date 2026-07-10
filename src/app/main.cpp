@@ -19,6 +19,7 @@
 #include "../services/storage_service.h"
 #include "../lib/nrl_audio_bridge.h"
 #include "../lib/nrl_bt_hfp.h"
+#include "../lib/nrl_ethernet.h"
 #include "../lib/nrl_usb_console.h"
 #include "../lib/nrl_version.h"
 #include "../lib/wifi_config_portal.h"
@@ -73,6 +74,9 @@ static void initSystem()
 static void initApp()
 {
     EXTERNAL_RADIO_Init();
+    if (!nrlEthernetInit()) {
+        ESP_LOGE(TAG, "Ethernet initialization failed; Wi-Fi fallback remains available.");
+    }
 #if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
         ES8311_ApplyAudioConfig(config->mic_volume,

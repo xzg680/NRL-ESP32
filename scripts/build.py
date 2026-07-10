@@ -12,8 +12,8 @@ Examples:
     python scripts/build.py bh4tdv fullclean
     python scripts/build.py gezipai menuconfig
 
-Boards: gezipai, bh4tdv, s31_korvo. If you omit the idf.py args it defaults to
-`build`.
+Boards: gezipai, bh4tdv, s31_korvo, s31_function_coreboard. If you omit the
+idf.py args it defaults to `build`.
 
 Each board gets its own build directory (build/<board>) and sdkconfig
 (build/<board>/sdkconfig), so you can switch boards without a reconfigure or
@@ -51,6 +51,13 @@ BOARDS = {
         macro="NRL_BOARD_S31_KORVO",
         sdkconfig=["sdkconfig.defaults"],
         lvgl=True,
+        extra=["-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"],
+    ),
+    "s31_function_coreboard": dict(
+        target="esp32s31",
+        macro="NRL_BOARD_S31_FUNCTION_COREBOARD",
+        sdkconfig=["sdkconfig.defaults", "sdkconfig.s31_function_coreboard.defaults"],
+        lvgl=False,
         extra=["-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"],
     ),
 }

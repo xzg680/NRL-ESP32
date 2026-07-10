@@ -186,9 +186,10 @@ LVGL（9.3.0）以**本地组件**形式内置在 `components/lvgl`，不经 ESP
 
 ## 构建和烧录
 
-工程使用原生 ESP-IDF（≥6.1，含 ESP32-S31 支持），不再使用 PlatformIO。共有三块板：
+工程使用原生 ESP-IDF（≥6.1，含 ESP32-S31 支持），不再使用 PlatformIO。共有四块板：
 `gezipai`（格子派，ESP32-S3）、`bh4tdv`（BH4TDV 3188，ESP32-S3）、`s31_korvo`
-（ESP32-S31-Korvo-1，ESP32-S31）。
+（ESP32-S31-Korvo-1，ESP32-S31），以及 `s31_function_coreboard`
+（ESP32-S31-Function-CoreBoard-1，YT8531 以太网，无屏幕）。
 
 首次需安装 ESP-IDF 工具链（一次性）：
 
@@ -208,6 +209,7 @@ C:\esp\esp-idf\export.ps1        # Linux/macOS 用: . export.sh
 python scripts/build.py gezipai build                     # 编译格子派
 python scripts/build.py bh4tdv build                      # 编译 BH4TDV
 python scripts/build.py s31_korvo flash monitor -p COM5   # S31: 编译+烧录+监视
+python scripts/build.py s31_function_coreboard build      # S31 功能核心板
 python scripts/build.py gezipai menuconfig                # 修改配置
 ```
 
@@ -217,7 +219,7 @@ python scripts/build.py gezipai menuconfig                # 修改配置
 `sdkconfig.bh4tdv.defaults` 覆盖分区表）。
 
 GitHub Actions 会在每次 push、pull request 或手动触发时，用官方 ESP-IDF 镜像原生构建
-三块板，并上传各板的 `firmware` / `partition-table` / `bootloader` 作为构建产物，
+四块板，并上传各板的 `firmware` / `partition-table` / `bootloader` 作为构建产物，
 打 tag 时发布到 Release。
 
 ## 固件刷机
@@ -227,7 +229,7 @@ GitHub Actions 会在每次 push、pull request 或手动触发时，用官方 E
 工程提供 `web-flasher/` 页面，适合首次烧录或恢复设备。它会写入 bootloader、分区表、OTA data、应用固件和 esp-sr 模型。
 
 > 仅支持两块 ESP32-S3 板（`gezipai` / `bh4tdv`）。ESP32-S31 因 esptool-js 不支持，
-> 只能串口烧录（`python scripts/build.py s31_korvo flash`）。
+> `s31_korvo` 和 `s31_function_coreboard` 只能串口烧录。
 
 先编译这两块板，再打包页面（`stage_web_flasher.py` 从 `build/<board>/flasher_args.json`
 读取各镜像的偏移并生成 esp-web-tools manifest）：
@@ -248,7 +250,7 @@ python -m http.server 8000 -d web-flasher
 
 1. 连接设备配置 AP，或访问设备在局域网中的 IP。
 2. 打开 `http://192.168.4.1/update`，或从配置首页点击 `Firmware update`。
-3. 上传对应板子的应用固件 `build/<板名>/nrl-esp32.bin`（例如格子派 `build/gezipai/nrl-esp32.bin`、BH4TDV `build/bh4tdv/nrl-esp32.bin`、S31 `build/s31_korvo/nrl-esp32.bin`）。
+3. 上传对应板子的应用固件 `build/<板名>/nrl-esp32.bin`（例如格子派 `build/gezipai/nrl-esp32.bin`、BH4TDV `build/bh4tdv/nrl-esp32.bin`、Korvo `build/s31_korvo/nrl-esp32.bin`、功能核心板 `build/s31_function_coreboard/nrl-esp32.bin`）。
 4. 上传完成后设备会自动重启到新固件。
 
 注意：WiFi OTA 需要 `part.csv` 中的 `app0/app1` 双 OTA 分区布局。旧分区布局设备应先用 USB 网页刷机或串口刷机更新分区表。

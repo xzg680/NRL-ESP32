@@ -393,7 +393,7 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
 
 std::string WifiConfigPortalView_BuildMediaSections(void)
 {
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
     std::string html = std::string(kWifiConfigPortalMediaSectionsTemplate);
 
     const int target = MUSIC_GetTarget();
@@ -521,7 +521,7 @@ std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *conf
         replaceToken(html, "{{MEDIA_TAB}}", media_tab);
     }
     replaceToken(html, "{{AP_IP}}", ipToString(nrlWifiApIp()));
-    replaceToken(html, "{{STA_IP}}", staIpOrNotConnected(nrlWifiStaIp()));
+    replaceToken(html, "{{STA_IP}}", staIpOrNotConnected(nrlNetworkIp()));
     replaceToken(html, "{{SSID_OPTIONS}}", "");
     replaceToken(html, "{{WIFI_SSID}}", htmlEscape(config->wifi_ssid));
     replaceToken(html, "{{WIFI_PASSWORD}}", htmlEscape(config->wifi_password));
@@ -550,7 +550,7 @@ std::string WifiConfigPortalView_BuildUpdatePage(const char *headline,
     replaceToken(html, "{{INTRO}}", intro);
     replaceToken(html, "{{INTRO_KEY}}", intro_key);
     replaceToken(html, "{{AP_IP}}", ipToString(nrlWifiApIp()));
-    replaceToken(html, "{{STA_IP}}", staIpOrNotConnected(nrlWifiStaIp()));
+    replaceToken(html, "{{STA_IP}}", staIpOrNotConnected(nrlNetworkIp()));
     replaceToken(html, "{{VERSION}}", NRL_FIRMWARE_VERSION);
     return html;
 }

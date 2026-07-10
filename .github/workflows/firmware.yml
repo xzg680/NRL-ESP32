@@ -49,6 +49,12 @@ jobs:
             sdkconfig: sdkconfig.defaults
             lvgl: "true"
             extra_args: "-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"
+          - board: s31_function_coreboard
+            target: esp32s31
+            board_macro: NRL_BOARD_S31_FUNCTION_COREBOARD
+            sdkconfig: "sdkconfig.defaults;sdkconfig.s31_function_coreboard.defaults"
+            lvgl: "false"
+            extra_args: "-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"
 
     steps:
       - name: Checkout

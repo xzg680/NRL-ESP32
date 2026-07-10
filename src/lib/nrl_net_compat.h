@@ -32,6 +32,11 @@ static inline esp_netif_t *nrlWifiApNetif(void)
     return esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
 }
 
+static inline esp_netif_t *nrlEthernetNetif(void)
+{
+    return esp_netif_get_handle_from_ifkey("ETH_DEF");
+}
+
 static inline bool nrlWifiStaConnected(void)
 {
     esp_netif_t *netif = nrlWifiStaNetif();
@@ -53,6 +58,33 @@ static inline uint32_t nrlWifiStaIp(void)
     }
     esp_netif_ip_info_t info = {};
     return (esp_netif_get_ip_info(netif, &info) == ESP_OK) ? info.ip.addr : 0u;
+}
+
+// Product-wide network view: wired Ethernet is preferred whenever it has a
+// valid address, otherwise fall back to Wi-Fi STA. Services should use these
+// helpers unless they specifically configure or report the Wi-Fi interface.
+static inline bool nrlNetworkConnected(void)
+{
+    esp_netif_t *eth = nrlEthernetNetif();
+    if (eth != NULL && esp_netif_is_netif_up(eth)) {
+        esp_netif_ip_info_t info = {};
+        if (esp_netif_get_ip_info(eth, &info) == ESP_OK && info.ip.addr != 0u) {
+            return true;
+        }
+    }
+    return nrlWifiStaConnected();
+}
+
+static inline uint32_t nrlNetworkIp(void)
+{
+    esp_netif_t *eth = nrlEthernetNetif();
+    if (eth != NULL && esp_netif_is_netif_up(eth)) {
+        esp_netif_ip_info_t info = {};
+        if (esp_netif_get_ip_info(eth, &info) == ESP_OK && info.ip.addr != 0u) {
+            return info.ip.addr;
+        }
+    }
+    return nrlWifiStaIp();
 }
 
 static inline uint32_t nrlWifiStaNetmask(void)

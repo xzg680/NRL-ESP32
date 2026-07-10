@@ -2,7 +2,7 @@
 
 #include "driver/board_pins.h"
 
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 
 #include <esp_log.h>
 #include <esp_vfs.h>

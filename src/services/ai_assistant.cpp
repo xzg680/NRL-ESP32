@@ -4,7 +4,7 @@
 
 #include <stdio.h>
 
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 
 #include "audio/audio_router.h"
 #include "media/opus_voice.h"

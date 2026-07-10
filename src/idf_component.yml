@@ -30,6 +30,12 @@ dependencies:
     version: "^1.1.3"
     rules:
       - if: "target == esp32s31"
+  # Addressable status LED on both ESP32-S31 development boards. Korvo pulls
+  # this through its BSP; declare it directly for the Function CoreBoard too.
+  espressif/led_strip:
+    version: "^3.0.3"
+    rules:
+      - if: "target == esp32s31"
   # SMB2/3 client for playing audio from network shares (NAS / Windows
   # folder), mounted at /smb through the esp_vfs adapter in
   # services/smb_vfs.cpp. S31-only like the rest of the media stack.
@@ -47,6 +53,8 @@ dependencies:
   # sdkconfig.defaults); Bluedroid must be off (mutually exclusive stacks).
   h2zero/esp-nimble-cpp:
     version: ">=2.2.0"
+    rules:
+      - if: "target != esp32s31"
   # LVGL (gezipai ST7789 LCD UI) is vendored at components/lvgl/ by
   # scripts/fetch_lvgl.py at build time. It is deliberately NOT listed here
   # because the IDF component manager would (a) overwrite it from the

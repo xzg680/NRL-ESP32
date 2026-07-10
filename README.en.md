@@ -140,7 +140,7 @@ When downlink network voice is received, the firmware enables PTT and starts fee
 
 ## Build and Flash
 
-This project builds with native ESP-IDF (>= 6.1, which supports the ESP32-S31); PlatformIO is no longer used. There are three boards: `gezipai` (格子派, ESP32-S3), `bh4tdv` (BH4TDV 3188, ESP32-S3) and `s31_korvo` (ESP32-S31-Korvo-1, ESP32-S31).
+This project builds with native ESP-IDF (>= 6.1, which supports the ESP32-S31); PlatformIO is no longer used. There are four boards: `gezipai` (格子派, ESP32-S3), `bh4tdv` (BH4TDV 3188, ESP32-S3), `s31_korvo` (ESP32-S31-Korvo-1, ESP32-S31), and `s31_function_coreboard` (ESP32-S31-Function-CoreBoard-1, YT8531 Ethernet, no display).
 
 One-time ESP-IDF toolchain install:
 
@@ -160,12 +160,13 @@ Build/flash/monitor by board name (first arg is the board; the rest is passed th
 python scripts/build.py gezipai build                     # build 格子派
 python scripts/build.py bh4tdv build                      # build BH4TDV
 python scripts/build.py s31_korvo flash monitor -p COM5   # S31: build + flash + monitor
+python scripts/build.py s31_function_coreboard build      # S31 function core board
 python scripts/build.py gezipai menuconfig                # change config
 ```
 
 Each board has its own `build/<board>/` directory and `sdkconfig`, so you can switch boards without clobbering. Board config: `NRL_BOARD` is passed per board via `-DNRL_BOARD_ID`; the partition table and other Kconfig come from `sdkconfig.defaults` (S31 also appends `sdkconfig.defaults.esp32s31`; bh4tdv overrides the partition table via `sdkconfig.bh4tdv.defaults`).
 
-GitHub Actions builds all three boards natively with the official ESP-IDF image on every push, pull request, or manual run, uploading each board's `firmware` / `partition-table` / `bootloader` as artifacts and publishing to a Release on tags.
+GitHub Actions builds all four boards natively with the official ESP-IDF image on every push, pull request, or manual run, uploading each board's `firmware` / `partition-table` / `bootloader` as artifacts and publishing to a Release on tags.
 
 ## Firmware Flashing
 
@@ -174,8 +175,8 @@ GitHub Actions builds all three boards natively with the official ESP-IDF image 
 The `web-flasher/` page is intended for first installation or recovery. It writes the bootloader, partition table, OTA data, application firmware, and esp-sr models.
 
 > Only the two ESP32-S3 boards (`gezipai` / `bh4tdv`) are supported. The ESP32-S31
-> is not supported by esptool-js, so flash it over serial
-> (`python scripts/build.py s31_korvo flash`).
+> is not supported by esptool-js, so flash `s31_korvo` and `s31_function_coreboard`
+> over serial.
 
 Build both boards, then stage the page (`stage_web_flasher.py` reads each
 `build/<board>/flasher_args.json` for the image offsets and writes the
@@ -196,7 +197,7 @@ After the device is running the dual OTA partition layout, firmware can be updat
 
 1. Connect to the device configuration AP, or browse to the device IP on your LAN.
 2. Open `http://192.168.4.1/update`, or click `Firmware update` on the setup page.
-3. Upload the board's application image `build/<board>/nrl-esp32.bin` (e.g. `build/gezipai/nrl-esp32.bin`, `build/bh4tdv/nrl-esp32.bin`, or `build/s31_korvo/nrl-esp32.bin`).
+3. Upload the board's application image `build/<board>/nrl-esp32.bin` (e.g. `build/gezipai/nrl-esp32.bin`, `build/bh4tdv/nrl-esp32.bin`, `build/s31_korvo/nrl-esp32.bin`, or `build/s31_function_coreboard/nrl-esp32.bin`).
 4. The device reboots automatically after a successful upload.
 
 Note: WiFi OTA requires the `app0/app1` dual OTA layout from `part.csv`. Devices using the old partition layout should first be updated with USB web flashing or serial flashing so the new partition table is installed.

@@ -3,6 +3,7 @@
 #include "nrl_at_commands.h"
 #include "nrl_audio_config.h"
 #include "nrl_bt_hfp.h"
+#include "nrl_ethernet.h"
 #include "nrl_g711.h"
 #include "nrl_net_compat.h"
 #include "nrl_usb_console.h"
@@ -264,7 +265,7 @@ static bool udpSendPacketTo(const uint8_t *packet,
                             const uint16_t dest_port)
 {
     if (packet == nullptr || packet_size == 0u || !s_udp_started || s_udp_fd < 0 ||
-        !nrlWifiStaConnected() || dest_port == 0u || dest_ip == 0u) {
+        !nrlNetworkConnected() || dest_port == 0u || dest_ip == 0u) {
         return false;
     }
     if (s_udp_mutex == nullptr) {
@@ -582,7 +583,7 @@ static void btHfpSinkWrite(const uint8_t /*source_id*/,
     NRL_BtHfp_PushPlayback(samples, sample_count);
 }
 
-static bool ensureWifiAndUdp(void)
+static bool ensureNetworkAndUdp(void)
 {
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (s_next_wifi_retry_ms != 0u &&
@@ -591,9 +592,8 @@ static bool ensureWifiAndUdp(void)
     }
 
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
-    // Master Wi-Fi switch: when off, keep the STA link down so the shared 2.4 GHz
-    // radio is free for Bluetooth (so A2DP can stream music to the headset). The
-    // network radio-voice link is intentionally unavailable in this mode.
+    // Master Wi-Fi switch only controls the radio. Wired Ethernet remains a
+    // valid NRL transport, allowing A2DP/HFP to run without 2.4 GHz contention.
     static bool s_wifi_master_off_applied = false;
     if (config != nullptr && !config->wifi_enabled) {
         if (!s_wifi_master_off_applied) {
@@ -603,7 +603,9 @@ static bool ensureWifiAndUdp(void)
             nrlWifiStopRadio();
             ESP_LOGI(TAG, "[NRL] Wi-Fi master switch OFF -- radio+RAM freed for Bluetooth/A2DP");
         }
-        return false;
+        if (!nrlNetworkConnected()) {
+            return false;
+        }
     }
     if (s_wifi_master_off_applied) {
         s_wifi_master_off_applied = false;
@@ -616,7 +618,12 @@ static bool ensureWifiAndUdp(void)
     const uint16_t server_port = (config != nullptr) ? config->server_port : static_cast<uint16_t>(NRL_AUDIO_SERVER_PORT);
     const uint16_t local_port = (config != nullptr) ? config->local_port : server_port;
 
-    if (!nrlWifiStaConnected()) {
+    // Ethernet is preferred. If its physical link is already up, allow DHCP to
+    // finish instead of immediately bringing up Wi-Fi and stealing the route.
+    if (!nrlNetworkConnected() && nrlEthernetLinkUp()) {
+        return false;
+    }
+    if (!nrlNetworkConnected()) {
         const WifiConnResult result = wifiEnsureConnected(wifi_ssid, wifi_password, 15000u);
         if (result != WIFI_CONN_OK && result != WIFI_ALREADY_ON_SSID) {
             if (s_wifi_connect_failures < 0xFFu) {
@@ -638,6 +645,16 @@ static bool ensureWifiAndUdp(void)
         }
         s_next_wifi_retry_ms = 0u;
         s_wifi_connect_failures = 0u;
+    }
+    // Recreate the socket if the preferred interface changed (for example,
+    // Ethernet became available after the Wi-Fi fallback was already active).
+    static uint32_t s_udp_network_ip = 0u;
+    const uint32_t active_network_ip = nrlNetworkIp();
+    if (s_udp_started && active_network_ip != 0u && active_network_ip != s_udp_network_ip) {
+        close(s_udp_fd);
+        s_udp_fd = -1;
+        s_udp_started = false;
+        ESP_LOGI(TAG, "network interface changed, reopening UDP socket");
     }
     if (!s_udp_started) {
         struct in_addr literal = {};
@@ -697,6 +714,7 @@ static bool ensureWifiAndUdp(void)
             ESP_LOGW(TAG, "udp set IP_TOS=0xC0 (DSCP CS6 / AC_VO) failed (continuing anyway)");
         }
         s_udp_started = true;
+        s_udp_network_ip = active_network_ip;
         char ip_buf[16] = {};
         nrlIpToString(s_server_ip, ip_buf, sizeof(ip_buf));
         ESP_LOGI(TAG, "udp local=%u remote=%s(%s):%u",
@@ -1040,7 +1058,7 @@ static void pollSerialAtConsole(void)
 static void bridgeTask(void *)
 {
     while (true) {
-        if (!ensureWifiAndUdp()) {
+        if (!ensureNetworkAndUdp()) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }

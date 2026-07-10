@@ -2,7 +2,8 @@
 
 #include "board_pins.h"
 
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO || \
+    NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 #include "external_radio.h"
 #include "es8311.h"
 #include "../../lib/nrl_bt_hfp.h"  // route the volume keys to a connected headset
@@ -10,6 +11,8 @@
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
 #include "bsp/led.h"  // vendored ESP32-S31-Korvo BSP: WS2812 status LED (GPIO37)
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+#include <led_strip.h>
 #endif
 
 #ifdef ENABLE_OPENCV
@@ -24,7 +27,8 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO || \
+    NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 #include <freertos/semphr.h>
 #endif
 
@@ -54,7 +58,8 @@ static bool blinkPhase(const unsigned long now_ms, const unsigned long period_ms
 
 } // namespace
 
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO || \
+    NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 
 // ============================================================
 // 格子派: 3 push buttons (volume +/-, physical PTT) + 3 LEDs.
@@ -106,6 +111,8 @@ bool s_net_audio_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
 bool s_ws2812_ready = false;
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+led_strip_handle_t s_ws2812 = nullptr;
 #endif
 bool s_volume_dirty = false;
 unsigned long s_volume_change_ms = 0UL;
@@ -387,6 +394,7 @@ static unsigned long pttTimeoutMs(void)
 // either way transmit is forced off once it has been on for the PTT timeout.
 static void updatePtt(const unsigned long now)
 {
+#if !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
     const bool was_pressed = s_btn_ptt.pressed;
     pollButtonPressEdge(s_btn_ptt, now);  // refreshes s_btn_ptt.pressed
     const bool is_pressed = s_btn_ptt.pressed;
@@ -405,6 +413,9 @@ static void updatePtt(const unsigned long now)
         }
         s_tx_suppressed = false;
     }
+#else
+    const bool is_pressed = false;
+#endif
 
     // Effective transmit: the held PTT button or the on-screen soft-PTT hold
     // (unless the timeout suppressed it) or the latch left on by a short press.
@@ -451,7 +462,7 @@ extern "C" void STATUS_IO_Init(void)
 
 #if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
     initAdcButtons();
-#else
+#elif !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
     gpio_reset_pin((gpio_num_t)NRL_PIN_BTN_VOL_UP);
     gpio_set_direction((gpio_num_t)NRL_PIN_BTN_VOL_UP, GPIO_MODE_INPUT);
     gpio_set_pull_mode((gpio_num_t)NRL_PIN_BTN_VOL_UP, GPIO_PULLUP_ONLY);
@@ -487,6 +498,30 @@ extern "C" void STATUS_IO_Init(void)
         bsp_led_clear();
     } else {
         ESP_LOGW(TAG, "WS2812 status LED init failed");
+    }
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+    const led_strip_config_t strip_config = {
+        .strip_gpio_num = NRL_PIN_WS2812_STATUS,
+        .max_leds = 1,
+        .led_model = LED_MODEL_WS2812,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+        .flags = {
+            .invert_out = NRL_WS2812_INVERT_OUT,
+        },
+    };
+    const led_strip_rmt_config_t rmt_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+        .mem_block_symbols = 0,
+        .flags = {
+            .with_dma = false,
+        },
+    };
+    if (led_strip_new_rmt_device(&strip_config, &rmt_config, &s_ws2812) == ESP_OK) {
+        (void)led_strip_clear(s_ws2812);
+    } else {
+        s_ws2812 = nullptr;
+        ESP_LOGW(TAG, "Function CoreBoard WS2812 init failed");
     }
 #endif
 }
@@ -525,8 +560,10 @@ extern "C" void STATUS_IO_Poll(void)
 
     const unsigned long now = nrl_millis_now();
 
+#if !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
     pollVolumeButton(s_btn_vol_up,   s_btn_vol_up_repeat,   +1, now);
     pollVolumeButton(s_btn_vol_down, s_btn_vol_down_repeat, -1, now);
+#endif
     updatePtt(now);
 
     // Yellow LED follows the transmit state (mic uplink in progress).
@@ -549,6 +586,14 @@ extern "C" void STATUS_IO_Poll(void)
         const uint8_t g = s_net_audio_active ? 60 : 0;
         const uint8_t b = heartbeat_ok ? 30 : (blinkPhase(now, kSlowBlinkMs) ? 30 : 0);
         bsp_led_set_rgb(BSP_LED_STATUS, r, g, b);
+    }
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+    if (s_ws2812 != nullptr) {
+        const uint8_t r = s_tx_active ? 60 : 0;
+        const uint8_t g = s_net_audio_active ? 60 : 0;
+        const uint8_t b = heartbeat_ok ? 30 : (blinkPhase(now, kSlowBlinkMs) ? 30 : 0);
+        (void)led_strip_set_pixel(s_ws2812, 0, r, g, b);
+        (void)led_strip_refresh(s_ws2812);
     }
 #endif
 

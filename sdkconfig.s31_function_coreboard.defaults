@@ -1,0 +1,13 @@
+# ESP32-S31-Function-CoreBoard-1 board-specific options.
+# Target-wide CPU/PSRAM/Bluetooth/partition defaults come from
+# sdkconfig.defaults.esp32s31 automatically.
+
+CONFIG_ETH_ENABLED=y
+CONFIG_ETH_USE_ESP32_EMAC=y
+
+# RGMII buffers must be 64-byte aligned on ESP32-S31. The defaults are valid;
+# keep the pool modest because NRL voice traffic needs latency, not bulk TCP
+# throughput, and Classic Bluetooth also competes for internal RAM.
+CONFIG_ETH_DMA_BUFFER_SIZE=512
+CONFIG_ETH_DMA_RX_BUFFER_NUM=10
+CONFIG_ETH_DMA_TX_BUFFER_NUM=6

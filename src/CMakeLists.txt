@@ -36,6 +36,7 @@ set(app_sources
     app/driver/status_io.cpp
     lib/ble_config.cpp
     lib/nrl_bt_hfp.cpp
+    lib/nrl_ethernet.cpp
     lib/nrl_at_commands.cpp
     lib/nrl_audio_bridge.cpp
     lib/nrl_captive_dns.cpp
@@ -67,6 +68,7 @@ set(app_priv_requires
     esp_driver_uart
     esp_driver_usb_serial_jtag
     esp_event
+    esp_eth
     esp_http_client
     esp_http_server
     mbedtls
@@ -91,13 +93,18 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../components/lvgl/lvgl.h")
     list(APPEND app_priv_requires lvgl)
 endif()
-if(IDF_TARGET STREQUAL "esp32s31" AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../vendor/esp32_s31_korvo/CMakeLists.txt")
+# Both S31 build entries register the vendored component directory. Function
+# CoreBoard compiles all Korvo-only call sites out through board capability
+# macros, while keeping one stable S31 dependency graph for IDF's early
+# component-requirement discovery pass.
+if(IDF_TARGET STREQUAL "esp32s31" AND
+   EXISTS "${CMAKE_CURRENT_LIST_DIR}/../vendor/esp32_s31_korvo/CMakeLists.txt")
     list(APPEND app_priv_requires esp32_s31_korvo)
 endif()
 # USB flash drive + SMB network share (storage_service backends) -- the
 # component dependencies themselves are target-gated in idf_component.yml.
 if(IDF_TARGET STREQUAL "esp32s31")
-    list(APPEND app_priv_requires usb espressif__usb_host_msc fatfs sahlberg__libsmb2 vfs
+    list(APPEND app_priv_requires usb espressif__usb_host_msc espressif__led_strip fatfs sahlberg__libsmb2 vfs
                                   espressif__esp_websocket_client espressif__cjson)
 endif()
 
