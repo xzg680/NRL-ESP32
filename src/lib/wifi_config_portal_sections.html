@@ -71,6 +71,7 @@
         <div><label data-i18n="callsignSsid">Callsign SSID</label><input name="callsign_ssid" value="{{CALLSIGN_SSID}}"></div>
         <div><label data-i18n="pttTimeout">PTT Timeout (seconds, 5-3600)</label><input name="ptt_timeout" value="{{PTT_TIMEOUT}}"></div>
         <div><label data-i18n="voicePayloadBytes">Voice Packet Size (bytes, 160-500)</label><input name="voice_payload_bytes" value="{{VOICE_PAYLOAD_BYTES}}"></div>
+        <div><label data-i18n="voiceCodec">NRL Voice Codec (TX)</label><select name="voice_codec"><option value="0"{{CODEC_G711_SELECTED}} data-i18n="codecG711">G.711 8 kHz (compatible)</option><option value="1"{{CODEC_OPUS_SELECTED}} data-i18n="codecOpus">Opus 16 kHz wideband</option></select></div>
       </div>
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
     </form>
@@ -173,7 +174,6 @@
   <div class="grid">
     <form class="item-form" method="post" action="/save_media"><label data-i18n="musicTarget">Playback Target</label><select name="music_target" onchange="submitSwitch(this)"><option value="0"{{TARGET_LOCAL_SELECTED}} data-i18n="targetLocal">Local speaker</option><option value="1"{{TARGET_NET_SELECTED}} data-i18n="targetNet">NRL network</option><option value="2"{{TARGET_BOTH_SELECTED}} data-i18n="targetBoth">Local + network</option></select></form>
     <form class="item-form" method="post" action="/save_media"><label data-i18n="musicOutput">Music Output Device</label><select name="music_output" onchange="submitSwitch(this)"><option value="0"{{OUTPUT_SPK_SELECTED}} data-i18n="outputSpk">Onboard speaker</option><option value="1"{{OUTPUT_BT_SELECTED}} data-i18n="outputBt">Bluetooth headset (A2DP)</option></select></form>
-    <form class="item-form" method="post" action="/save_media"><label data-i18n="voiceCodec">NRL Voice Codec (TX)</label><select name="voice_codec" onchange="submitSwitch(this)"><option value="0"{{CODEC_G711_SELECTED}} data-i18n="codecG711">G.711 8 kHz (compatible)</option><option value="1"{{CODEC_OPUS_SELECTED}} data-i18n="codecOpus">Opus 16 kHz wideband</option></select></form>
     <form class="item-form" method="post" action="/save_media"><label data-i18n="pttMode">PTT Mode</label><select name="ptt_mode" onchange="submitSwitch(this)"><option value="0"{{PTT_MODE_NRL_SELECTED}} data-i18n="pttModeNrl">NRL network PTT</option><option value="1"{{PTT_MODE_ESPNOW_SELECTED}} data-i18n="pttModeEspnow">ESP-NOW PTT</option></select></form>
   </div>
 </section>
@@ -181,6 +181,8 @@
   <div class="section-head"><h2 data-i18n="espnowLabel">ESP-NOW Intercom</h2></div>
   <div class="grid">
     <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowLabel">ESP-NOW Intercom</label><input type="hidden" name="espnow_present" value="1"><label class="hint"><input type="checkbox" name="espnow_enabled" value="1" onchange="submitSwitch(this)" {{ESPNOW_CHECKED}}><span data-i18n="espnowText">Off-grid voice link between nearby devices</span></label></form>
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowRxLabel">ESP-NOW Receive</label><input type="hidden" name="espnow_rx_present" value="1"><label class="hint"><input type="checkbox" name="espnow_rx" value="1" onchange="submitSwitch(this)" {{ESPNOW_RX_CHECKED}}><span data-i18n="espnowRxText">Hear intercom voice even while TX stays off</span></label></form>
+    <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowCodec">ESP-NOW Voice Codec (TX)</label><select name="espnow_codec" onchange="submitSwitch(this)"><option value="0"{{ESPNOW_CODEC_G711_SELECTED}} data-i18n="codecG711">G.711 8 kHz (compatible)</option><option value="1"{{ESPNOW_CODEC_OPUS_SELECTED}} data-i18n="codecOpus">Opus 16 kHz wideband</option></select></form>
   </div>
 </section>
 <section class="panel">

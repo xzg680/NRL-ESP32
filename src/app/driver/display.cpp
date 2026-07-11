@@ -37,6 +37,8 @@
 
 #include "../../lib/nrl_audio_bridge.h"
 #include "../../services/espnow_link.h"
+#include "../../services/ota_service.h"
+#include "../../lib/nrl_version.h"
 #include "external_radio.h"
 #include "status_io.h"
 
@@ -133,6 +135,7 @@ lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_batt = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_hint = nullptr;
+lv_obj_t *s_lbl_ota = nullptr;
 
 adc_oneshot_unit_handle_t s_adc = nullptr;
 adc_cali_handle_t s_adc_cali = nullptr;
@@ -151,6 +154,7 @@ char s_shown_wifi[28] = {};
 char s_shown_vol[16] = {};
 char s_shown_batt[20] = {};
 char s_shown_ip[96] = {};
+char s_shown_ota[48] = {};
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
 
 void refreshVolume();
@@ -718,6 +722,15 @@ void buildUi()
     lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 164);
     lv_label_set_text(s_lbl_time, "--:--:--");
 
+    // Gezipai is not a touch screen: this is deliberately only a notification.
+    // Upgrade confirmation is AT+OTA=LATEST, the local /update page, or the
+    // physical VOL+ + VOL- chord handled by status_io.cpp.
+    s_lbl_ota = makeLabel(scr, &lv_font_montserrat_14, kColorApWarn);
+    lv_obj_set_width(s_lbl_ota, kWidth);
+    lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 193);
+    lv_label_set_text(s_lbl_ota, "");
+
     // ---- Bottom IP bar ----
     lv_obj_t *bottom = makeBar(scr, kHeight - 34, 34);
     s_lbl_ip = makeLabel(bottom, &lv_font_montserrat_16, kColorIp);
@@ -761,8 +774,17 @@ void refreshCaller()
         snprintf(call_text, sizeof(call_text), "%s", voice_call);
         snprintf(ssid_text, sizeof(ssid_text), "SSID %u", voice_ssid);
     } else if (espnow_rx && espnow_peer[0] != '\0') {
+        // espnow_peer arrives as "CALLSIGN-N". This layout has a dedicated
+        // SSID line below the callsign, so split the pair: the "-N" suffix in
+        // the large callsign font both duplicates the SSID line and wraps.
+        char *dash = strrchr(espnow_peer, '-');
+        if (dash != nullptr) {
+            *dash = '\0';
+            snprintf(ssid_text, sizeof(ssid_text), "SSID %s", dash + 1);
+        } else {
+            snprintf(ssid_text, sizeof(ssid_text), "SSID -");
+        }
         snprintf(call_text, sizeof(call_text), "%s", espnow_peer);
-        snprintf(ssid_text, sizeof(ssid_text), "ESP-NOW");
     } else {
         const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
         if (cfg != nullptr && cfg->callsign[0] != '\0') {
@@ -793,8 +815,13 @@ void refreshCaller()
         state = 3;  // transmitting
     } else if (rx) {
         state = 2;  // receiving
+    } else if (ESPNOW_LINK_IsEnabled()) {
+        // Standby captions carry the PTT target (NRL / ESP-NOW) and that
+        // link's own TX codec. Both are folded into the state value so
+        // flipping either switch while idle re-renders the caption.
+        state = (ESPNOW_LINK_GetTxCodec() == 1u) ? 9 : 8;
     } else {
-        state = 0;  // standby
+        state = (NRLAudioBridge_GetVoiceCodec() == 1u) ? 10 : 0;
     }
 
     if (state != s_shown_state) {
@@ -827,8 +854,20 @@ void refreshCaller()
                 caption = "RECEIVING";    caption_color = kColorAccent;
                 call_color = kColorCallLive;
                 break;
+            case 9:
+                caption = "STANDBY ESP-NOW OPUS"; caption_color = kColorCaption;
+                call_color = kColorCallIdle;
+                break;
+            case 8:
+                caption = "STANDBY ESP-NOW G711"; caption_color = kColorCaption;
+                call_color = kColorCallIdle;
+                break;
+            case 10:
+                caption = "STANDBY NRL OPUS"; caption_color = kColorCaption;
+                call_color = kColorCallIdle;
+                break;
             default:
-                caption = "STANDBY";      caption_color = kColorCaption;
+                caption = "STANDBY NRL G711"; caption_color = kColorCaption;
                 call_color = kColorCallIdle;
                 break;
         }
@@ -871,8 +910,13 @@ void refreshWifi()
     uint32_t color = kColorSub;
     if (nrlWifiStaConnected()) {
         wifi_ap_record_t ap_info = {};
-        const int rssi = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) ? ap_info.rssi : 0;
-        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "  %ddB", rssi);
+        const bool have_ap = esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK;
+        const int rssi = have_ap ? ap_info.rssi : 0;
+        // Bare channel number after the RSSI (no "CH" prefix -- the narrow
+        // gezipai top bar can't fit it). Shown because ESP-NOW peers only hear
+        // each other on the same WiFi channel, which STA inherits from the AP.
+        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "  %ddB %u",
+                 rssi, have_ap ? static_cast<unsigned>(ap_info.primary) : 0u);
         if (rssi >= -65) {
             color = kColorGood;
         } else if (rssi >= -78) {
@@ -881,7 +925,11 @@ void refreshWifi()
             color = kColorWeak;
         }
     } else {
-        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "  AP");
+        uint8_t channel = 0;
+        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+        (void)esp_wifi_get_channel(&channel, &second);
+        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "  AP %u",
+                 static_cast<unsigned>(channel));
         color = kColorApWarn;
     }
     if (setLabel(s_lbl_wifi, s_shown_wifi, sizeof(s_shown_wifi), wifi_text)) {
@@ -960,9 +1008,13 @@ void refreshIp()
     const bool espnow_tx = espnow_mode && tx && ESPNOW_LINK_IsEnabled();
     const bool espnow_rx = ESPNOW_LINK_IsReceiving();
     if (espnow_tx || espnow_rx) {
-        snprintf(ip_text, sizeof(ip_text), "%s %s",
-                 "ESP-NOW",
-                 (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
+        // TX shows the intercom's own TX codec; RX adapts to what the peer is
+        // actually sending (per-packet auto-detect) -- the two ends may be
+        // configured differently.
+        const uint8_t codec = espnow_tx ? ESPNOW_LINK_GetTxCodec()
+                                        : ESPNOW_LINK_GetRxCodec();
+        snprintf(ip_text, sizeof(ip_text), "ESP-NOW %s",
+                 (codec == 1u) ? "OPUS" : "G711");
         color = kColorDuplex;
     } else if (tx || rx) {
         // Transmitting or receiving voice -> show the configured NRL server
@@ -973,11 +1025,11 @@ void refreshIp()
                                : "---";
         snprintf(ip_text, sizeof(ip_text), "%s", host);
         color = tx ? kColorTx : kColorAccent;
-    } else if (espnow_mode) {
-        snprintf(ip_text, sizeof(ip_text), "PTT ESP-NOW %s",
-                 (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
-        color = ESPNOW_LINK_IsEnabled() ? kColorDuplex : kColorApWarn;
     } else if (nrlWifiStaConnected()) {
+        // No idle "PTT ESP-NOW" takeover here: the standby caption already
+        // reads "STANDBY ESP-NOW" while the intercom is armed, so the address
+        // bar keeps showing the IP; it switches to "ESP-NOW <codec>" only for
+        // the duration of actual intercom TX/RX (branch above).
         char sta_buf[16] = {};
         nrlIpToString(nrlWifiStaIp(), sta_buf, sizeof(sta_buf));
         snprintf(ip_text, sizeof(ip_text), "%s", sta_buf);
@@ -998,6 +1050,30 @@ void refreshIp()
     }
     if (setLabel(s_lbl_ip, s_shown_ip, sizeof(s_shown_ip), ip_text)) {
         lv_obj_set_style_text_color(s_lbl_ip, lv_color_hex(color), 0);
+    }
+}
+
+void refreshOtaNotice()
+{
+    if (s_lbl_ota == nullptr) {
+        return;
+    }
+    NrlOtaStatus status = {};
+    OtaService_GetStatus(&status);
+    char text[sizeof(s_shown_ota)] = {};
+    uint32_t color = kColorApWarn;
+    if (status.updating) {
+        snprintf(text, sizeof(text), "OTA UPDATING...");
+        color = kColorTx;
+    } else if (status.checking) {
+        snprintf(text, sizeof(text), "OTA CHECKING...");
+    } else if (status.latest_version[0] != '\0' &&
+               strcmp(status.latest_version, NRL_FIRMWARE_VERSION) != 0) {
+        snprintf(text, sizeof(text), "NEW FW %.20s VOL+/-", status.latest_version);
+        color = kColorGood;
+    }
+    if (setLabel(s_lbl_ota, s_shown_ota, sizeof(s_shown_ota), text)) {
+        lv_obj_set_style_text_color(s_lbl_ota, lv_color_hex(color), 0);
     }
 }
 
@@ -1051,6 +1127,7 @@ extern "C" void Display_Poll(void)
     refreshCaller();
     refreshIp();
     refreshVolume();
+    refreshOtaNotice();
 
     if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
         s_last_refresh_ms = now;

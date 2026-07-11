@@ -6,6 +6,7 @@
 #include "nrl_net_compat.h"
 #include "nrl_version.h"
 #include "nrl_wifi.h"
+#include "../services/ota_service.h"
 
 #include "../app/driver/es8311.h"
 #include "../app/driver/external_radio.h"
@@ -1359,6 +1360,13 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
              value >= 160UL && value <= 500UL &&
              EXTERNAL_RADIO_SetVoicePayloadBytes(static_cast<uint16_t>(value), false);
     }
+    if (ok && s_server.hasArg("voice_codec")) {
+        // NRL TX codec sits in the Radio form. Fails (and rolls back to G.711)
+        // when Opus pre-allocation cannot get RAM; surfaced as a failed save.
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("voice_codec"), &value) && value <= 1UL &&
+             NRLAudioBridge_SetVoiceCodec(static_cast<uint8_t>(value));
+    }
     if (ok && s_server.hasArg("tail_suppress_ms")) {
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("tail_suppress_ms"), &value) &&
@@ -1785,6 +1793,8 @@ static void sendMediaSavedJson(const bool ok)
     appendField("music_target", std::to_string(MUSIC_GetTarget()), true);
     appendField("voice_codec", std::to_string(NRLAudioBridge_GetVoiceCodec()));
     appendField("espnow_enabled", ESPNOW_LINK_IsEnabled() ? "1" : "0");
+    appendField("espnow_rx", ESPNOW_LINK_IsRxEnabled() ? "1" : "0");
+    appendField("espnow_codec", std::to_string(ESPNOW_LINK_GetTxCodec()));
     appendField("ptt_mode", std::to_string(ESPNOW_LINK_GetPttMode()));
     appendField("beacon_enabled", beacon_armed ? "1" : "0");
     appendField("beacon_path", beacon_path);
@@ -1845,8 +1855,11 @@ static esp_err_t handleSaveMedia(httpd_req_t *req)
         unsigned long value = 0UL;
         ok = parseUIntArg(s_server.arg("voice_codec"), &value) && value <= 1UL;
         if (ok) {
-            NRLAudioBridge_SetVoiceCodec(static_cast<uint8_t>(value));
-            ESP_LOGI(TAG, "media: voice codec=%s", value == 1UL ? "opus" : "g711");
+            // Fails (and rolls back to G.711) when Opus pre-allocation cannot
+            // get RAM; surface that as a failed save so the form shows truth.
+            ok = NRLAudioBridge_SetVoiceCodec(static_cast<uint8_t>(value));
+            ESP_LOGI(TAG, "media: voice codec=%s%s", value == 1UL ? "opus" : "g711",
+                     ok ? "" : " (opus alloc failed, kept g711)");
         }
     }
     if (ok && s_server.hasArg("ptt_mode")) {
@@ -1865,6 +1878,20 @@ static esp_err_t handleSaveMedia(httpd_req_t *req)
     if (ok && s_server.hasArg("espnow_present")) {
         // Fails when enabling while WiFi is still down -- surfaced to the page.
         ok = ESPNOW_LINK_SetEnabled(s_server.hasArg("espnow_enabled"));
+    }
+    if (ok && s_server.hasArg("espnow_rx_present")) {
+        ESPNOW_LINK_SetRxEnabled(s_server.hasArg("espnow_rx"));
+    }
+    if (ok && s_server.hasArg("espnow_codec")) {
+        unsigned long value = 0UL;
+        ok = parseUIntArg(s_server.arg("espnow_codec"), &value) && value <= 1UL;
+        if (ok) {
+            // Fails (and rolls back to G.711) when Opus pre-allocation cannot
+            // get RAM; surface that as a failed save so the form shows truth.
+            ok = ESPNOW_LINK_SetTxCodec(static_cast<uint8_t>(value));
+            ESP_LOGI(TAG, "media: espnow codec=%s%s", value == 1UL ? "opus" : "g711",
+                     ok ? "" : " (opus alloc failed, kept g711)");
+        }
     }
     if (ok && s_server.hasArg("ai_present")) {
         const std::string ai_url = s_server.arg("ai_url");
@@ -1941,6 +1968,68 @@ static esp_err_t handleUpdatePage(httpd_req_t *req)
                                         "updateHeadline",
                                         "Upload a firmware file over this WiFi connection.",
                                         "updateIntro"));
+    return ESP_OK;
+}
+
+static esp_err_t handleOtaStatus(httpd_req_t *req)
+{
+    s_server.bind(req);
+    NrlOtaStatus status = {};
+    OtaService_GetStatus(&status);
+    std::string body = "{\"server_url\":\"" + jsonEscape(status.server_url) +
+                       "\",\"configured\":" + (status.configured ? "true" : "false") +
+                       ",\"checking\":" + (status.checking ? "true" : "false") +
+                       ",\"updating\":" + (status.updating ? "true" : "false") +
+                       ",\"latest_version\":\"" + jsonEscape(status.latest_version) +
+                       "\",\"last_error\":\"" + jsonEscape(status.last_error) +
+                       "\",\"releases\":[";
+    for (size_t i = 0; i < status.release_count; ++i) {
+        if (i > 0u) body += ",";
+        body += "{\"version\":\"" + jsonEscape(status.releases[i].version) +
+                "\",\"notes\":\"" + jsonEscape(status.releases[i].notes) + "\"}";
+    }
+    body += "]}";
+    s_server.send(200, "application/json; charset=utf-8", body);
+    return ESP_OK;
+}
+
+static esp_err_t handleOtaConfig(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    // An empty token means no device authentication. The configuration is kept
+    // in its own NVS namespace, independent from the radio EEPROM structure.
+    const bool ok = s_server.hasArg("server_url") && s_server.hasArg("device_token") &&
+                    OtaService_SetConfig(s_server.arg("server_url").c_str(),
+                                         s_server.arg("device_token").c_str());
+    s_server.send(ok ? 200 : 400, "application/json; charset=utf-8",
+                  ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Use an HTTPS server URL\"}");
+    return ESP_OK;
+}
+
+static esp_err_t handleOtaCheck(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    const bool ok = OtaService_CheckNow();
+    s_server.send(ok ? 202 : 400, "application/json; charset=utf-8",
+                  ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Configure the OTA server first\"}");
+    return ESP_OK;
+}
+
+static esp_err_t handleOtaInstall(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    const bool ok = OtaService_UpdateVersion(s_server.arg("version").c_str());
+    s_server.send(ok ? 202 : 400, "application/json; charset=utf-8",
+                  ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Select a released version\"}");
     return ESP_OK;
 }
 
@@ -2150,6 +2239,10 @@ static void ensureServerRunning()
         { "/save_media",           HTTP_POST, handleSaveMedia },
         { "/update",               HTTP_GET,  handleUpdatePage },
         { "/update",               HTTP_POST, handleUpdate },
+        { "/ota/status",           HTTP_GET,  handleOtaStatus },
+        { "/ota/config",           HTTP_POST, handleOtaConfig },
+        { "/ota/check",            HTTP_POST, handleOtaCheck },
+        { "/ota/install",          HTTP_POST, handleOtaInstall },
         { "/portal.css",           HTTP_GET,  handlePortalCss },
         { "/portal.js",            HTTP_GET,  handlePortalJs },
         { "/update.css",           HTTP_GET,  handleUpdateCss },

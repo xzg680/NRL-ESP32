@@ -150,6 +150,8 @@ enum class AudioControl : intptr_t {
     Noise,
     MicHpf,
     EspNow,
+    EspNowRx,
+    EspNowOpus,
     OpusCodec,
 };
 
@@ -222,6 +224,11 @@ lv_obj_t *s_dd_radio_fav = nullptr;
 lv_obj_t *s_dd_music_target = nullptr;
 lv_obj_t *s_sw_espnow = nullptr;
 lv_obj_t *s_lbl_espnow_status = nullptr;
+// TX-codec tags in the top-right corner of the Home PTT buttons.
+lv_obj_t *s_lbl_ptt_codec = nullptr;
+lv_obj_t *s_lbl_eptt_codec = nullptr;
+char s_shown_ptt_codec[8] = {};
+char s_shown_eptt_codec[8] = {};
 lv_obj_t *s_lbl_cpu = nullptr;
 char s_shown_cpu[16] = {};
 uint32_t s_clr_cpu = 0xFFFFFFFFu;
@@ -721,6 +728,23 @@ const TrEntry kTr[] = {
     {"Save failed: server and share are required.", "保存失败: 服务器和共享名必填。"},
     // ESP-NOW page
     {"ESP-NOW enable failed (WiFi not started).", "开启失败 (WiFi 未启动)。"},
+    {"ESP-NOW Intercom", "ESP-NOW 对讲"},
+    {"RX", "接收"},
+    {"Opus", "Opus"},
+    {"ESP-NOW intercom on.", "ESP-NOW 对讲已开启。"},
+    {"ESP-NOW intercom off.", "ESP-NOW 对讲已关闭。"},
+    {"ESP-NOW receive on.", "ESP-NOW 接收已开启。"},
+    {"ESP-NOW receive muted.", "ESP-NOW 接收已静默。"},
+    {"ESP-NOW TX: Opus 16k wideband.", "ESP-NOW 发射: Opus 16k 宽带。"},
+    {"ESP-NOW TX: G.711 8k.", "ESP-NOW 发射: G.711 8k。"},
+    {"Opus enable failed (out of memory); staying on G.711.",
+     "Opus 开启失败 (内存不足), 保持 G.711。"},
+    {"Off-grid intercom with nearby devices. When on, the home screen "
+     "gains a dedicated ESP-NOW PTT below the network PTT.",
+     "与附近设备脱网对讲。开启后, 主页会在网络 PTT 下方增加独立的 ESP-NOW PTT。"},
+    {"TX voice: Opus 16k wideband (type 8).", "NRL 发射: Opus 16k 宽带 (类型 8)。"},
+    {"TX voice: G.711 8k (type 1).", "NRL 发射: G.711 8k (类型 1)。"},
+    {"State: %s\nLast peer heard: %s%s", "状态: %s\n最近听到: %s%s"},
     // Video page
     {"Remote video", "对方画面"},
     {"Local camera", "本机画面"},
@@ -815,6 +839,7 @@ void action(lv_event_t *event);
 void volumeEvent(lv_event_t *event);
 void softPttEvent(lv_event_t *event);
 void espnowPttEvent(lv_event_t *event);
+void wifiEnableEvent(lv_event_t *event);
 void textAreaEvent(lv_event_t *event);
 void wifiOptionEvent(lv_event_t *event);
 void audioSliderEvent(lv_event_t *event);
@@ -1076,6 +1101,10 @@ void clearScreen()
     s_sw_espnow = nullptr;
     s_lbl_espnow_status = nullptr;
     memset(s_shown_espnow_status, 0, sizeof(s_shown_espnow_status));
+    s_lbl_ptt_codec = nullptr;
+    s_lbl_eptt_codec = nullptr;
+    s_shown_ptt_codec[0] = '\0';
+    s_shown_eptt_codec[0] = '\0';
     s_lbl_cpu = nullptr;
     memset(s_shown_cpu, 0, sizeof(s_shown_cpu));
     s_clr_cpu = kColorUnset;
@@ -1242,22 +1271,33 @@ void buildHome()
         lv_obj_add_event_cb(ptt, cb, LV_EVENT_PRESS_LOST, nullptr);
         return ptt;
     };
+    // TX-codec tag in a PTT button's top-right corner; text is kept current by
+    // refreshHome so codec changes from any config surface show up live.
+    auto make_codec_tag = [](lv_obj_t *ptt, uint32_t color) {
+        lv_obj_t *tag = label(ptt, &lv_font_montserrat_20, color);
+        lv_obj_align(tag, LV_ALIGN_TOP_RIGHT, -6, 2);
+        lv_label_set_text(tag, "");
+        return tag;
+    };
     if (!espnow_split) {
         lv_obj_t *ptt = make_ptt(78, 270, softPttEvent, 0x7A1F1F);
         lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
         lv_obj_center(ptt_lbl);
         lv_label_set_text(ptt_lbl, tr("PTT"));
+        s_lbl_ptt_codec = make_codec_tag(ptt, kColorSub);
     } else {
         lv_obj_t *ptt = make_ptt(78, 128, softPttEvent, 0x7A1F1F);
         lv_obj_t *ptt_lbl = label(ptt, &lv_font_montserrat_48, kColorText);
         lv_obj_center(ptt_lbl);
         lv_label_set_text(ptt_lbl, tr("PTT"));
+        s_lbl_ptt_codec = make_codec_tag(ptt, kColorSub);
 
         lv_obj_t *eptt = make_ptt(220, 128, espnowPttEvent, 0x4C1D95);
         lv_obj_t *eptt_lbl = label(eptt, &lv_font_montserrat_20, kColorDuplex);
         lv_obj_center(eptt_lbl);
         lv_obj_set_style_text_align(eptt_lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(eptt_lbl, tr("ESP-NOW\nPTT"));
+        s_lbl_eptt_codec = make_codec_tag(eptt, kColorDuplex);
     }
 
     button(scr, 22, 372, 170, 78, "VOL-", Action::VolumeDown);
@@ -1272,12 +1312,12 @@ void buildApps()
     s_page = Page::Apps;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    button(scr, 24, 84, 118, 120, "Music", Action::Music);
-    button(scr, 150, 84, 118, 120, "Radio", Action::Radio);
-    button(scr, 276, 84, 118, 120, "ESP-NOW", Action::EspNow);
-    button(scr, 402, 84, 118, 120, "Video", Action::Video);
-    button(scr, 528, 84, 118, 120, "AI", Action::Ai);
-    button(scr, 654, 84, 120, 120, "Tetris", Action::Game);
+    // ESP-NOW lives under Config (it's a settings entry, not an app).
+    button(scr, 24, 84, 138, 120, "Music", Action::Music);
+    button(scr, 182, 84, 138, 120, "Radio", Action::Radio);
+    button(scr, 340, 84, 138, 120, "Video", Action::Video);
+    button(scr, 498, 84, 138, 120, "AI", Action::Ai);
+    button(scr, 656, 84, 118, 120, "Tetris", Action::Game);
 
     // Shared playback target: one setting for everything the music player
     // outputs (music / nanny beacon / net radio), so it lives here next to
@@ -1315,12 +1355,15 @@ void buildConfig()
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
     // Settings entries only; the feature/app entries live on the Apps page.
-    button(scr, 24, 84, 240, 120, "WiFi", Action::Wifi);
-    button(scr, 280, 84, 240, 120, "Station", Action::Station);
-    button(scr, 536, 84, 238, 120, "Audio", Action::Audio);
-    button(scr, 24, 220, 240, 120, "BT", Action::Bt);
-    button(scr, 280, 220, 240, 120, "Nanny", Action::Nanny);
-    button(scr, 536, 220, 238, 120, "NAS", Action::Smb);
+    // Two uniform 4-slot rows (the 8th slot is reserved for a future entry);
+    // the Back button keeps its usual size/place.
+    button(scr, 24, 84, 176, 120, "WiFi", Action::Wifi);
+    button(scr, 216, 84, 176, 120, "NRL", Action::Station);
+    button(scr, 408, 84, 176, 120, "Audio", Action::Audio);
+    button(scr, 600, 84, 174, 120, "BT", Action::Bt);
+    button(scr, 24, 220, 176, 120, "Nanny", Action::Nanny);
+    button(scr, 216, 220, 176, 120, "NAS", Action::Smb);
+    button(scr, 408, 220, 176, 120, "ESP-NOW", Action::EspNow);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
 
     // Language selector: switching persists and rebuilds this page in place.
@@ -1415,11 +1458,30 @@ void buildWifi()
     lv_obj_t *box = panel(scr, 24, 86, 750, 250);
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
 
-    fieldLabel(box, 0, 0, "Nearby WiFi");
+    fieldLabel(box, 0, 6, "Nearby WiFi");
+
+    // Master Wi-Fi radio switch (moved here from the BT page). Off frees the
+    // shared radio for Bluetooth A2DP music, at the cost of the network
+    // radio-voice link. Defaults ON. Sits on the header row; the dropdown and
+    // the rows below are shifted down so nothing overlaps the 34 px switch.
+    fieldLabel(box, 500, 6, "Wi-Fi radio");
+    s_sw_wifi = lv_switch_create(box);
+    lv_obj_set_pos(s_sw_wifi, 646, 0);
+    lv_obj_set_size(s_sw_wifi, 64, 34);
+    {
+        const ExternalRadioConfig *wcfg = EXTERNAL_RADIO_GetConfig();
+        if (wcfg == nullptr || wcfg->wifi_enabled) {
+            lv_obj_add_state(s_sw_wifi, LV_STATE_CHECKED);
+        }
+    }
+    lv_obj_set_style_bg_color(s_sw_wifi, lv_color_hex(kColorDim), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_sw_wifi, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_sw_wifi, lv_color_hex(kColorText), LV_PART_KNOB);
+    lv_obj_add_event_cb(s_sw_wifi, wifiEnableEvent, LV_EVENT_VALUE_CHANGED, nullptr);
     // Scrollable dropdown lists every scanned network; picking one fills the SSID
     // field below.
     s_dd_wifi = lv_dropdown_create(box);
-    lv_obj_set_pos(s_dd_wifi, 0, 24);
+    lv_obj_set_pos(s_dd_wifi, 0, 44);
     lv_obj_set_size(s_dd_wifi, 710, 42);
     lv_obj_set_style_radius(s_dd_wifi, 6, 0);
     lv_obj_set_style_bg_color(s_dd_wifi, lv_color_hex(kColorPanel2), 0);
@@ -1473,6 +1535,12 @@ void buildStation()
     snprintf(ssid, sizeof(ssid), "%u", cfg ? static_cast<unsigned>(cfg->callsign_ssid) : 0);
     s_ta_callsign_ssid = textArea(box, 280, 24, 110, "0", ssid, 3, false, "0123456789", true);
 
+    // NRL TX voice codec lives with the other NRL settings; applies + persists
+    // immediately (RX auto-detects, no Save round-trip needed). On the SSID row
+    // where there is room -- after the Port field it gets clipped.
+    switchControl(box, 470, 24, "Opus", NRLAudioBridge_GetVoiceCodec() == 1u,
+                  AudioControl::OpusCodec);
+
     fieldLabel(box, 0, 82, "Server Host / IP");
     s_ta_server_host = textArea(box, 0, 106, 430, "server host", cfg ? cfg->server_host : "", 64, false,
                                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_", false);
@@ -1517,10 +1585,8 @@ void buildAudio()
     s_sw_aec = switchControl(box, 0, 152, "AEC", cfg && cfg->aec_enabled, AudioControl::Aec);
     s_sw_noise = switchControl(box, 190, 152, "AI Noise", cfg && cfg->ai_noise_enabled, AudioControl::Noise);
     s_sw_mic_hpf = switchControl(box, 380, 152, "Mic HPF", cfg && cfg->mic_hpf_enabled, AudioControl::MicHpf);
-    // NRL TX voice codec: applies + persists immediately (RX auto-detects,
-    // so no Save round-trip is needed).
-    switchControl(box, 556, 152, "Opus 16k", NRLAudioBridge_GetVoiceCodec() == 1u,
-                  AudioControl::OpusCodec);
+    // The NRL TX codec switch lives on the NRL (Station) page; the ESP-NOW
+    // codec switch on the ESP-NOW page.
 
     s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
     lv_obj_set_width(s_lbl_form_status, 710);
@@ -1742,10 +1808,10 @@ void refreshEspNowPage()
     char peer[16] = {};
     ESPNOW_LINK_GetLastPeer(peer, sizeof(peer));
     char text[128];
-    snprintf(text, sizeof(text), "State: %s\nLast peer heard: %s%s",
+    snprintf(text, sizeof(text), tr("State: %s\nLast peer heard: %s%s"),
              ESPNOW_LINK_IsEnabled() ? "ON" : "OFF",
              peer[0] != '\0' ? peer : "(none)",
-             ESPNOW_LINK_IsReceiving() ? "  " LV_SYMBOL_VOLUME_MAX " receiving" : "");
+             ESPNOW_LINK_IsReceiving() ? "  " LV_SYMBOL_VOLUME_MAX : "");
     if (setLabel(s_lbl_espnow_status, s_shown_espnow_status,
                  sizeof(s_shown_espnow_status), text)) {
         lv_obj_set_style_text_color(s_lbl_espnow_status,
@@ -1763,6 +1829,13 @@ void buildEspNow()
 
     s_sw_espnow = switchControl(box, 0, 8, "ESP-NOW Intercom",
                                 ESPNOW_LINK_IsEnabled(), AudioControl::EspNow);
+    // Independent receive switch (default ON): hear intercom voice even while
+    // TX stays off.
+    (void)switchControl(box, 300, 8, "RX", ESPNOW_LINK_IsRxEnabled(),
+                        AudioControl::EspNowRx);
+    // ESP-NOW TX codec, independent of the NRL codec on the Station page.
+    (void)switchControl(box, 470, 8, "Opus", ESPNOW_LINK_GetTxCodec() == 1u,
+                        AudioControl::EspNowOpus);
 
     s_lbl_espnow_status = label(box, &lv_font_montserrat_20, kColorText);
     lv_obj_set_width(s_lbl_espnow_status, 710);
@@ -1776,7 +1849,7 @@ void buildEspNow()
                       "Off-grid intercom with nearby devices. When on, the home screen "
                       "gains a dedicated ESP-NOW PTT below the network PTT.");
 
-    button(scr, 24, 372, 230, 76, "Back", Action::Apps);
+    button(scr, 24, 372, 230, 76, "Back", Action::Config);
 }
 
 const char *musicBasename(const char *path)
@@ -3126,8 +3199,14 @@ void wifiEnableEvent(lv_event_t *event)
     const bool checked = lv_obj_has_state(obj, LV_STATE_CHECKED);
     // Master Wi-Fi switch. Off frees the shared radio for Bluetooth A2DP (music
     // to the headset) but stops the network radio-voice link -- a mode change.
+    // The switch lives on the WiFi page (form status label); keep the BT-page
+    // label fallback for safety.
     EXTERNAL_RADIO_SetWifiEnabled(checked, true);
-    if (s_lbl_bt_status != nullptr) {
+    if (s_lbl_form_status != nullptr && s_page == Page::Wifi) {
+        formStatus(checked ? "Wi-Fi on: network radio available."
+                           : "Wi-Fi off: radio freed for Bluetooth A2DP music.",
+                   kColorWarn);
+    } else if (s_lbl_bt_status != nullptr) {
         lv_label_set_text(s_lbl_bt_status,
                           checked ? "Wi-Fi on: network radio available."
                                   : "Wi-Fi off: radio freed for Bluetooth A2DP music.");
@@ -3256,20 +3335,7 @@ void buildBt()
     lv_obj_set_style_bg_color(s_sw_bt, lv_color_hex(kColorText), LV_PART_KNOB);
     lv_obj_add_event_cb(s_sw_bt, btEnableEvent, LV_EVENT_VALUE_CHANGED, nullptr);
 
-    // Master Wi-Fi switch, same row. Off = free the radio for Bluetooth A2DP
-    // music, at the cost of the network radio-voice link. Defaults ON.
-    fieldLabel(box, 400, 6, "Wi-Fi radio");
-    s_sw_wifi = lv_switch_create(box);
-    lv_obj_set_pos(s_sw_wifi, 646, 0);
-    lv_obj_set_size(s_sw_wifi, 64, 34);
-    if (cfg == nullptr || cfg->wifi_enabled) {
-        lv_obj_add_state(s_sw_wifi, LV_STATE_CHECKED);
-    }
-    lv_obj_set_style_bg_color(s_sw_wifi, lv_color_hex(kColorDim), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_sw_wifi, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_sw_wifi, lv_color_hex(kColorText), LV_PART_KNOB);
-    lv_obj_add_event_cb(s_sw_wifi, wifiEnableEvent, LV_EVENT_VALUE_CHANGED, nullptr);
-
+    // The master Wi-Fi radio switch lives on the WiFi settings page.
     fieldLabel(box, 0, 58, "Headsets: tap to connect, long-press a saved one to delete");
     s_list_bt = lv_list_create(box);
     lv_obj_set_pos(s_list_bt, 0, 82);
@@ -3523,12 +3589,41 @@ void audioSwitchEvent(lv_event_t *event)
             }
             s_cfg_gen_seen = CONFIG_NOTIFY_Generation(); // own change
             return;
+        case AudioControl::EspNowRx:
+            // Persists immediately; RX is independent of the TX enable.
+            ESPNOW_LINK_SetRxEnabled(checked);
+            formStatus(checked ? "ESP-NOW receive on." : "ESP-NOW receive muted.", kColorGood);
+            s_cfg_gen_seen = CONFIG_NOTIFY_Generation(); // own change
+            return;
+        case AudioControl::EspNowOpus:
+            // ESP-NOW TX codec, independent of the NRL codec. Opus pre-allocates
+            // its codecs; on RAM shortfall it rolls back to G.711 -- revert the
+            // switch so it shows truth.
+            if (ESPNOW_LINK_SetTxCodec(checked ? 1u : 0u)) {
+                formStatus(checked ? "ESP-NOW TX: Opus 16k wideband."
+                                   : "ESP-NOW TX: G.711 8k.", kColorGood);
+            } else {
+                if (obj != nullptr) {
+                    lv_obj_remove_state(obj, LV_STATE_CHECKED);
+                }
+                formStatus("Opus enable failed (out of memory); staying on G.711.", kColorBad);
+            }
+            s_cfg_gen_seen = CONFIG_NOTIFY_Generation(); // own change
+            return;
         case AudioControl::OpusCodec:
             // Applies + persists immediately (bridge NVS); RX auto-detects
-            // both codecs so nothing else needs to change.
-            NRLAudioBridge_SetVoiceCodec(checked ? 1u : 0u);
-            formStatus(checked ? "TX voice: Opus 16k wideband (type 8)."
-                               : "TX voice: G.711 8k (type 1).", kColorGood);
+            // both codecs so nothing else needs to change. Switching to Opus
+            // pre-allocates its codecs; on RAM shortfall it rolls back to
+            // G.711 -- revert the switch so it shows truth.
+            if (NRLAudioBridge_SetVoiceCodec(checked ? 1u : 0u)) {
+                formStatus(checked ? "TX voice: Opus 16k wideband (type 8)."
+                                   : "TX voice: G.711 8k (type 1).", kColorGood);
+            } else {
+                if (obj != nullptr) {
+                    lv_obj_remove_state(obj, LV_STATE_CHECKED);
+                }
+                formStatus("Opus enable failed (out of memory); staying on G.711.", kColorBad);
+            }
             return;
         default:
             break;
@@ -3630,11 +3725,19 @@ void refreshWifiBadge()
     uint32_t color = kColorSub;
     if (nrlWifiStaConnected()) {
         wifi_ap_record_t ap = {};
-        const int rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : 0;
-        snprintf(text, sizeof(text), LV_SYMBOL_WIFI " %ddB", rssi);
+        const bool have_ap = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+        const int rssi = have_ap ? ap.rssi : 0;
+        // Bare channel number after the RSSI (matches gezipai); shown because
+        // ESP-NOW peers must share the WiFi channel.
+        snprintf(text, sizeof(text), LV_SYMBOL_WIFI " %ddB %u",
+                 rssi, have_ap ? static_cast<unsigned>(ap.primary) : 0u);
         color = (rssi >= -65) ? kColorGood : ((rssi >= -78) ? kColorWarn : kColorBad);
     } else {
-        snprintf(text, sizeof(text), LV_SYMBOL_WIFI " AP");
+        uint8_t channel = 0;
+        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+        (void)esp_wifi_get_channel(&channel, &second);
+        snprintf(text, sizeof(text), LV_SYMBOL_WIFI " AP %u",
+                 static_cast<unsigned>(channel));
         color = kColorWarn;
     }
     if (setLabel(s_lbl_wifi, s_shown_wifi, sizeof(s_shown_wifi), text)) {
@@ -3766,6 +3869,12 @@ void refreshHome()
         ESPNOW_LINK_GetLastPeer(espnow_peer, sizeof(espnow_peer));
     }
 
+    // TX-codec tags on the PTT buttons: each link has its own codec switch.
+    setLabel(s_lbl_ptt_codec, s_shown_ptt_codec, sizeof(s_shown_ptt_codec),
+             (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
+    setLabel(s_lbl_eptt_codec, s_shown_eptt_codec, sizeof(s_shown_eptt_codec),
+             (ESPNOW_LINK_GetTxCodec() == 1u) ? "OPUS" : "G711");
+
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
     // Main panel shows only the remote caller (NRL stream first, else the
     // ESP-NOW peer). Local station lives in the top bar.
@@ -3820,10 +3929,14 @@ void refreshHome()
     }
     setLabelColor(s_lbl_callsign, s_clr_callsign, call_color);
 
-    // Source audio codec of the incoming NRL stream (blank unless receiving).
-    const char *rx_codec = (has_caller)
-                               ? (NRLAudioBridge_GetRxCodec() == 1u ? "OPUS" : "G.711")
-                               : "";
+    // Source audio codec of the incoming stream (blank unless receiving): the
+    // NRL network caller takes precedence, else the off-grid ESP-NOW peer.
+    const char *rx_codec = "";
+    if (has_caller) {
+        rx_codec = (NRLAudioBridge_GetRxCodec() == 1u) ? "OPUS" : "G.711";
+    } else if (has_espnow_caller) {
+        rx_codec = (ESPNOW_LINK_GetRxCodec() == 1u) ? "OPUS" : "G.711";
+    }
     setLabel(s_lbl_rx_codec, s_shown_rx_codec, sizeof(s_shown_rx_codec), rx_codec);
 
     char ip[96];

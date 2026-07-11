@@ -267,6 +267,9 @@ std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *
     replaceToken(html, "{{PTT_TIMEOUT}}", fromU32(config->ptt_timeout_s));
     replaceToken(html, "{{VOICE_PAYLOAD_BYTES}}", fromU32(config->voice_payload_bytes));
     replaceToken(html, "{{TAIL_SUPPRESS_MS}}", fromU32(config->tail_suppress_ms));
+    const uint8_t nrl_codec = NRLAudioBridge_GetVoiceCodec();
+    replaceToken(html, "{{CODEC_G711_SELECTED}}", nrl_codec == 0u ? " selected" : "");
+    replaceToken(html, "{{CODEC_OPUS_SELECTED}}", nrl_codec == 1u ? " selected" : "");
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
     std::string battery_section = std::string(kWifiConfigPortalBatterySectionTemplate);
     replaceToken(battery_section, "{{BATT_RAW_MV}}", fromI32(Display_GetBatteryRawMv()));
@@ -407,6 +410,10 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
     replaceToken(html, "{{CODEC_G711_SELECTED}}", codec == 0u ? " selected" : "");
     replaceToken(html, "{{CODEC_OPUS_SELECTED}}", codec == 1u ? " selected" : "");
     replaceToken(html, "{{ESPNOW_CHECKED}}", checkedAttr(ESPNOW_LINK_IsEnabled()));
+    replaceToken(html, "{{ESPNOW_RX_CHECKED}}", checkedAttr(ESPNOW_LINK_IsRxEnabled()));
+    const uint8_t espnow_codec = ESPNOW_LINK_GetTxCodec();
+    replaceToken(html, "{{ESPNOW_CODEC_G711_SELECTED}}", espnow_codec == 0u ? " selected" : "");
+    replaceToken(html, "{{ESPNOW_CODEC_OPUS_SELECTED}}", espnow_codec == 1u ? " selected" : "");
     const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
     replaceToken(html, "{{PTT_MODE_NRL_SELECTED}}", ptt_mode == 0u ? " selected" : "");
     replaceToken(html, "{{PTT_MODE_ESPNOW_SELECTED}}", ptt_mode == 1u ? " selected" : "");
@@ -480,21 +487,29 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
         "<option value=\"0\"{{PTT_MODE_NRL_SELECTED}} data-i18n=\"pttModeNrl\">NRL network PTT</option>"
         "<option value=\"1\"{{PTT_MODE_ESPNOW_SELECTED}} data-i18n=\"pttModeEspnow\">ESP-NOW PTT</option>"
         "</select></form>"
-        "<form class=\"item-form\" method=\"post\" action=\"/save_media\"><label data-i18n=\"voiceCodec\">NRL Voice Codec (TX)</label>"
-        "<select name=\"voice_codec\" onchange=\"submitSwitch(this)\">"
-        "<option value=\"0\"{{CODEC_G711_SELECTED}} data-i18n=\"codecG711\">G.711 8 kHz (compatible)</option>"
-        "<option value=\"1\"{{CODEC_OPUS_SELECTED}} data-i18n=\"codecOpus\">Opus 16 kHz wideband</option>"
-        "</select></form>"
         "</div></section>"
         "<section class=\"panel\"><div class=\"section-head\"><h2 data-i18n=\"espnowLabel\">ESP-NOW Intercom</h2></div>"
         "<div class=\"grid\"><form class=\"item-form\" method=\"post\" action=\"/save_media\">"
         "<label data-i18n=\"espnowLabel\">ESP-NOW Intercom</label><input type=\"hidden\" name=\"espnow_present\" value=\"1\">"
         "<label class=\"hint\"><input type=\"checkbox\" name=\"espnow_enabled\" value=\"1\" onchange=\"submitSwitch(this)\" {{ESPNOW_CHECKED}}>"
-        "<span data-i18n=\"espnowText\">Off-grid voice link between nearby devices</span></label></form></div></section>";
+        "<span data-i18n=\"espnowText\">Off-grid voice link between nearby devices</span></label></form>"
+        "<form class=\"item-form\" method=\"post\" action=\"/save_media\">"
+        "<label data-i18n=\"espnowRxLabel\">ESP-NOW Receive</label><input type=\"hidden\" name=\"espnow_rx_present\" value=\"1\">"
+        "<label class=\"hint\"><input type=\"checkbox\" name=\"espnow_rx\" value=\"1\" onchange=\"submitSwitch(this)\" {{ESPNOW_RX_CHECKED}}>"
+        "<span data-i18n=\"espnowRxText\">Hear intercom voice even while TX stays off</span></label></form>"
+        "<form class=\"item-form\" method=\"post\" action=\"/save_media\"><label data-i18n=\"espnowCodec\">ESP-NOW Voice Codec (TX)</label>"
+        "<select name=\"espnow_codec\" onchange=\"submitSwitch(this)\">"
+        "<option value=\"0\"{{ESPNOW_CODEC_G711_SELECTED}} data-i18n=\"codecG711\">G.711 8 kHz (compatible)</option>"
+        "<option value=\"1\"{{ESPNOW_CODEC_OPUS_SELECTED}} data-i18n=\"codecOpus\">Opus 16 kHz wideband</option>"
+        "</select></form></div></section>";
     const uint8_t codec = NRLAudioBridge_GetVoiceCodec();
     replaceToken(html, "{{CODEC_G711_SELECTED}}", codec == 0u ? " selected" : "");
     replaceToken(html, "{{CODEC_OPUS_SELECTED}}", codec == 1u ? " selected" : "");
     replaceToken(html, "{{ESPNOW_CHECKED}}", checkedAttr(ESPNOW_LINK_IsEnabled()));
+    replaceToken(html, "{{ESPNOW_RX_CHECKED}}", checkedAttr(ESPNOW_LINK_IsRxEnabled()));
+    const uint8_t espnow_codec = ESPNOW_LINK_GetTxCodec();
+    replaceToken(html, "{{ESPNOW_CODEC_G711_SELECTED}}", espnow_codec == 0u ? " selected" : "");
+    replaceToken(html, "{{ESPNOW_CODEC_OPUS_SELECTED}}", espnow_codec == 1u ? " selected" : "");
     const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
     replaceToken(html, "{{PTT_MODE_NRL_SELECTED}}", ptt_mode == 0u ? " selected" : "");
     replaceToken(html, "{{PTT_MODE_ESPNOW_SELECTED}}", ptt_mode == 1u ? " selected" : "");

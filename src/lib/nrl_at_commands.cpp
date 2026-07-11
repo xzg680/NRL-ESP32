@@ -16,6 +16,7 @@
 #include "services/music_playlist.h"
 #include "services/radio_favorites.h"
 #include "services/nanny.h"
+#include "services/ota_service.h"
 #include "services/storage_service.h"
 #include "driver/sci_serial.h"
 
@@ -114,7 +115,7 @@ static bool appendKeyValueLine(uint8_t *payload,
                                const char *key,
                                const char *value)
 {
-    char line[160];
+    char line[320];
     snprintf(line, sizeof(line), "AT+%s=%s", key, value);
     return appendReplyLine(payload, capacity, used, line);
 }
@@ -232,6 +233,10 @@ static bool appendSupportedAtList(uint8_t *payload,
                               (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711") &&
            appendKeyValueLine(payload, capacity, used, "ESPNOW",
                               ESPNOW_LINK_IsEnabled() ? "ON" : "OFF") &&
+           appendKeyValueLine(payload, capacity, used, "ESPNOW_RX",
+                              ESPNOW_LINK_IsRxEnabled() ? "ON" : "OFF") &&
+           appendKeyValueLine(payload, capacity, used, "ESPNOW_CODEC",
+                              (ESPNOW_LINK_GetTxCodec() == 1u) ? "OPUS" : "G711") &&
            appendKeyValueLine(payload, capacity, used, "PTT_MODE", ptt_mode) &&
 #if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
            appendKeyValueLine(payload, capacity, used, "AEC",
@@ -479,6 +484,100 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     const bool is_query = stringEqualsIgnoreCase(command.value, "?");
     const bool allow_wifi_config_write = source == NRL_AT_SOURCE_SERIAL;
+    const bool allow_ota_write = source == NRL_AT_SOURCE_SERIAL;
+
+    // Remote OTA commands are serial-only: an NRL network AT packet must not
+    // be able to replace the server/token or reboot a radio by installing a
+    // new image. The board's local Wi-Fi portal provides the browser path.
+    if (stringEqualsIgnoreCase(command.command, "OTAURL")) {
+        if (is_query) {
+            NrlOtaStatus status = {};
+            OtaService_GetStatus(&status);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "OTAURL", status.configured ? status.server_url : "OFF");
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "OTALATEST", status.latest_version[0] != '\0' ? status.latest_version : "-");
+            return;
+        }
+        if (!allow_ota_write) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "OTAURL");
+            return;
+        }
+        char value[sizeof(command.value)] = {};
+        snprintf(value, sizeof(value), "%s", command.value);
+        char *token = strchr(value, ',');
+        if (token != nullptr) {
+            *token++ = '\0';
+        }
+        const bool clear = stringEqualsIgnoreCase(value, "OFF");
+        if ((!clear && value[0] == '\0') ||
+            !OtaService_SetConfig(clear ? "" : value, clear ? "" : (token != nullptr ? token : ""))) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "OTAURL");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "OTAURL", clear ? "OFF" : value);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "OTACHECK")) {
+        if (is_query) {
+            NrlOtaStatus status = {};
+            OtaService_GetStatus(&status);
+            const char *state = status.updating ? "UPDATING" : status.checking ? "CHECKING" :
+                                status.last_error[0] != '\0' ? status.last_error : "IDLE";
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "OTACHECK", state);
+            return;
+        }
+        if (!allow_ota_write || !OtaService_CheckNow()) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "OTACHECK");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "OTACHECK", "QUEUED");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "OTALIST")) {
+        if (!is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "OTALIST");
+            return;
+        }
+        NrlOtaStatus status = {};
+        OtaService_GetStatus(&status);
+        appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "OTACNT", static_cast<unsigned>(status.release_count));
+        for (size_t i = 0; i < status.release_count; ++i) {
+            char key[16] = {};
+            snprintf(key, sizeof(key), "OTA%u", static_cast<unsigned>(i));
+            if (!appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                                    key, status.releases[i].version)) {
+                break;
+            }
+        }
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "OTA")) {
+        if (is_query) {
+            NrlOtaStatus status = {};
+            OtaService_GetStatus(&status);
+            const char *state = status.updating ? "UPDATING" : status.checking ? "CHECKING" :
+                                status.latest_version[0] != '\0' ? status.latest_version : "NO_RELEASE";
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "OTA", state);
+            return;
+        }
+        const bool ok = allow_ota_write &&
+            (stringEqualsIgnoreCase(command.value, "LATEST")
+                ? OtaService_CheckAndUpdateLatest()
+                : OtaService_UpdateVersion(command.value));
+        if (!ok) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "OTA");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "OTA", stringEqualsIgnoreCase(command.value, "LATEST") ? "CHECKING" : "QUEUED");
+        return;
+    }
 
     if (stringEqualsIgnoreCase(command.command, "WIFI_SSID")) {
         if (is_query) {
@@ -1130,7 +1229,12 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "CODEC");
             return;
         }
-        NRLAudioBridge_SetVoiceCodec(codec);
+        if (!NRLAudioBridge_SetVoiceCodec(codec)) {
+            // Opus pre-allocation failed; the codec stayed on G.711.
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", "CODEC_NOMEM");
+            return;
+        }
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "CODEC",
                            (codec == 1u) ? "OPUS" : "G711");
         return;
@@ -1157,6 +1261,47 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         }
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ESPNOW",
                            enabled ? "ON" : "OFF");
+        return;
+    }
+
+    // Independent ESP-NOW receive switch (persisted, defaults ON): incoming
+    // intercom voice is heard whenever this is on, regardless of AT+ESPNOW.
+    if (stringEqualsIgnoreCase(command.command, "ESPNOW_RX")) {
+        if (!is_query) {
+            bool enabled = false;
+            if (!parseBoolValue(command.value, &enabled)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "ESPNOW_RX");
+                return;
+            }
+            ESPNOW_LINK_SetRxEnabled(enabled);
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ESPNOW_RX",
+                           ESPNOW_LINK_IsRxEnabled() ? "ON" : "OFF");
+        return;
+    }
+
+    // ESP-NOW TX voice codec, independent of the NRL AT+CODEC:
+    // AT+ESPNOW_CODEC=G711|OPUS|?. RX always auto-detects both.
+    if (stringEqualsIgnoreCase(command.command, "ESPNOW_CODEC")) {
+        if (!is_query) {
+            uint8_t codec = 0xFFu;
+            if (stringEqualsIgnoreCase(command.value, "G711")) {
+                codec = 0u;
+            } else if (stringEqualsIgnoreCase(command.value, "OPUS")) {
+                codec = 1u;
+            }
+            if (codec > 1u) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "ESPNOW_CODEC");
+                return;
+            }
+            if (!ESPNOW_LINK_SetTxCodec(codec)) {
+                // Opus pre-allocation failed; the codec stayed on G.711.
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "CODEC_NOMEM");
+                return;
+            }
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ESPNOW_CODEC",
+                           (ESPNOW_LINK_GetTxCodec() == 1u) ? "OPUS" : "G711");
         return;
     }
 

@@ -37,6 +37,19 @@
     <p class="notice" data-i18n="otaNotice">Select a firmware.bin file from support or from a trusted release. The device will reboot after a successful update.</p>
 
     <section class="panel">
+      <h2>Remote OTA / 远程升级</h2>
+      <p class="notice">HTTPS OTA server: the device reports its board, firmware, NRL callsign and SSID periodically. It only lists firmware built for this board.</p>
+      <form id="remote-ota-config">
+        <label>OTA Server URL (HTTPS)<input id="ota-server-url" name="server_url" type="url" placeholder="https://ota.example.com" maxlength="191"></label>
+        <label>Device access token (optional)<input id="ota-device-token" name="device_token" type="password" maxlength="95" autocomplete="new-password"></label>
+        <div class="actions"><button type="submit">Save OTA server / 保存</button><button id="ota-check" type="button">Check releases / 检查版本</button></div>
+      </form>
+      <p id="remote-ota-status" class="prog-status">Not configured / 未配置</p>
+      <label>Available versions / 可用版本<select id="ota-release-list"><option value="">Check releases first</option></select></label>
+      <div class="actions"><button id="ota-install" type="button">Install selected version / 升级或回退</button></div>
+    </section>
+
+    <section class="panel">
       <h2 data-i18n="otaTitle">WiFi Firmware Update</h2>
       <form id="ota-form" enctype="multipart/form-data">
         <input id="ota-file" type="file" name="firmware" accept=".bin,application/octet-stream" required>
