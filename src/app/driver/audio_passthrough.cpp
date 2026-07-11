@@ -6,6 +6,7 @@
 #include <driver/i2s_common.h>
 #include <driver/i2s_std.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -721,15 +722,27 @@ extern "C" bool AUDIO_StartPassthrough(void) {
     const bool afe_has_aec = false;
     const bool runtime_aec = false;
 #endif
-    const bool afe_has_ai_noise = true;
+    // Load the NSNET2 noise-suppression model only when AI noise is enabled in
+    // config (it defaults off). esp-sr needs a ~50 KB *contiguous internal* DRAM
+    // block for the model's working set (its flash reader guards access with an
+    // internal-RAM mutex), and MORE_PSRAM can't relocate that. Once WiFi/BT/
+    // ESP-NOW/LVGL are up the largest free internal block is well under that, so
+    // loading it resident asserts at boot. Runtime enabling goes through
+    // AEC_Reconfigure. The AEC-only path (below) fits and stays resident.
+    const bool afe_has_ai_noise = runtime_ai_noise;
+    ESP_LOGI(TAG, "AEC init: internal DRAM free=%u largest=%u (aec=%u ai_noise=%u)",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+             afe_has_aec ? 1u : 0u, afe_has_ai_noise ? 1u : 0u);
     AEC_SetOutputCallback(audio_aec_output, nullptr);
     if (AEC_Init(afe_has_aec, afe_has_ai_noise)) {
         AEC_SetRuntimeEnabled(runtime_aec, runtime_ai_noise);
-        ESP_LOGI(TAG, "esp-sr resident: aec_cap=%u ai_cap=%u route_aec=%u route_ai=%u",
+        ESP_LOGI(TAG, "esp-sr resident: aec_cap=%u ai_cap=%u route_aec=%u route_ai=%u (DRAM free=%u)",
                  afe_has_aec ? 1u : 0u,
                  afe_has_ai_noise ? 1u : 0u,
                  runtime_aec ? 1u : 0u,
-                 runtime_ai_noise ? 1u : 0u);
+                 runtime_ai_noise ? 1u : 0u,
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
     } else {
         ESP_LOGI(TAG, "esp-sr resident init failed -- mic uplink falls back to raw");
     }
@@ -754,9 +767,13 @@ extern "C" bool AUDIO_StartPassthrough(void) {
     // time, which shows up as a "2-packet pair every ~100 ms" pattern on
     // the wire. Audio task must preempt the polls, not share with them.
     // Well below WiFi (23) / TCPIP (~18) so we don't starve the network.
+    // 32 KB stack (PSRAM, so the size is nearly free): the router sinks run
+    // inline on this task, and the Opus TX encode (espnow/uplink sink ->
+    // OPUS_VOICE_EncProcess, libopus complexity 10) overflows an 8 KB stack
+    // the moment the first frame is encoded.
     if (xTaskCreatePinnedToCoreWithCaps(audio_passthrough_task,
                                         "audio_passthrough",
-                                        8192,
+                                        32768,
                                         nullptr,
                                         10,
                                         &s_passthrough_task,

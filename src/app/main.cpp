@@ -1,5 +1,6 @@
 #include <esp_event.h>
 #include <esp_flash.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_psram.h>
@@ -15,6 +16,7 @@
 #include "../services/music_player.h"
 #include "../services/music_playlist.h"
 #include "../services/nanny.h"
+#include "../services/ota_service.h"
 #include "../services/radio_favorites.h"
 #include "../services/storage_service.h"
 #include "../lib/nrl_audio_bridge.h"
@@ -35,6 +37,16 @@ namespace {
 
 constexpr unsigned long kPollIntervalMs = 20UL;
 const char *TAG = "APP";
+
+// Boot-time internal-DRAM ruler: logs free/largest-block after each init step
+// so a regression that starves the audio/AEC init (which needs contiguous
+// internal RAM late in boot) can be pinned to the step that ate it.
+static void logDramMark(const char *step)
+{
+    ESP_LOGI(TAG, "[DRAM] after %-14s free=%6u largest=%6u", step,
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+}
 
 static void initSystem()
 {
@@ -73,10 +85,12 @@ static void initSystem()
 
 static void initApp()
 {
+    logDramMark("boot");
     EXTERNAL_RADIO_Init();
     if (!nrlEthernetInit()) {
         ESP_LOGE(TAG, "Ethernet initialization failed; Wi-Fi fallback remains available.");
     }
+    logDramMark("ethernet");
 #if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
         ES8311_ApplyAudioConfig(config->mic_volume,
@@ -138,14 +152,32 @@ static void initApp()
     if (STORAGE_SdMounted()) {
         PLAYLIST_Scan();
     }
+    logDramMark("storage+music");
 
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
     // Bring the LCD up early so it shows a status frame while WiFi/BLE start.
     Display_Init();
+    logDramMark("display");
 #endif
 
     WifiConfigPortal_Init();
-    BLEConfig_Init();
+    OtaService_Init();
+    logDramMark("portal+ota");
+    // BLE provisioning is only needed until WiFi credentials exist: its NimBLE
+    // host + controller cost ~66 KB of internal DRAM, which on the S3 display
+    // boards is exactly what the audio/AEC init later in boot needs. Configured
+    // devices boot WiFi-only; if the STA stays down, BLEConfig_Poll()'s
+    // fallback brings BLE provisioning back up automatically.
+    {
+        const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+        const bool wifi_configured = (config != nullptr) && config->wifi_ssid[0] != '\0';
+        if (wifi_configured) {
+            ESP_LOGI(TAG, "WiFi configured; skipping boot BLE provisioning (Poll restores it if STA stays down)");
+        } else {
+            BLEConfig_Init();
+        }
+    }
+    logDramMark("ble_config");
 
     // Bring the audio bridge up BEFORE ES8311_Init. ES8311_Init internally
     // calls AEC_Init which mallocs ~50 KB (WebRtcNs + AFE state) from the
@@ -158,6 +190,7 @@ static void initApp()
     if (!NRLAudioBridge_Init()) {
         ESP_LOGE(TAG, "NRL audio bridge init failed.");
     }
+    logDramMark("audio_bridge");
 
     // Bluetooth headset (HFP) voice link. Brought up only if enabled in config;
     // on non-S31 boards these are no-ops.
@@ -165,16 +198,19 @@ static void initApp()
     if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
         NRL_BtHfp_SetEnabled(config->bt_enabled);
     }
+    logDramMark("bt_hfp");
 
     // ESP-NOW off-grid voice link: restores its persisted enable state,
     // waiting for the bridge task to start WiFi if needed.
     ESPNOW_LINK_Init();
+    logDramMark("espnow");
 
     // xiaozhi AI assistant: reconnects in the background when configured.
     AI_Init();
 
     // Video call: passive RX buffering; camera TX starts on demand.
     VIDEO_Init();
+    logDramMark("ai+video");
 
 #if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (ES8311_Init()) {

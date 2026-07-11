@@ -309,7 +309,9 @@ static void load_favorites_from_sd()
         if (line[0] == '\0' || strlen(line) >= kMaxPathLen) {
             continue;
         }
-        snprintf(s_favs[s_fav_count], kMaxPathLen, "%s", line);
+        // Precision bound keeps GCC's -Werror=format-truncation happy: line is
+        // sized kMaxPathLen+8, but the guard above already ensures it fits.
+        snprintf(s_favs[s_fav_count], kMaxPathLen, "%.*s", static_cast<int>(kMaxPathLen - 1), line);
         ++s_fav_count;
     }
     fclose(file);

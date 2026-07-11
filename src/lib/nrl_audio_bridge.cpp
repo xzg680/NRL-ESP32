@@ -549,6 +549,34 @@ static void uplinkSinkWrite(const uint8_t source_id,
         return;
     }
 
+    // TX-side level heartbeat (1 Hz while the uplink gate is open): the NRL
+    // twin of the ESPNOW tx log, so mic levels reaching the two sinks can be
+    // compared A/B on the same board with one firmware.
+    if (uplinkGateOpen()) {
+        static uint32_t s_ul_log_ms = 0u;
+        static uint32_t s_ul_samples = 0u;
+        static int32_t s_ul_peak = 0;
+        for (size_t i = 0; i < sample_count; ++i) {
+            const int32_t mag = (samples[i] < 0) ? -static_cast<int32_t>(samples[i])
+                                                 : static_cast<int32_t>(samples[i]);
+            if (mag > s_ul_peak) {
+                s_ul_peak = mag;
+            }
+        }
+        s_ul_samples += sample_count;
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        if (now - s_ul_log_ms >= 1000u) {
+            ESP_LOGI(TAG, "[NRL] tx src=%u samples=%lu peak=%ld%s",
+                     static_cast<unsigned>(source_id),
+                     static_cast<unsigned long>(s_ul_samples),
+                     static_cast<long>(s_ul_peak),
+                     (s_ul_peak < 50) ? "  <-- mic/capture is SILENT" : "");
+            s_ul_log_ms = now;
+            s_ul_samples = 0u;
+            s_ul_peak = 0;
+        }
+    }
+
     if (s_voice_codec == 1u) {
         sendOpusVoice16k(samples, sample_count);
         return;
@@ -818,6 +846,11 @@ static void stopDownlinkPlayback(void)
     s_voice_decode_sample_total = 0u;
     s_voice_decode_chunks = 0u;
     s_last_voice_payload_size = 0u;
+    // Clear the caller identity with the session: playback can be re-activated
+    // by ESP-NOW intercom RX (see bridgeTask), and GetRemoteCaller() must not
+    // resurrect the previous NRL caller's name on the LCD in that case.
+    s_voice_callsign[0] = '\0';
+    s_voice_ssid = 0u;
     STATUS_IO_SetPttActive(false);
 
     // Arm the tail-audio suppression window now that downlink playback (the
@@ -838,6 +871,13 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
     // length is variable, so it must not be range-checked here. The decode
     // loop below chunks whatever length arrived.
     if (payload == nullptr) {
+        return;
+    }
+
+    // Priority: ESP-NOW intercom > NRL voice > music (the router does not
+    // mix -- see audio_router.h). While an ESP-NOW stream is live it owns the
+    // speaker; drop NRL voice frames so the two don't interleave into garble.
+    if (ESPNOW_LINK_IsReceiving()) {
         return;
     }
 
@@ -901,6 +941,11 @@ static void handleIncomingVoicePayload(const uint8_t *payload, const size_t payl
 static void handleIncomingOpusPayload(const uint8_t *payload, const size_t payload_size)
 {
     if (payload == nullptr || payload_size == 0u) {
+        return;
+    }
+
+    // Priority: ESP-NOW intercom > NRL voice > music (see the G.711 handler).
+    if (ESPNOW_LINK_IsReceiving()) {
         return;
     }
 
@@ -1166,6 +1211,21 @@ static void bridgeTask(void *)
         }
 
         const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        // ESP-NOW intercom RX rides the same speaker playback lifecycle as the
+        // NRL downlink: startDownlinkPlayback() takes audio focus and switches
+        // the ES8311 into receive/speaker mode. Without this, decoded ESP-NOW
+        // frames queue into a DAC that was never switched to playback -- the
+        // router route is enabled but nothing is audible (gezipai/bh4tdv).
+        if (ESPNOW_LINK_IsReceiving()) {
+            startDownlinkPlayback();
+            s_last_rx_packet_ms = now;
+            // Preemption owns the display too: NRL frames are dropped while the
+            // intercom is live, so show the ESP-NOW peer, not a stale caller.
+            if (s_voice_callsign[0] != '\0') {
+                s_voice_callsign[0] = '\0';
+                s_voice_ssid = 0u;
+            }
+        }
         if (s_downlink_playback_active &&
             (now - s_last_rx_packet_ms) > currentRxPacketTimeoutMs()) {
             stopDownlinkPlayback();
@@ -1211,10 +1271,43 @@ void NRLAudioBridge_SetVideoRxHandler(NrlVideoRxHandler_t handler)
     s_video_rx_handler = handler;
 }
 
-void NRLAudioBridge_SetVoiceCodec(uint8_t codec)
+// Pre-open the bridge's own Opus encoder+decoder (idempotent). Returns false
+// when either allocation fails.
+static bool bridgePrewarmOpus(void)
+{
+    if (s_opus_enc == nullptr) {
+        s_opus_enc = OPUS_VOICE_EncOpen(kOpusFrameMs);
+    }
+    if (s_opus_dec == nullptr) {
+        s_opus_dec = OPUS_VOICE_DecOpen(kOpusFrameMs);
+    }
+    if (s_opus_enc == nullptr || s_opus_dec == nullptr) {
+        ESP_LOGW(TAG, "[NRL] opus prewarm failed (enc=%d dec=%d)",
+                 s_opus_enc != nullptr, s_opus_dec != nullptr);
+        return false;
+    }
+    return true;
+}
+
+bool NRLAudioBridge_SetVoiceCodec(uint8_t codec)
 {
     if (codec > 1u) {
-        return;
+        return false;
+    }
+    if (codec == 1u && !bridgePrewarmOpus()) {
+        // Allocate everything the NRL Opus path needs up front so a RAM
+        // shortfall fails the switch here instead of silently muting audio
+        // mid-conversation. Roll back: stay on G.711 and free the TX encoder
+        // (unused while the codec is G.711, so this cannot race the audio
+        // task); the decoder is kept -- RX follows the remote side's codec.
+        // The ESP-NOW intercom codec is a separate switch (ESPNOW_LINK_SetTxCodec).
+        s_voice_codec = 0u;
+        if (s_opus_enc != nullptr) {
+            OPUS_VOICE_EncClose(s_opus_enc);
+            s_opus_enc = nullptr;
+        }
+        ESP_LOGW(TAG, "[NRL] opus switch rolled back to G.711 (allocation failed)");
+        return false;
     }
     s_voice_codec = codec;
     s_opus_tx_fill = 0u;
@@ -1224,6 +1317,7 @@ void NRLAudioBridge_SetVoiceCodec(uint8_t codec)
         (void)nvs_commit(nvs);
         nvs_close(nvs);
     }
+    return true;
 }
 
 uint8_t NRLAudioBridge_GetVoiceCodec(void)
@@ -1263,6 +1357,9 @@ bool NRLAudioBridge_Init(void)
     NRL_G711_Init();
 
     // Restore the persisted TX voice codec (0 = G.711 type 1, 1 = Opus type 8).
+    // Opus pre-allocates its encoders/decoders here; if boot-time RAM cannot
+    // hold them, run this session as G.711 (NVS keeps the user's choice, so a
+    // later boot or manual re-switch can succeed).
     {
         nvs_handle_t nvs;
         uint8_t codec = 0u;
@@ -1270,7 +1367,13 @@ bool NRLAudioBridge_Init(void)
             (void)nvs_get_u8(nvs, "codec", &codec);
             nvs_close(nvs);
         }
-        s_voice_codec = (codec <= 1u) ? codec : 0u;
+        codec = (codec <= 1u) ? codec : 0u;
+        if (codec == 1u && !bridgePrewarmOpus()) {
+            ESP_LOGW(TAG, "[NRL] persisted Opus codec needs RAM that isn't available; "
+                          "falling back to G.711 for this session");
+            codec = 0u;
+        }
+        s_voice_codec = codec;
     }
 
     if (s_udp_mutex == nullptr) {
@@ -1298,13 +1401,15 @@ bool NRLAudioBridge_Init(void)
     // esp_opus_dec_decode / libopus) runs inline on this task and its peak
     // stack, on top of the UDP recv + packet-parse baseline, overflows an
     // 8 KB stack (stack-protection fault on the first received Opus frame).
-    // Stack stays in internal RAM. Moving it to PSRAM (with auto-suspend it is
-    // safe from the cache-disable angle) was measured to be counterproductive:
-    // freeing this 16 KB internal region let other allocations scatter into it
-    // and *fragmented* the heap, dropping the largest contiguous internal block
-    // from ~32 KB to ~10 KB -- and the Classic BT controller's pool needs a large
-    // *contiguous* block, so BT then couldn't start at all. Total free is not the
-    // constraint here; contiguity is.
+    //
+    // Stack MUST be internal RAM: this task persists configuration (remote AT
+    // commands, volume saves -> NVS/EEPROM), and flash writes disable the
+    // cache -- a task whose stack lives in PSRAM (which sits behind that very
+    // cache) trips the esp_task_stack_is_sane_cache_disabled() assert the
+    // moment it touches flash. A PSRAM-stack experiment also fragmented the
+    // internal heap on the S31 boards, breaking the Classic BT controller's
+    // large contiguous pool. The S3 display boards can afford these 16 KB
+    // internal since BLE provisioning became boot-skipped (~66 KB reclaimed).
     if (xTaskCreatePinnedToCore(bridgeTask, "nrl_audio_bridge", 16384, nullptr,
                                 2, &s_bridge_task, 0) != pdPASS) {
         ESP_LOGI(TAG,"[NRL] failed to create bridge task");

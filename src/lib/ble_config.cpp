@@ -63,8 +63,11 @@ bool s_list_pending = false;   // cached-list dump requested
 // controller is up, coexist time-slices airtime and bunches voice packets.
 // We keep BLE up only while the WiFi STA is down (provisioning fallback) and
 // tear it down once the STA has been solidly connected for a grace period.
-constexpr uint32_t kBleStopAfterStaUpMs = 4000u;   // STA stable this long -> drop BLE
-constexpr uint32_t kBleStartAfterStaDownMs = 3000u; // STA down this long -> bring BLE back
+constexpr uint32_t kBleStopAfterStaUpMs = 4000u; // STA stable this long -> drop BLE
+// Longer than the 15 s WiFi connect timeout: configured devices skip BLE at
+// boot, and this grace keeps the fallback from flapping BLE up mid-connect on
+// every normal boot (or during a brief AP hiccup).
+constexpr uint32_t kBleStartAfterStaDownMs = 30000u; // STA down this long -> bring BLE back
 bool s_ble_auto_stopped = false;     // true once we tore BLE down due to WiFi
 uint32_t s_sta_up_since_ms = 0u;     // 0 = STA not currently up
 uint32_t s_sta_down_since_ms = 0u;   // 0 = STA not currently down
@@ -556,10 +559,17 @@ static void manageCoexistence(void)
         if (s_sta_down_since_ms == 0u) {
             s_sta_down_since_ms = now;
         }
-        if (s_ble_auto_stopped && !s_initialized &&
-            (now - s_sta_down_since_ms) >= kBleStartAfterStaDownMs) {
-            ESP_LOGI(TAG, "WiFi STA down, restarting BLE for fallback provisioning");
-            BLEConfig_Init();
+        // Fallback provisioning: covers both "BLE auto-stopped after WiFi came
+        // up" and "boot skipped BLE because WiFi credentials exist" (the boot
+        // path only starts BLE on unconfigured devices to keep its ~66 KB of
+        // internal DRAM available for the audio init). On failure (e.g. RAM
+        // pressure), restart the grace period instead of retrying every poll.
+        if (!s_initialized && (now - s_sta_down_since_ms) >= kBleStartAfterStaDownMs) {
+            ESP_LOGI(TAG, "WiFi STA down, starting BLE for fallback provisioning");
+            if (!BLEConfig_Init()) {
+                ESP_LOGW(TAG, "BLE fallback init failed; retrying after grace period");
+            }
+            s_sta_down_since_ms = now;
             s_ble_auto_stopped = false;
         }
     }

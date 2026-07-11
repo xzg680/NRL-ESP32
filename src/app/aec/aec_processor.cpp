@@ -10,6 +10,7 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/idf_additions.h>
 #include <freertos/task.h>
 #include <math.h>
 #include <model_path.h>
@@ -139,7 +140,7 @@ void aec_fetch_task(void *) {
         taskYIELD();
     }
     s_fetch_task = nullptr;
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr); // frees the PSRAM stack allocated at create
 }
 
 } // namespace
@@ -171,6 +172,12 @@ static bool afe_create_pipeline(bool enable_aec, bool enable_ai_noise) {
     // routing flag".
     cfg->ns_init = enable_ai_noise;
     cfg->afe_ns_mode = AFE_NS_MODE_NET;
+    // Push the bulk of the AFE/NSNET2 working set into PSRAM. Internal SRAM is
+    // scarce once WiFi/BT/ESP-NOW/LVGL are up; the default (more-internal)
+    // allocation of the ~50 KB NSNET2 model can exhaust it and make its
+    // FreeRTOS mutex create() return NULL -> boot assert. esp-sr still keeps the
+    // DMA/cache-critical pieces in internal RAM.
+    cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
     s_iface = esp_afe_handle_from_config(cfg);
     if (s_iface == nullptr) {
@@ -214,10 +221,15 @@ static bool afe_create_pipeline(bool enable_aec, bool enable_ai_noise) {
     memset(&s_down, 0, sizeof(s_down));
 
     s_running = true;
-    // 4 KB stack: measured peak use is <1 KB (uxTaskGetStackHighWaterMark), so 4 KB
-    // keeps ~4x margin while returning 4 KB of scarce internal RAM to the BT stack.
-    if (xTaskCreatePinnedToCore(aec_fetch_task, "aec_fetch", 4096, nullptr, 9,
-                                &s_fetch_task, 1) != pdPASS) {
+    // Stack in PSRAM (MALLOC_CAP_SPIRAM) like the passthrough task: with
+    // WiFi/BT/ESP-NOW up, internal SRAM is too fragmented for an internal-stack
+    // create ("fetch task create failed" -> AEC falls back to raw). The fetch
+    // task runs AFE fetch/DSP as a normal RTOS task (never with flash cache
+    // disabled), so a PSRAM stack is safe. 32 KB because this task delivers
+    // processed mic frames through the router sinks inline, which includes the
+    // Opus TX encode (libopus, deep stack) when the Opus codec is enabled.
+    if (xTaskCreatePinnedToCoreWithCaps(aec_fetch_task, "aec_fetch", 32768, nullptr, 9,
+                                        &s_fetch_task, 1, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "fetch task create failed");
         s_running = false;
         free(s_feed_buf);
@@ -263,7 +275,7 @@ static void afe_destroy_pipeline(void) {
     }
     if (s_fetch_task != nullptr) {
         ESP_LOGW(TAG, "fetch task didn't exit cleanly, forcing delete");
-        vTaskDelete(s_fetch_task);
+        vTaskDeleteWithCaps(s_fetch_task);
         s_fetch_task = nullptr;
     }
 

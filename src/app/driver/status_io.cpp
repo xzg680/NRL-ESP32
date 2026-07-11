@@ -7,6 +7,7 @@
 #include "external_radio.h"
 #include "es8311.h"
 #include "../../lib/nrl_bt_hfp.h"  // route the volume keys to a connected headset
+#include "../../services/ota_service.h"
 #endif
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
@@ -116,6 +117,9 @@ led_strip_handle_t s_ws2812 = nullptr;
 #endif
 bool s_volume_dirty = false;
 unsigned long s_volume_change_ms = 0UL;
+#if NRL_BOARD == NRL_BOARD_GEZIPAI
+bool s_ota_chord_active = false;
+#endif
 
 // PTT transmit state machine.
 bool s_tx_active = false;            // effective transmit gate (IsSqlActive)
@@ -381,6 +385,29 @@ static void pollVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
     }
 }
 
+// Gezipai has an LCD but no touch. Holding both physical volume keys is the
+// explicit, local confirmation for the "update to latest" action. The OTA
+// service first fetches a fresh manifest, so a stale on-screen notice cannot
+// cause installation of an old image.
+static void pollGezipaiOtaChord()
+{
+#if NRL_BOARD == NRL_BOARD_GEZIPAI
+    const bool chord = s_btn_vol_up.pressed && s_btn_vol_down.pressed;
+    if (chord && !s_ota_chord_active) {
+        s_ota_chord_active = true;
+        s_btn_vol_up_repeat.active = false;
+        s_btn_vol_down_repeat.active = false;
+        if (OtaService_CheckAndUpdateLatest()) {
+            ESP_LOGI(TAG, "VOL+ + VOL-: checking and installing latest OTA release");
+        } else {
+            ESP_LOGW(TAG, "VOL+ + VOL-: OTA server is not configured");
+        }
+    } else if (!chord) {
+        s_ota_chord_active = false;
+    }
+#endif
+}
+
 // Effective PTT auto-off timeout in milliseconds, from the persisted config.
 static unsigned long pttTimeoutMs(void)
 {
@@ -565,6 +592,7 @@ extern "C" void STATUS_IO_Poll(void)
 #if !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
     pollVolumeButton(s_btn_vol_up,   s_btn_vol_up_repeat,   +1, now);
     pollVolumeButton(s_btn_vol_down, s_btn_vol_down_repeat, -1, now);
+    pollGezipaiOtaChord();
 #endif
     updatePtt(now);
 
