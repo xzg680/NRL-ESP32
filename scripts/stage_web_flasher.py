@@ -6,15 +6,20 @@ esptool-js has no support for the ESP32-S31, so both S31 boards are serial-only
 
 For each board it reads build/<board>/flasher_args.json -- the authoritative
 offset->file map ESP-IDF emits -- copies every flash image into
-web-flasher/firmware/<board>/ and writes web-flasher/manifest-<board>.json with
-matching offsets. Build the boards first:
+<out>/firmware/<board>/ and writes <out>/manifest-<board>.json with matching
+offsets. The manifest part paths are relative, so the same layout is served both
+by the standalone web-flasher/ page and by the OTA server under /flasher/.
 
     python scripts/build.py gezipai build
     python scripts/build.py bh4tdv build
-    python scripts/stage_web_flasher.py [--version X.Y.Z] [gezipai bh4tdv]
+    # standalone page (default output = web-flasher/):
+    python scripts/stage_web_flasher.py
     python -m http.server 8000 -d web-flasher
+    # OR stage straight into the OTA server data-dir it serves at /flasher/:
+    python scripts/stage_web_flasher.py --out D:\ota-data\flasher
 """
 from pathlib import Path
+import argparse
 import json
 import re
 import shutil
@@ -33,17 +38,17 @@ BOARDS = {
 CHIP_FAMILY = "ESP32-S3"
 
 
-def copy_file(src, dst):
+def copy_file(src, dst, out_dir):
     if not src.exists():
         print(f"[web-flasher] missing: {src}")
         return False
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
-    print(f"[web-flasher] staged {dst.relative_to(WEB_DIR)} ({dst.stat().st_size} bytes)")
+    print(f"[web-flasher] staged {dst.relative_to(out_dir)} ({dst.stat().st_size} bytes)")
     return True
 
 
-def stage_board(board, display_name, version):
+def stage_board(board, display_name, version, out_dir):
     build_dir = PROJECT_DIR / "build" / board
     flasher_args = build_dir / "flasher_args.json"
     if not flasher_args.exists():
@@ -52,14 +57,14 @@ def stage_board(board, display_name, version):
         return False
 
     flash_files = json.loads(flasher_args.read_text(encoding="utf-8"))["flash_files"]
-    out_dir = WEB_DIR / "firmware" / board
+    board_dir = out_dir / "firmware" / board
 
     parts = []
     ok = True
     # Sort by offset so the manifest is stable/readable.
     for offset_hex, rel in sorted(flash_files.items(), key=lambda kv: int(kv[0], 16)):
         name = Path(rel).name
-        ok = copy_file(build_dir / rel, out_dir / name) and ok
+        ok = copy_file(build_dir / rel, board_dir / name, out_dir) and ok
         parts.append({"path": f"firmware/{board}/{name}", "offset": int(offset_hex, 16)})
     if not ok:
         return False
@@ -70,7 +75,8 @@ def stage_board(board, display_name, version):
         "new_install_prompt_erase": True,
         "builds": [{"chipFamily": CHIP_FAMILY, "parts": parts}],
     }
-    manifest_path = WEB_DIR / f"manifest-{board}.json"
+    manifest_path = out_dir / f"manifest-{board}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -86,39 +92,22 @@ def read_firmware_version():
     return match.group(1) if match else None
 
 
-def parse_version(args):
-    for arg in args:
-        if arg.startswith("--version="):
-            value = arg.split("=", 1)[1].strip()
-            if value:
-                return value
-    if "--version" in args:
-        i = args.index("--version")
-        if i + 1 < len(args):
-            return args[i + 1]
-    return read_firmware_version() or "0.0.0"
-
-
-def parse_boards(args):
-    selected = []
-    skip_next = False
-    for arg in args:
-        if skip_next:
-            skip_next = False
-            continue
-        if arg == "--version":
-            skip_next = True
-            continue
-        if arg.startswith("--"):
-            continue
-        selected.append(arg)
-    return selected or list(BOARDS.keys())
-
-
 def main():
-    args = sys.argv[1:]
-    version = parse_version(args)
-    boards = parse_boards(args)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("boards", nargs="*", help="boards to stage (default: all web-flashable)")
+    parser.add_argument("--version", default=None, help="firmware version (default: from nrl_version.h)")
+    parser.add_argument(
+        "--out", type=Path, default=WEB_DIR,
+        help="output directory (default: web-flasher/). Point at the OTA server "
+             "data-dir's flasher/ subdirectory to serve it from the OTA server.",
+    )
+    args = parser.parse_args()
+
+    version = args.version or read_firmware_version() or "0.0.0"
+    boards = args.boards or list(BOARDS.keys())
+    out_dir = args.out.resolve()
 
     ok = True
     for board in boards:
@@ -127,11 +116,11 @@ def main():
                   f"(web-flashable: {', '.join(BOARDS)})")
             ok = False
             continue
-        ok = stage_board(board, BOARDS[board], version) and ok
+        ok = stage_board(board, BOARDS[board], version, out_dir) and ok
 
     if not ok:
         return 1
-    print("[web-flasher] ready: python -m http.server 8000 -d web-flasher")
+    print(f"[web-flasher] ready in {out_dir}")
     return 0
 
 

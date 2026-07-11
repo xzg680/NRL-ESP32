@@ -51,14 +51,14 @@ BOARDS = {
     "s31_korvo": dict(
         target="esp32s31",
         macro="NRL_BOARD_S31_KORVO",
-        sdkconfig=["sdkconfig.defaults"],
+        sdkconfig=["sdkconfig.defaults", "sdkconfig.defaults.esp32s31"],
         lvgl=True,
         extra=["-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"],
     ),
     "s31_function_coreboard": dict(
         target="esp32s31",
         macro="NRL_BOARD_S31_FUNCTION_COREBOARD",
-        sdkconfig=["sdkconfig.defaults", "sdkconfig.s31_function_coreboard.defaults"],
+        sdkconfig=["sdkconfig.defaults", "sdkconfig.defaults.esp32s31", "sdkconfig.s31_function_coreboard.defaults"],
         lvgl=False,
         extra=["-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"],
     ),
@@ -119,7 +119,19 @@ def main():
         *passthrough,
     ]
     print("+ " + " ".join(cmd), flush=True)
-    sys.exit(subprocess.run(cmd, cwd=REPO).returncode)
+    result = subprocess.run(cmd, cwd=REPO)
+    # Publishing is opt-in: CI/developer environments that define both server URL
+    # and upload token publish every successful firmware build. This keeps normal
+    # local builds offline while making the release pipeline one command. The
+    # whole flash package (bootloader + partition table + app + …) is uploaded;
+    # the server serves the USB web-flasher from it AND registers the app slice as
+    # the OTA release, so both come from one source.
+    if (result.returncode == 0 and "build" in passthrough and
+            os.environ.get("OTA_SERVER_URL") and os.environ.get("OTA_UPLOAD_TOKEN")):
+        publish = [sys.executable, str(REPO / "scripts" / "publish_package.py"), board]
+        print("+ " + " ".join(publish), flush=True)
+        result = subprocess.run(publish, cwd=REPO)
+    sys.exit(result.returncode)
 
 
 if __name__ == "__main__":

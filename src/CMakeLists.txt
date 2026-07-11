@@ -15,6 +15,7 @@ set(app_sources
     services/music_player.cpp
     services/music_playlist.cpp
     services/nanny.cpp
+    services/ota_service.cpp
     services/radio_favorites.cpp
     services/smb_vfs.cpp
     services/storage_service.cpp
@@ -70,6 +71,7 @@ set(app_priv_requires
     esp_event
     esp_eth
     esp_http_client
+    esp_https_ota
     esp_http_server
     mbedtls
     esp_lcd
