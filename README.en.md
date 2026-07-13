@@ -1,15 +1,91 @@
 # NRL ESP32 Radio Bridge
 
-Current firmware version: `0.1.6`
+[Chinese manual](README.md) · HTML: [Chinese](README.html) / [English](README.en.html)
 
-This project is an ESP32-S3 + ES8311 firmware for an NRL network radio bridge. It connects radio audio, PTT, SQL, channel selection, SCI serial passthrough, and network configuration in one embedded application. The current pin map targets the Moto3188/NRL hardware branch.
+Current firmware version: `0.6.0`
+
+This project is an NRL network-radio bridge firmware primarily targeting ESP32-S31, while retaining support for ESP32-S3 boards. It brings radio audio, PTT, SQL, channel selection, SCI serial passthrough, and network configuration into one embedded application. Board targets use the appropriate audio codec, including ES8311 or ES8389; the project covers Moto3188/NRL hardware and ESP32-S31 development boards.
+
+## Supported Boards
+
+Every target shares the NRL network-voice stack, Wi-Fi provisioning portal, remote AT commands, and Wi-Fi OTA updates. BLE provisioning is available on ESP32-S3; ESP32-S31 uses the touch configuration UI (Korvo) or the SoftAP portal. Select the build target that matches the physical board; board-specific capabilities are listed below.
+
+| Build target | Board / SoC | On-board and supported functions | Intended use |
+| --- | --- | --- | --- |
+| `gezipai` | Gezipai, ESP32-S3 | ES7210 microphone ADC + ES8311 DAC, 240×240 ST7789 colour display, battery-voltage sensing, volume up/down/PTT buttons, three status LEDs, SCI serial | Portable network-voice terminal with a small display and physical PTT |
+| `bh4tdv` | BH4TDV NRL-3188 / Moto3188 controller, ESP32-S3 | ES8311 full-duplex audio, PTT/SQL/three status LEDs, three-bit channel select (0–7), SCI serial; no on-board display | Network bridge and channel controller for a 3188 radio |
+| `s31_korvo` | ESP32-S31-Korvo-1, ESP32-S31 | ES8389 audio, 800×480 RGB touch display, ADC buttons (volume, mode, PTT), TF card, USB-OTG host, on-board RGB status LED | Touch-based multimedia and network-voice terminal; external SCI serial is currently disabled |
+| `s31_function_coreboard` | ESP32-S31-Function-CoreBoard-1, ESP32-S31 | ES8311 audio, YT8531 Gigabit Ethernet, USB-A host, WS2812 RGB status LED, SCI serial; no display or physical volume/PTT buttons | Function-core design requiring wired networking or USB storage |
+
+### Board Photos and UI
+
+<div align="center">
+  <img src="docs/gezipai.jpg" alt="Gezipai ESP32-S3 terminal" width="31%" />
+  <img src="docs/NRL3188.jpg" alt="BH4TDV NRL-3188 controller" width="31%" />
+  <img src="docs/main2.jpg" alt="ESP32-S31 Korvo touch UI" width="31%" />
+</div>
+
+From left to right: the Gezipai ESP32-S3 terminal, BH4TDV NRL-3188 controller, and ESP32-S31-Korvo touch-terminal UI. All images are local assets from `docs/`.
+
+### ESP32-S31 Board Photos
+
+<div align="center">
+  <img src="docs/ESP32-S31-Korvo-1.png" alt="ESP32-S31-Korvo-1 board" width="48%" />
+  <img src="docs/ESP32-S31-Function-CoreBoard-1.png" alt="ESP32-S31-Function-CoreBoard-1 board" width="48%" />
+</div>
+
+The left image is the ESP32-S31-Korvo-1 used by `s31_korvo`, with display, touch, TF-card, USB-host, and audio peripherals. The right image is the ESP32-S31-Function-CoreBoard-1 used by `s31_function_coreboard`, with RJ45 Gigabit Ethernet, USB-A host, on-board audio, and an RGB status LED.
+
+> USB web flashing is available only for the ESP32-S3 targets, `gezipai` and `bh4tdv`. Flash the two ESP32-S31 boards over serial. The Korvo SCI pins are still provisional and SCI serial is disabled in the current firmware.
+
+## Extended Features and Availability
+
+The following capabilities are implemented in the current codebase. Features marked **ESP32-S31** primarily target `s31_korvo` and are automatically limited by the peripherals available on each board.
+
+- **Touch UI and unified configuration (ESP32-S31 Korvo)**
+  - The 800×480 touch UI presents NRL call, network, and audio state, with PTT, volume, setup, and media controls.
+  - The touch UI, Wi-Fi configuration portal, and AT commands use the same settings; changes are saved and applied immediately.
+  - Includes Chinese font rendering, media artwork/metadata presentation, and a touch Tetris mini-game.
+
+- **Local music, internet radio, and scheduled beacon playback (ESP32-S31)**
+  - Browse and play WAV, MP3, FLAC, M4A, and AAC media from a TF card, USB storage, or an SMB network share, with playlists, folder navigation, favourites, repeat, and previous/next controls.
+  - Reads title, artist, album, and embedded JPEG/PNG artwork. Incoming NRL voice takes priority and interrupts local media playback.
+  - HTTP internet radio and station favourites are supported. Media can play locally, be sent to the NRL network, or both.
+  - A local beacon/audio file can be played at a configured interval for unattended announcements.
+
+- **Bluetooth headsets (ESP32-S31)**
+  - Classic Bluetooth HFP Audio Gateway routes NRL downlink voice to a headset and returns the headset microphone to the voice path.
+  - Device scanning, saved pairings, reconnect, and volume control are available; music can be sent to a Bluetooth headset through A2DP.
+
+- **ESP-NOW off-grid intercom**
+  - Nearby devices can use broadcast voice intercom without an AP or NRL server, alongside the normal NRL voice path.
+  - TX can use G.711 8 kHz or Opus 16 kHz wideband voice. RX auto-detects both codecs, while RX/TX switches and the PTT target are configured independently.
+
+- **Xiaozhi AI voice assistant (ESP32-S31)**
+  - Compatible with the Xiaozhi open protocol and public or self-hosted WebSocket services, with push-to-talk listening, Opus uplink, and TTS playback.
+
+- **NRL video calls (ESP32-S31 Korvo; compatible DVP camera required)**
+  - Camera JPEG frames are fragmented over the NRL protocol and the remote stream is previewed on the touch display; audio continues to use the existing NRL voice path.
+
+- **Audio processing and network enhancements**
+  - The audio router connects the on-board microphone, NRL downlink, Bluetooth headset, ESP-NOW, and AI voice paths, automatically resampling within the 8 kHz / 16 kHz voice domain and applying per-route gain.
+  - Configurable AEC, AI noise reduction, microphone high-pass filtering, tail suppression, and persistent codec gain/equalizer settings.
+  - The ESP32-S31 Function CoreBoard can use its on-board YT8531 Gigabit Ethernet, with Wi-Fi retained as a fallback.
+
+- **Release OTA and publishing service**
+  - The repository includes an `ota-server/` OTA management system: a Go server with an embedded Vue admin UI and SQLite registry for firmware releases and release notes, organized by board, version, and release channel (such as `stable` / `beta`).
+  - The management UI provides board introductions, per-board firmware history and changelogs, USB flashing, and a device dashboard. During an update check, a device reports its board, firmware version, callsign, SSID, IP address, and last-seen time, allowing the dashboard to flag devices with an available update.
+  - The **complete flash package** is the single release source. One upload contains the bootloader, partition table, OTA data, application, and required resource images. The server registers the application slice as the device OTA release and, for ESP32-S3 boards, serves a USB web-flasher manifest from the same package, preventing drift between the two delivery paths.
+  - All four build targets can use the OTA management system. `gezipai` and `bh4tdv` additionally support first-time full USB web flashing in Chrome/Edge; `s31_korvo` and `s31_function_coreboard` require serial flashing for the first install, then can use device OTA.
+  - A device persists its OTA service URL and device token, checks a compatible-release manifest periodically or on demand, and can install the latest or a specified historical version. Production OTA downloads accept HTTPS only. Use local serial AT commands `AT+OTAURL`, `AT+OTACHECK`, `AT+OTALIST`, and `AT+OTA` to configure and run updates.
+  - Administrators manage releases with web login or an admin token. When `OTA_SERVER_URL`, `OTA_UPLOAD_TOKEN`, and related release variables are present, `scripts/build.py` uploads the release package automatically after a successful build.
 
 ## Features
 
 - NRL UDP network audio bridge
-  - When radio SQL is active, the firmware captures ES8311 ADC audio and sends it to the NRL server over UDP.
-  - When downlink voice is received from the server, the firmware enables PTT and plays decoded audio through the ES8311 DAC to the radio audio input.
-  - Audio uses A-law encoding/decoding at the default 8 kHz sample rate.
+  - When radio SQL is active, the firmware captures microphone audio from the board's audio codec and sends it to the NRL server over UDP.
+  - When downlink voice is received, the firmware enables PTT and plays it through ES8311 or ES8389 to the radio or on-board speaker.
+  - G.711 A-law at 8 kHz is the default. Opus 16 kHz wideband voice is selectable, and RX automatically recognizes both codecs.
 
 - WiFi and server configuration portal
   - The device starts a configuration AP and web page.
@@ -18,22 +94,22 @@ This project is an ESP32-S3 + ES8311 firmware for an NRL network radio bridge. I
   - Supports WiFi OTA firmware upload from the `/update` page.
   - Holding the BOOT button for 5 seconds resets network-related settings.
 
-- BLE configuration
+- BLE configuration (ESP32-S3)
   - The device advertises as `NRL-ESP32-CFG`.
   - Uses a Nordic UART-style BLE service for text commands from a phone or PC BLE tool.
   - Supports configuring WiFi SSID/password, server host, server port, channel, and callsign.
   - WiFi/UDP transport is restarted automatically after saved network changes.
+  - ESP32-S31 does not enable this BLE provisioning service because it uses the Classic Bluetooth headset stack; use the touch UI or Wi-Fi configuration portal instead.
 
 - Radio control IO
   - PTT output controls radio transmit.
   - SQL1/SQL2 inputs detect radio receive/squelch state.
-  - Three channel-selection outputs provide 8 channels, `0..7`.
-  - Status LEDs show network heartbeat, SQL state, and PTT state.
+  - BH4TDV provides three channel-selection outputs for 8 channels, `0..7`.
+  - Depending on the board, status uses three discrete LEDs or a WS2812 RGB indicator.
 
-- ES8311 audio codec support
-  - Drives ES8311 in I2S master mode.
-  - Supports microphone input gain, line-out volume, and HP Drive output mode.
-  - Provides a downlink playback queue while the codec remains in receive mode.
+- On-board audio codecs and voice processing
+  - ESP32-S3 / Function CoreBoard targets use ES8311, Korvo uses ES8389, and Gezipai additionally has an ES7210 microphone ADC.
+  - Supports microphone gain, line-out volume, HP Drive output mode, and a downlink playback queue in receive mode.
 
 - SCI serial passthrough
   - Forwards SCI serial data through NRL packets.
