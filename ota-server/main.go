@@ -492,12 +492,20 @@ func (s *server) uploadPackage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid board, version, channel or parts")
 		return
 	}
-	// Reject a duplicate before writing any files.
-	var exists int
-	_ = s.db.QueryRow(`SELECT 1 FROM releases WHERE board_type=? AND version=? AND channel=?`,
-		meta.Board, meta.Version, meta.Channel).Scan(&exists)
-	if exists == 1 {
-		writeError(w, 409, "release already exists")
+	// An app-only release may already exist when an administrator later uploads
+	// the complete flash package. It can be upgraded in place only when the app
+	// image in the package is byte-for-byte identical. A different image keeps
+	// the immutable board/version/channel guarantee and is rejected below.
+	var existingFilename, existingSHA, existingURL string
+	var existingSize int64
+	existingErr := s.db.QueryRow(`SELECT filename,sha256,size,url FROM releases WHERE board_type=? AND version=? AND channel=?`,
+		meta.Board, meta.Version, meta.Channel).Scan(&existingFilename, &existingSHA, &existingSize, &existingURL)
+	if existingErr != nil && existingErr != sql.ErrNoRows {
+		writeError(w, 500, existingErr.Error())
+		return
+	}
+	if existingErr == nil && strings.HasPrefix(existingURL, "/packages/") {
+		writeError(w, 409, "complete package already exists")
 		return
 	}
 
@@ -558,12 +566,26 @@ func (s *server) uploadPackage(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	appURL := fmt.Sprintf("/packages/%s/%s/%s", meta.Board, meta.Version, appName)
 	relPath := fmt.Sprintf("%s/%s/%s", meta.Board, meta.Version, appName)
-	_, err := s.db.Exec(`INSERT INTO releases(board_type,version,channel,filename,sha256,size,notes,created_at,url) VALUES(?,?,?,?,?,?,?,?,?)`,
-		meta.Board, meta.Version, meta.Channel, relPath, appSHA, appSize, meta.Notes, now, appURL)
+	var err error
+	if existingErr == nil {
+		if existingSHA != appSHA || existingSize != appSize {
+			cleanup()
+			writeError(w, 409, "release already exists with different firmware")
+			return
+		}
+		_, err = s.db.Exec(`UPDATE releases SET filename=?,notes=?,created_at=?,url=? WHERE board_type=? AND version=? AND channel=? AND sha256=? AND size=?`,
+			relPath, meta.Notes, now, appURL, meta.Board, meta.Version, meta.Channel, appSHA, appSize)
+	} else {
+		_, err = s.db.Exec(`INSERT INTO releases(board_type,version,channel,filename,sha256,size,notes,created_at,url) VALUES(?,?,?,?,?,?,?,?,?)`,
+			meta.Board, meta.Version, meta.Channel, relPath, appSHA, appSize, meta.Notes, now, appURL)
+	}
 	if err != nil {
 		cleanup()
-		writeError(w, 409, "release already exists")
+		writeError(w, 500, err.Error())
 		return
+	}
+	if existingErr == nil && strings.HasPrefix(existingURL, "/firmware/") {
+		_ = os.Remove(filepath.Join(s.firmwareDir, filepath.Base(existingFilename)))
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"board": meta.Board, "version": meta.Version, "channel": meta.Channel,

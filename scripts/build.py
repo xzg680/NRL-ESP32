@@ -128,7 +128,7 @@ def main():
     # the OTA release, so both come from one source.
     if (result.returncode == 0 and "build" in passthrough and
             os.environ.get("OTA_SERVER_URL") and os.environ.get("OTA_UPLOAD_TOKEN")):
-        publish = [sys.executable, str(REPO / "scripts" / "publish_package.py"), board]
+        publish = [sys.executable, str(REPO / "scripts" / "publish_ota.py"), board]
         print("+ " + " ".join(publish), flush=True)
         result = subprocess.run(publish, cwd=REPO)
     sys.exit(result.returncode)

@@ -55,6 +55,12 @@ $env:OTA_RELEASE_NOTES = 'Fix …'
 python scripts/build.py s31_korvo build
 ```
 
+To publish the complete flash packages and OTA releases for all four boards in
+one command, run `python scripts/publish_ota.py`. Pass one or more board
+identifiers to publish only those boards. The script reads every image and its
+flash offset from each build's `flasher_args.json`; a separate app-only upload
+is not needed.
+
 For a container deployment, build from `ota-server/`, mount `/data` persistently,
 and set the two token environment variables. The included
 `Caddyfile.example` terminates TLS and proxies to the local container port.
@@ -67,24 +73,23 @@ localhost), and **only for the two ESP32-S3 boards** (`gezipai`, `bh4tdv`) —
 esptool-js has no ESP32-S31 support, so `s31_korvo` and `s31_function_coreboard`
 are serial-only and the page says so.
 
-The esp-web-tools assets ship embedded in the binary. The full flash images and
-their per-board `manifest-<board>.json` are served from `<data-dir>/flasher/`,
-so publishing new flashable firmware does not require rebuilding the Go binary.
-Stage them from a native build:
+The esp-web-tools assets ship embedded in the binary. Complete flash packages
+are stored versioned under `<data-dir>/packages/<board>/<version>/`, and the
+server generates each `manifest-<board>.json` dynamically. Publishing new
+flashable firmware therefore does not require rebuilding the Go binary.
+
+Build all boards, then publish every package and its OTA app image in one run:
 
 ```powershell
 python scripts/build.py gezipai build
 python scripts/build.py bh4tdv build
-python scripts/stage_web_flasher.py --out D:\ota-data\flasher gezipai bh4tdv
+python scripts/build.py s31_korvo build
+python scripts/build.py s31_function_coreboard build
+python scripts/publish_ota.py
 ```
 
-Or stage automatically during the build by setting `OTA_FLASHER_DIR` (S3 boards
-only; ignored for S31):
-
-```powershell
-$env:OTA_FLASHER_DIR = 'D:\ota-data\flasher'
-python scripts/build.py gezipai build
-```
+When `OTA_SERVER_URL` and `OTA_UPLOAD_TOKEN` are already set during a native
+build, `scripts/build.py` publishes that board's complete package automatically.
 
 ## Device-side update controls
 
