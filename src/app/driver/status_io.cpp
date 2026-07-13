@@ -7,7 +7,9 @@
 #include "external_radio.h"
 #include "es8311.h"
 #include "../../lib/nrl_bt_hfp.h"  // route the volume keys to a connected headset
-#include "../../services/ota_service.h"
+#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#include "display.h"
+#endif
 #endif
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
@@ -118,7 +120,11 @@ led_strip_handle_t s_ws2812 = nullptr;
 bool s_volume_dirty = false;
 unsigned long s_volume_change_ms = 0UL;
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
-bool s_ota_chord_active = false;
+bool s_menu_chord_active = false;
+bool s_menu_ptt_suppressed_until_release = false;
+int s_pending_volume_delta = 0;
+unsigned long s_pending_volume_ms = 0UL;
+constexpr unsigned long kMenuChordGraceMs = 100UL;
 #endif
 
 // PTT transmit state machine.
@@ -366,10 +372,11 @@ static void adjustLineOutVolume(const int pct_delta)
 
 // Step the speaker volume on the initial press, and again at a steady cadence
 // while the button is held so the user can sweep up/down by holding.
-static void pollVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
-                             const int pct_delta, const unsigned long now)
+static void updateVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
+                               const int pct_delta, const unsigned long now,
+                               const bool press_edge)
 {
-    if (pollButtonPressEdge(btn, now)) {
+    if (press_edge) {
         adjustLineOutVolume(pct_delta);
         rep.active = true;
         rep.next_fire_ms = now + kVolumeRepeatDelayMs;
@@ -385,28 +392,67 @@ static void pollVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
     }
 }
 
-// Gezipai has an LCD but no touch. Holding both physical volume keys is the
-// explicit, local confirmation for the "update to latest" action. The OTA
-// service first fetches a fresh manifest, so a stale on-screen notice cannot
-// cause installation of an old image.
-static void pollGezipaiOtaChord()
+#if NRL_BOARD != NRL_BOARD_GEZIPAI
+static void pollVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
+                             const int pct_delta, const unsigned long now)
 {
+    updateVolumeButton(btn, rep, pct_delta, now, pollButtonPressEdge(btn, now));
+}
+#endif
+
+// Gezipai has no touch panel. Pressing VOL+ and VOL- together opens the menu;
+// while it is active the individual keys navigate and PTT confirms. Input is
+// queued into display.cpp, where LVGL consumes it from the display task.
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
+static void pollGezipaiMenuButtons(const unsigned long now)
+{
+    const bool up_edge = pollButtonPressEdge(s_btn_vol_up, now);
+    const bool down_edge = pollButtonPressEdge(s_btn_vol_down, now);
     const bool chord = s_btn_vol_up.pressed && s_btn_vol_down.pressed;
-    if (chord && !s_ota_chord_active) {
-        s_ota_chord_active = true;
+    if (chord && !s_menu_chord_active) {
+        s_menu_chord_active = true;
+        s_pending_volume_delta = 0;
         s_btn_vol_up_repeat.active = false;
         s_btn_vol_down_repeat.active = false;
-        if (OtaService_CheckAndUpdateLatest()) {
-            ESP_LOGI(TAG, "VOL+ + VOL-: checking and installing latest OTA release");
-        } else {
-            ESP_LOGW(TAG, "VOL+ + VOL-: OTA server is not configured");
-        }
-    } else if (!chord) {
-        s_ota_chord_active = false;
+        Display_MenuOpen();
+        ESP_LOGI(TAG, "VOL+ + VOL-: menu opened");
+    } else if (!s_btn_vol_up.pressed && !s_btn_vol_down.pressed) {
+        s_menu_chord_active = false;
     }
-#endif
+
+    if (Display_MenuIsActive()) {
+        s_pending_volume_delta = 0;
+        s_btn_vol_up_repeat.active = false;
+        s_btn_vol_down_repeat.active = false;
+        if (!chord) {
+            if (up_edge) Display_MenuNavigate(+1);
+            if (down_edge) Display_MenuNavigate(-1);
+        }
+        return;
+    }
+
+    // Hold a new single-key press briefly so the second key has time to join
+    // the menu chord. A normal volume tap still feels immediate (~100 ms),
+    // while a genuine chord never leaks a one-step volume change.
+    if (up_edge) {
+        s_pending_volume_delta = +1;
+        s_pending_volume_ms = now;
+    }
+    if (down_edge) {
+        s_pending_volume_delta = -1;
+        s_pending_volume_ms = now;
+    }
+    bool fire_up = false;
+    bool fire_down = false;
+    if (s_pending_volume_delta != 0 && now - s_pending_volume_ms >= kMenuChordGraceMs) {
+        fire_up = s_pending_volume_delta > 0;
+        fire_down = s_pending_volume_delta < 0;
+        s_pending_volume_delta = 0;
+    }
+    updateVolumeButton(s_btn_vol_up, s_btn_vol_up_repeat, +1, now, fire_up);
+    updateVolumeButton(s_btn_vol_down, s_btn_vol_down_repeat, -1, now, fire_down);
 }
+#endif
 
 // Effective PTT auto-off timeout in milliseconds, from the persisted config.
 static unsigned long pttTimeoutMs(void)
@@ -427,6 +473,29 @@ static void updatePtt(const unsigned long now)
     const bool was_pressed = s_btn_ptt.pressed;
     pollButtonPressEdge(s_btn_ptt, now);  // refreshes s_btn_ptt.pressed
     const bool is_pressed = s_btn_ptt.pressed;
+
+#if NRL_BOARD == NRL_BOARD_GEZIPAI
+    if (Display_MenuIsActive()) {
+        if (is_pressed && !was_pressed) {
+            Display_MenuConfirm();
+            s_menu_ptt_suppressed_until_release = true;
+        } else if (!is_pressed) {
+            s_menu_ptt_suppressed_until_release = false;
+        }
+        // Entering the menu always drops a latched/held transmission. Menu PTT
+        // presses are confirmations and must never reach the radio gate.
+        s_tx_latched = false;
+        s_tx_suppressed = false;
+        s_tx_active = false;
+        return;
+    }
+    if (s_menu_ptt_suppressed_until_release) {
+        if (!is_pressed) s_menu_ptt_suppressed_until_release = false;
+        s_tx_latched = false;
+        s_tx_active = false;
+        return;
+    }
+#endif
 
     if (is_pressed && !was_pressed) {
         // press down
@@ -590,9 +659,12 @@ extern "C" void STATUS_IO_Poll(void)
     const unsigned long now = nrl_millis_now();
 
 #if !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
+#if NRL_BOARD == NRL_BOARD_GEZIPAI
+    pollGezipaiMenuButtons(now);
+#else
     pollVolumeButton(s_btn_vol_up,   s_btn_vol_up_repeat,   +1, now);
     pollVolumeButton(s_btn_vol_down, s_btn_vol_down_repeat, -1, now);
-    pollGezipaiOtaChord();
+#endif
 #endif
     updatePtt(now);
 

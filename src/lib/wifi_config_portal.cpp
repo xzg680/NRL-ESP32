@@ -13,6 +13,7 @@
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
 #include "../services/ai_assistant.h"
+#include "../services/display_notice.h"
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
 #include "../services/nanny.h"
@@ -1980,6 +1981,7 @@ static esp_err_t handleOtaStatus(httpd_req_t *req)
                        "\",\"configured\":" + (status.configured ? "true" : "false") +
                        ",\"checking\":" + (status.checking ? "true" : "false") +
                        ",\"updating\":" + (status.updating ? "true" : "false") +
+                       ",\"last_check_ms\":" + std::to_string(status.last_check_ms) +
                        ",\"latest_version\":\"" + jsonEscape(status.latest_version) +
                        "\",\"last_error\":\"" + jsonEscape(status.last_error) +
                        "\",\"releases\":[";
@@ -2005,7 +2007,7 @@ static esp_err_t handleOtaConfig(httpd_req_t *req)
                     OtaService_SetConfig(s_server.arg("server_url").c_str(),
                                          s_server.arg("device_token").c_str());
     s_server.send(ok ? 200 : 400, "application/json; charset=utf-8",
-                  ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Use an HTTPS server URL\"}");
+                  ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Use an HTTP or HTTPS server URL\"}");
     return ESP_OK;
 }
 
@@ -2046,6 +2048,7 @@ static esp_err_t handleUpdate(httpd_req_t *req)
     if (strstr(content_type, "multipart/") != nullptr) {
         ESP_LOGW(TAG, "OTA upload rejected: multipart no longer supported (Content-Type=%s)",
                  content_type);
+        DISPLAY_NOTICE_Post("OTA UPDATE FAILED", DISPLAY_NOTICE_ERROR, 10000u);
         httpd_resp_set_status(req, "415 Unsupported Media Type");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, "Multipart not supported -- refresh the update page", HTTPD_RESP_USE_STRLEN);
@@ -2054,10 +2057,12 @@ static esp_err_t handleUpdate(httpd_req_t *req)
 
     const size_t content_len = req->content_len;
     ESP_LOGI(TAG, "OTA upload start (content-length=%u)", static_cast<unsigned>(content_len));
+    DISPLAY_NOTICE_Post("OTA UPLOADING...", DISPLAY_NOTICE_WARNING, 0u);
 
     const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
     if (target == nullptr) {
         ESP_LOGE(TAG, "no OTA target partition");
+        DISPLAY_NOTICE_Post("OTA UPDATE FAILED", DISPLAY_NOTICE_ERROR, 10000u);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no OTA partition");
         return ESP_OK;
     }
@@ -2067,6 +2072,7 @@ static esp_err_t handleUpdate(httpd_req_t *req)
                                   &ota_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
+        DISPLAY_NOTICE_Post("OTA UPDATE FAILED", DISPLAY_NOTICE_ERROR, 10000u);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
         return ESP_OK;
     }
@@ -2119,10 +2125,12 @@ static esp_err_t handleUpdate(httpd_req_t *req)
     if (ok) {
         ESP_LOGI(TAG, "OTA upload complete: %u bytes -> %s",
                  static_cast<unsigned>(total), target->label);
+        DISPLAY_NOTICE_Post("OTA COMPLETE - REBOOTING", DISPLAY_NOTICE_SUCCESS, 0u);
         s_update_reboot_pending = true;
         s_update_reboot_at_ms = nowMsCfg() + 1000UL;
     } else {
         ESP_LOGE(TAG, "OTA upload failed after %u bytes", static_cast<unsigned>(total));
+        DISPLAY_NOTICE_Post("OTA UPDATE FAILED", DISPLAY_NOTICE_ERROR, 10000u);
     }
 
     sendChunkedHtml(ok ? 200 : 500,

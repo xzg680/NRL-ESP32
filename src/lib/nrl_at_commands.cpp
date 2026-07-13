@@ -10,6 +10,7 @@
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
 #include "services/ai_assistant.h"
+#include "services/display_notice.h"
 #include "services/espnow_link.h"
 #include "services/video_call.h"
 #include "services/music_player.h"
@@ -41,6 +42,36 @@ namespace {
 struct AtCommand {
     char command[32];
     char value[256];
+};
+
+bool replyContainsError(const NrlAtCommandResult *result)
+{
+    if (result == nullptr) return true;
+    static constexpr char kErrorMarker[] = "AT+ERR=";
+    constexpr size_t marker_size = sizeof(kErrorMarker) - 1u;
+    for (size_t i = 0; i + marker_size <= result->payload_size; ++i) {
+        if (memcmp(result->payload + i, kErrorMarker, marker_size) == 0) return true;
+    }
+    return false;
+}
+
+class SerialAtDisplayNotice {
+public:
+    SerialAtDisplayNotice(NrlAtCommandSource source, bool query, NrlAtCommandResult *result)
+        : enabled_(source == NRL_AT_SOURCE_SERIAL && !query), result_(result) {}
+
+    ~SerialAtDisplayNotice()
+    {
+        if (!enabled_) return;
+        const bool ok = result_ != nullptr && result_->should_reply && !replyContainsError(result_);
+        DISPLAY_NOTICE_Post(ok ? "AT COMMAND APPLIED" : "AT COMMAND FAILED",
+                            ok ? DISPLAY_NOTICE_SUCCESS : DISPLAY_NOTICE_ERROR,
+                            4000u);
+    }
+
+private:
+    bool enabled_;
+    NrlAtCommandResult *result_;
 };
 
 static bool stringEqualsIgnoreCase(const char *lhs, const char *rhs)
@@ -485,6 +516,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     const bool is_query = stringEqualsIgnoreCase(command.value, "?");
     const bool allow_wifi_config_write = source == NRL_AT_SOURCE_SERIAL;
     const bool allow_ota_write = source == NRL_AT_SOURCE_SERIAL;
+    SerialAtDisplayNotice display_notice(source, is_query, result);
 
     // Remote OTA commands are serial-only: an NRL network AT packet must not
     // be able to replace the server/token or reboot a radio by installing a

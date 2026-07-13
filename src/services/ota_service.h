@@ -30,6 +30,9 @@ struct NrlOtaStatus {
 
 bool OtaService_Init();
 bool OtaService_SetConfig(const char *server_url, const char *device_token);
+// Update only the server URL while preserving the optional device token.
+// This is used by device-local UIs that intentionally do not expose tokens.
+bool OtaService_SetServerUrl(const char *server_url);
 void OtaService_GetStatus(NrlOtaStatus *out);
 bool OtaService_CheckNow();
 // Check the release manifest and, when a newer release exists, install it.

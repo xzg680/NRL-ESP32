@@ -11,6 +11,7 @@ set(app_sources
     media/opus_voice.cpp
     services/ai_assistant.cpp
     services/config_notify.cpp
+    services/display_notice.cpp
     services/espnow_link.cpp
     services/music_player.cpp
     services/music_playlist.cpp

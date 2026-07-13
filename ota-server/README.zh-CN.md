@@ -22,7 +22,7 @@ $env:OTA_DEVICE_TOKEN = 'optional-device-access-token'
 
 修改 Vue 前端后，重启服务之前必须重新执行 `vp build` 和 `go build`：Go 可执行文件会在构建时将 `frontend/dist` 内嵌进去。
 
-请使用 Caddy 或 nginx 为服务配置 HTTPS 反向代理。设备端有意只接受 `https://` 的 OTA 地址。内网私有部署时 `OTA_DEVICE_TOKEN` 可选；面向互联网部署时强烈建议设置。
+设备端同时接受 `http://` 和 `https://` OTA 地址。HTTP 仅适用于测试或可信的私有局域网，因为固件和设备上报数据不会加密，也无法验证服务器身份。其他部署请使用 Caddy 或 nginx 配置 HTTPS 反向代理。内网私有部署时 `OTA_DEVICE_TOKEN` 可选；面向互联网部署时强烈建议设置。
 
 网站是菜单式单页应用（SPA），提供以下页面：
 
@@ -67,7 +67,7 @@ python scripts/publish_ota.py
 
 ## 设备端升级控制
 
-所有板卡（包括没有屏幕的板卡）都在各自的配置服务器中提供 `/update` 页面。完成 HTTPS OTA 服务器配置后，串口 AT 控制台支持以下命令：
+所有板卡（包括没有屏幕的板卡）都在各自的配置服务器中提供 `/update` 页面。完成 HTTP 或 HTTPS OTA 服务器配置后，串口 AT 控制台支持以下命令：
 
 ```text
 AT+OTAURL=https://ota.example.com,device-token  # 配置服务器地址和令牌

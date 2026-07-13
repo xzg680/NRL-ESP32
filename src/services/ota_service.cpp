@@ -4,8 +4,11 @@
 #include "../app/driver/external_radio.h"
 #include "../lib/nrl_version.h"
 #include "../lib/nrl_wifi.h"
+#include "config_notify.h"
+#include "display_notice.h"
 
 #include <esp_crt_bundle.h>
+#include <esp_heap_caps.h>
 #include <esp_http_client.h>
 #include <esp_https_ota.h>
 #include <esp_log.h>
@@ -20,12 +23,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <memory>
 #include <string>
 
 namespace {
 
 constexpr const char *TAG = "OTA";
 constexpr const char *kNvsNamespace = "nrl_ota";
+constexpr const char *kDefaultServerUrl = "https://ota.nrlptt.com";
 constexpr uint32_t kCheckPeriodMs = 60u * 60u * 1000u;
 constexpr uint32_t kBootCheckDelayMs = 30u * 1000u;
 
@@ -115,13 +120,25 @@ bool parseManifest(const char *json)
     memcpy(s_ota.status.releases, parsed, sizeof(parsed));
     copyText(s_ota.status.latest_version, sizeof(s_ota.status.latest_version), latest);
     xSemaphoreGive(s_ota.lock);
-    return true;
+    // A latest version without a matching release URL would notify the user
+    // about an update that cannot be selected or installed. Treat that as a
+    // malformed manifest instead of reporting a successful check.
+    return (count == 0u) == (latest[0] == '\0');
 }
 
 void setError(const char *error)
 {
     xSemaphoreTake(s_ota.lock, portMAX_DELAY);
     copyText(s_ota.status.last_error, sizeof(s_ota.status.last_error), error);
+    xSemaphoreGive(s_ota.lock);
+}
+
+void finishReleaseCheck(bool ok)
+{
+    xSemaphoreTake(s_ota.lock, portMAX_DELAY);
+    s_ota.status.checking = false;
+    s_ota.status.last_check_ms = nowMs();
+    if (ok) s_ota.status.last_error[0] = '\0';
     xSemaphoreGive(s_ota.lock);
 }
 
@@ -136,18 +153,26 @@ std::string apiUrl(const char *suffix)
     return std::string(base) + suffix;
 }
 
+bool isHttpUrl(const char *url)
+{
+    return url != nullptr &&
+           (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0);
+}
+
 std::string absoluteUrl(const char *url)
 {
     if (url == nullptr || url[0] == '\0') return {};
-    if (strncmp(url, "https://", 8) == 0) return url;
+    if (isHttpUrl(url)) return url;
     // Download URLs are server-relative so a release can move between hosts.
     return apiUrl("").append(url[0] == '/' ? url : (std::string("/") + url));
 }
 
 bool checkForReleases()
 {
+    DISPLAY_NOTICE_Post("OTA CHECKING...", DISPLAY_NOTICE_INFO, 20000u);
     if (!wifiIsConnected()) {
         setError("WiFi is not connected");
+        DISPLAY_NOTICE_Post("OTA CHECK FAILED", DISPLAY_NOTICE_ERROR, 8000u);
         return false;
     }
     char url[NRL_OTA_URL_MAX] = {};
@@ -158,9 +183,7 @@ bool checkForReleases()
     s_ota.status.checking = true;
     xSemaphoreGive(s_ota.lock);
     if (url[0] == '\0') {
-        xSemaphoreTake(s_ota.lock, portMAX_DELAY);
-        s_ota.status.checking = false;
-        xSemaphoreGive(s_ota.lock);
+        finishReleaseCheck(false);
         return false;
     }
 
@@ -176,27 +199,46 @@ bool checkForReleases()
              NRL_FIRMWARE_VERSION, radio != nullptr ? radio->callsign : "",
              static_cast<unsigned>(radio != nullptr ? radio->callsign_ssid : 0u), NRL_FIRMWARE_NAME);
     const std::string endpoint = apiUrl("/api/v1/devices/check");
+    constexpr size_t kResponseCapacity = 8192u;
+    void *response_memory = heap_caps_malloc(kResponseCapacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (response_memory == nullptr) {
+        response_memory = heap_caps_malloc(kResponseCapacity, MALLOC_CAP_8BIT);
+    }
+    std::unique_ptr<char, decltype(&heap_caps_free)> response(
+        static_cast<char *>(response_memory), &heap_caps_free);
+    if (!response) {
+        setError("cannot allocate OTA manifest buffer");
+        finishReleaseCheck(false);
+        DISPLAY_NOTICE_Post("OTA CHECK FAILED", DISPLAY_NOTICE_ERROR, 8000u);
+        return false;
+    }
+
     esp_http_client_config_t config = {};
     config.url = endpoint.c_str(); config.method = HTTP_METHOD_POST;
     config.timeout_ms = 15000; config.crt_bundle_attach = esp_crt_bundle_attach;
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == nullptr) { setError("cannot create HTTP client"); return false; }
+    if (client == nullptr) {
+        setError("cannot create HTTP client");
+        finishReleaseCheck(false);
+        DISPLAY_NOTICE_Post("OTA CHECK FAILED", DISPLAY_NOTICE_ERROR, 8000u);
+        return false;
+    }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     if (token[0] != '\0') esp_http_client_set_header(client, "X-Device-Token", token);
     bool ok = false;
-    char response[8192] = {};
     if (esp_http_client_open(client, strlen(body)) == ESP_OK &&
         esp_http_client_write(client, body, strlen(body)) == static_cast<int>(strlen(body)) &&
         esp_http_client_fetch_headers(client) >= 0 &&
         esp_http_client_get_status_code(client) == 200) {
         int total = 0;
-        while (total < static_cast<int>(sizeof(response) - 1u)) {
-            const int n = esp_http_client_read(client, response + total, sizeof(response) - 1u - total);
+        while (total < static_cast<int>(kResponseCapacity - 1u)) {
+            const int n = esp_http_client_read(
+                client, response.get() + total, kResponseCapacity - 1u - static_cast<size_t>(total));
             if (n <= 0) break;
             total += n;
         }
-        response[total] = '\0';
-        ok = total > 0 && parseManifest(response);
+        response.get()[total] = '\0';
+        ok = total > 0 && parseManifest(response.get());
         if (!ok) setError("invalid OTA manifest");
     } else {
         char error[80] = {};
@@ -204,11 +246,22 @@ bool checkForReleases()
         setError(error);
     }
     esp_http_client_cleanup(client);
-    xSemaphoreTake(s_ota.lock, portMAX_DELAY);
-    s_ota.status.checking = false;
-    s_ota.status.last_check_ms = nowMs();
-    if (ok) s_ota.status.last_error[0] = '\0';
-    xSemaphoreGive(s_ota.lock);
+    finishReleaseCheck(ok);
+    if (ok) {
+        char latest[NRL_OTA_VERSION_MAX] = {};
+        xSemaphoreTake(s_ota.lock, portMAX_DELAY);
+        copyText(latest, sizeof(latest), s_ota.status.latest_version);
+        xSemaphoreGive(s_ota.lock);
+        if (latest[0] != '\0' && strcmp(latest, NRL_FIRMWARE_VERSION) != 0) {
+            char notice[96] = {};
+            snprintf(notice, sizeof(notice), "NEW FIRMWARE %.64s", latest);
+            DISPLAY_NOTICE_Post(notice, DISPLAY_NOTICE_SUCCESS, 10000u);
+        } else {
+            DISPLAY_NOTICE_Post("FIRMWARE IS UP TO DATE", DISPLAY_NOTICE_SUCCESS, 5000u);
+        }
+    } else {
+        DISPLAY_NOTICE_Post("OTA CHECK FAILED", DISPLAY_NOTICE_ERROR, 8000u);
+    }
     return ok;
 }
 
@@ -224,11 +277,20 @@ bool installVersion(const char *version)
     }
     s_ota.status.updating = true;
     xSemaphoreGive(s_ota.lock);
-    if (release.url[0] == '\0') { setError("requested version is not in the current manifest"); return false; }
+    if (release.url[0] == '\0') {
+        setError("requested version is not in the current manifest");
+        DISPLAY_NOTICE_Post("OTA UPDATE FAILED", DISPLAY_NOTICE_ERROR, 10000u);
+        return false;
+    }
     const std::string url = absoluteUrl(release.url);
-    // Production OTAs intentionally require HTTPS. The CA bundle is enabled
-    // in the S31 defaults; enable it for the other board defaults as well.
-    if (url.rfind("https://", 0) != 0) { setError("OTA firmware URL must use HTTPS"); return false; }
+    // HTTP is supported for trusted LAN deployments. HTTPS remains the safe
+    // choice for any network where the server or traffic cannot be trusted.
+    if (!isHttpUrl(url.c_str())) {
+        setError("OTA firmware URL must use HTTP or HTTPS");
+        DISPLAY_NOTICE_Post("OTA UPDATE FAILED", DISPLAY_NOTICE_ERROR, 10000u);
+        return false;
+    }
+    DISPLAY_NOTICE_Post("OTA DOWNLOADING...", DISPLAY_NOTICE_WARNING, 0u);
     esp_http_client_config_t http = {};
     http.url = url.c_str(); http.timeout_ms = 30000; http.crt_bundle_attach = esp_crt_bundle_attach;
     esp_https_ota_config_t ota = {};
@@ -239,10 +301,12 @@ bool installVersion(const char *version)
         char error[96] = {};
         snprintf(error, sizeof(error), "firmware download failed: %s", esp_err_to_name(err));
         setError(error);
+        DISPLAY_NOTICE_Post("OTA UPDATE FAILED", DISPLAY_NOTICE_ERROR, 10000u);
         return false;
     }
     ESP_LOGI(TAG, "OTA image %s written; rebooting", release.version);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    DISPLAY_NOTICE_Post("OTA COMPLETE - REBOOTING", DISPLAY_NOTICE_SUCCESS, 0u);
+    vTaskDelay(pdMS_TO_TICKS(1200));
     esp_restart();
     return true;
 }
@@ -294,21 +358,33 @@ bool OtaService_Init()
     s_ota.lock = xSemaphoreCreateMutex();
     if (s_ota.lock == nullptr) return false;
     nvs_handle_t nvs;
-    if (nvs_open(kNvsNamespace, NVS_READONLY, &nvs) == ESP_OK) {
+    bool server_url_saved = false;
+    const esp_err_t open_err = nvs_open(kNvsNamespace, NVS_READONLY, &nvs);
+    if (open_err == ESP_OK) {
         size_t size = sizeof(s_ota.status.server_url);
-        (void)nvs_get_str(nvs, "url", s_ota.status.server_url, &size);
+        server_url_saved = nvs_get_str(nvs, "url", s_ota.status.server_url, &size) == ESP_OK;
         size = sizeof(s_ota.token);
         (void)nvs_get_str(nvs, "token", s_ota.token, &size);
         nvs_close(nvs);
+    } else if (open_err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "cannot read OTA config: %s", esp_err_to_name(open_err));
+    }
+    if (!server_url_saved) {
+        copyText(s_ota.status.server_url, sizeof(s_ota.status.server_url), kDefaultServerUrl);
     }
     s_ota.status.configured = s_ota.status.server_url[0] != '\0';
+    ESP_LOGI(TAG, "OTA config loaded: configured=%d server=%s",
+             s_ota.status.configured, s_ota.status.server_url);
     return xTaskCreate(otaTask, "nrl_ota", 9216, nullptr, 3, nullptr) == pdPASS;
 }
 
 bool OtaService_SetConfig(const char *server_url, const char *device_token)
 {
-    if (server_url == nullptr || strlen(server_url) >= NRL_OTA_URL_MAX ||
-        (server_url[0] != '\0' && strncmp(server_url, "https://", 8) != 0)) return false;
+    if (server_url == nullptr || strlen(server_url) >= NRL_OTA_URL_MAX) return false;
+    if (server_url[0] != '\0' && !isHttpUrl(server_url)) {
+        ESP_LOGW(TAG, "OTA server URL rejected (HTTP or HTTPS required): %s", server_url);
+        return false;
+    }
     if (device_token == nullptr || strlen(device_token) >= sizeof(s_ota.token)) return false;
     nvs_handle_t nvs;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) != ESP_OK) return false;
@@ -316,7 +392,10 @@ bool OtaService_SetConfig(const char *server_url, const char *device_token)
     const esp_err_t token_err = err == ESP_OK ? nvs_set_str(nvs, "token", device_token) : err;
     const esp_err_t commit_err = token_err == ESP_OK ? nvs_commit(nvs) : token_err;
     nvs_close(nvs);
-    if (commit_err != ESP_OK) return false;
+    if (commit_err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot save OTA config: %s", esp_err_to_name(commit_err));
+        return false;
+    }
     xSemaphoreTake(s_ota.lock, portMAX_DELAY);
     copyText(s_ota.status.server_url, sizeof(s_ota.status.server_url), server_url);
     copyText(s_ota.token, sizeof(s_ota.token), device_token);
@@ -326,7 +405,20 @@ bool OtaService_SetConfig(const char *server_url, const char *device_token)
     s_ota.status.release_count = 0u;
     memset(s_ota.status.releases, 0, sizeof(s_ota.status.releases));
     xSemaphoreGive(s_ota.lock);
+    CONFIG_NOTIFY_Bump();
+    ESP_LOGI(TAG, "OTA server config saved: configured=%d server=%s",
+             server_url[0] != '\0', server_url);
     return true;
+}
+
+bool OtaService_SetServerUrl(const char *server_url)
+{
+    if (s_ota.lock == nullptr) return false;
+    char token[sizeof(s_ota.token)] = {};
+    xSemaphoreTake(s_ota.lock, portMAX_DELAY);
+    copyText(token, sizeof(token), s_ota.token);
+    xSemaphoreGive(s_ota.lock);
+    return OtaService_SetConfig(server_url, token);
 }
 
 void OtaService_GetStatus(NrlOtaStatus *out)
@@ -345,6 +437,7 @@ bool OtaService_CheckNow()
         xSemaphoreGive(s_ota.lock);
         return false;
     }
+    s_ota.status.last_error[0] = '\0';
     s_ota.check_requested = true;
     xSemaphoreGive(s_ota.lock);
     return true;
@@ -358,6 +451,7 @@ bool OtaService_CheckAndUpdateLatest()
         xSemaphoreGive(s_ota.lock);
         return false;
     }
+    s_ota.status.last_error[0] = '\0';
     s_ota.check_requested = true;
     s_ota.update_after_check = true;
     xSemaphoreGive(s_ota.lock);
@@ -372,6 +466,7 @@ bool OtaService_UpdateVersion(const char *version)
         xSemaphoreGive(s_ota.lock);
         return false;
     }
+    s_ota.status.last_error[0] = '\0';
     copyText(s_ota.requested_version, sizeof(s_ota.requested_version), version);
     s_ota.update_requested = true;
     xSemaphoreGive(s_ota.lock);

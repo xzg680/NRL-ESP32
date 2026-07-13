@@ -109,7 +109,11 @@ const messages = {
     flashReady: "支持 USB 网页刷机",
     flashButton: "USB 刷机",
     flashUnsupported: "当前浏览器不支持 Web Serial，请使用 Chrome 或 Edge。",
-    flashSerialOnly: "RISC-V 芯片暂不支持网页刷机，请使用串口烧录（scripts/build.py <board> flash）。",
+    flashNeedsHttps:
+      "当前页面使用非安全的 HTTP 地址。Web Serial 要求使用 HTTPS（localhost 除外），请通过配置了 HTTPS 的服务器地址访问。",
+    flashNotAllowed: "Web Serial 权限被阻止，请检查浏览器的网站权限或管理员策略。",
+    flashSerialOnly:
+      "RISC-V 芯片暂不支持网页刷机，请使用串口烧录（scripts/build.py <board> flash）。",
     flashUnavailable: "该板卡暂未上传可刷写的固件包。",
     flashTip: "若无法识别设备，请按住 BOOT 再插入 USB 后重试。",
     loadFailed: "加载失败：{error}",
@@ -197,7 +201,12 @@ const messages = {
     flashReady: "Web-flashable over USB",
     flashButton: "Flash via USB",
     flashUnsupported: "This browser does not support Web Serial. Use Chrome or Edge.",
-    flashSerialOnly: "RISC-V chip — not web-flashable. Use serial flashing (scripts/build.py <board> flash).",
+    flashNeedsHttps:
+      "This page is using an insecure HTTP address. Web Serial requires HTTPS (except on localhost). Open the site through its HTTPS address.",
+    flashNotAllowed:
+      "Web Serial permission was blocked. Check the site's browser permissions or administrator policy.",
+    flashSerialOnly:
+      "RISC-V chip — not web-flashable. Use serial flashing (scripts/build.py <board> flash).",
     flashUnavailable: "No flashable firmware package has been staged for this board yet.",
     flashTip: "If the device is not detected, hold BOOT while plugging in USB, then retry.",
     loadFailed: "Load failed: {error}",
@@ -267,6 +276,8 @@ const app = createApp({
     const devices = ref([]);
     const loadError = ref("");
     const loginError = ref("");
+    const secureContext = window.isSecureContext;
+    const webSerialAvailable = "serial" in navigator;
 
     // publish form
     const board = ref("s31_korvo");
@@ -560,6 +571,8 @@ const app = createApp({
       loadError,
       loginError,
       flasherReady,
+      secureContext,
+      webSerialAvailable,
       board,
       version,
       channel,
@@ -673,12 +686,16 @@ const app = createApp({
               <template v-if="b.flashable">
                 <p class="tagline">{{ t('flashReady') }}</p>
                 <template v-if="flasherReady[b.id]">
-                  <esp-web-install-button :manifest="'/flasher/manifest-' + b.id + '.json'">
-                    <button slot="activate" class="flash-btn primary">{{ t('flashButton') }}</button>
-                    <span slot="unsupported" class="unsupported">{{ t('flashUnsupported') }}</span>
-                    <span slot="not-allowed" class="unsupported">{{ t('flashUnsupported') }}</span>
-                  </esp-web-install-button>
-                  <p class="flash-tip">{{ t('flashTip') }}</p>
+                  <p v-if="!secureContext" class="unsupported">{{ t('flashNeedsHttps') }}</p>
+                  <p v-else-if="!webSerialAvailable" class="unsupported">{{ t('flashUnsupported') }}</p>
+                  <template v-else>
+                    <esp-web-install-button :manifest="'/flasher/manifest-' + b.id + '.json'">
+                      <button slot="activate" class="flash-btn primary">{{ t('flashButton') }}</button>
+                      <span slot="unsupported" class="unsupported">{{ t('flashUnsupported') }}</span>
+                      <span slot="not-allowed" class="unsupported">{{ t('flashNotAllowed') }}</span>
+                    </esp-web-install-button>
+                    <p class="flash-tip">{{ t('flashTip') }}</p>
+                  </template>
                 </template>
                 <p v-else class="empty">{{ t('flashUnavailable') }}</p>
               </template>

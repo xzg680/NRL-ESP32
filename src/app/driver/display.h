@@ -21,6 +21,15 @@ void Display_Init(void);
 // internally throttled so a tight 20 ms poll loop is fine.
 void Display_Poll(void);
 
+// Gezipai's non-touch on-device menu. These entry points are intentionally
+// input-only: the button task queues navigation/confirm events and LVGL
+// consumes them later from Display_Poll(), so no display calls happen from
+// the audio/status task. direction: +1 = up, -1 = down.
+void Display_MenuOpen(void);
+bool Display_MenuIsActive(void);
+void Display_MenuNavigate(int direction);
+void Display_MenuConfirm(void);
+
 // Battery sense (gezipai only; returns 0 on boards without a battery ADC).
 // Both readings are in millivolts. The raw reading is the uncalibrated ADC
 // voltage * 3 (divider); the calibrated reading additionally multiplies by

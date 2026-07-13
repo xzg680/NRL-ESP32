@@ -82,6 +82,10 @@ CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 CONFIG_HTTPD_MAX_URI_LEN=1024
 
+# Permit unencrypted OTA downloads for trusted LAN deployments. HTTPS remains
+# supported and should be used whenever the network path is not fully trusted.
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
+
 # --- LVGL (格子派 ST7789 LCD UI; see src/app/driver/display.cpp) ---
 # LVGL is vendored at components/lvgl and driven straight from the Arduino
 # loop(), so it runs with no OS layer (LV_OS_NONE). These options configure

@@ -7,14 +7,17 @@
 #include "../../lib/nrl_audio_bridge.h"
 #include "../../lib/nrl_bt_hfp.h"
 #include "../../lib/nrl_net_compat.h"
+#include "../../lib/nrl_version.h"
 #include "../../lib/nrl_wifi.h"
 #include "../../media/cover_decoder.h"
 #include "../../services/ai_assistant.h"
 #include "../../services/config_notify.h"
+#include "../../services/display_notice.h"
 #include "../../services/espnow_link.h"
 #include "../../services/music_player.h"
 #include "../../services/music_playlist.h"
 #include "../../services/nanny.h"
+#include "../../services/ota_service.h"
 #include "../../services/radio_favorites.h"
 #include "../../services/storage_service.h"
 #include "../../services/video_call.h"
@@ -95,6 +98,7 @@ enum class Page : uint8_t {
     Video,
     Game,
     Ai,
+    About,
 };
 
 enum class Action : intptr_t {
@@ -141,6 +145,12 @@ enum class Action : intptr_t {
     VideoTx,
     Game,
     Ai,
+    About,
+    SaveOtaUrl,
+    CheckOta,
+    OtaOlder,
+    OtaNewer,
+    InstallOta,
 };
 
 enum class AudioControl : intptr_t {
@@ -192,6 +202,11 @@ lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_server = nullptr;
 lv_obj_t *s_lbl_detail = nullptr;
 lv_obj_t *s_lbl_form_status = nullptr;
+lv_obj_t *s_notice_panel = nullptr;
+lv_obj_t *s_lbl_notice = nullptr;
+char s_shown_notice[96] = {};
+uint32_t s_notice_sequence = 0u;
+uint32_t s_notice_color = 0xFFFFFFFFu;
 lv_obj_t *s_dd_wifi = nullptr;
 lv_obj_t *s_ta_wifi_ssid = nullptr;
 lv_obj_t *s_ta_wifi_pass = nullptr;
@@ -210,6 +225,36 @@ lv_obj_t *s_sw_bt = nullptr;
 lv_obj_t *s_sw_wifi = nullptr;
 lv_obj_t *s_lbl_bt_status = nullptr;
 lv_obj_t *s_keyboard = nullptr;
+
+// About / OTA page widgets. Releases are already newest-first in the OTA
+// service; the inline Older/Newer controls avoid another large LVGL dropdown
+// on the RGB panel.
+lv_obj_t *s_ta_ota_url = nullptr;
+lv_obj_t *s_lbl_ota_release = nullptr;
+lv_obj_t *s_btn_ota_check = nullptr;
+lv_obj_t *s_btn_ota_install = nullptr;
+size_t s_ota_selected_index = 0u;
+bool s_ota_check_pending = false;
+bool s_ota_update_pending = false;
+uint32_t s_ota_check_baseline_ms = 0u;
+char s_shown_ota_release[NRL_OTA_VERSION_MAX + 32u] = {};
+char s_shown_ota_status[224] = {};
+uint32_t s_ota_status_color = 0xFFFFFFFFu;
+// NrlOtaStatus contains the complete release manifest (~4 KB). Keep the UI
+// snapshot off nrl_main_loop's 6 KB stack; it is reused by all About-page
+// actions and lives in PSRAM when available.
+NrlOtaStatus *s_ota_ui_status = nullptr;
+
+// LVGL calls these probes from deep inside lv_timer_handler(). Logging there
+// takes the ESP log mutex and can push nrl_main_loop past its stack guard.
+// Callbacks only record telemetry; Display_Poll prints it after LVGL returns.
+uint32_t s_pending_present_ms = 0u;
+uint32_t s_pending_touch_ms = 0u;
+bool s_big_invalidate_pending = false;
+int32_t s_big_invalidate_w = 0;
+int32_t s_big_invalidate_h = 0;
+int32_t s_big_invalidate_x = 0;
+int32_t s_big_invalidate_y = 0;
 
 // Media / nanny config pages (SMB share, beacon scheduler, net radio).
 lv_obj_t *s_ta_smb_server = nullptr;
@@ -446,7 +491,9 @@ void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         if (present_ms > 50u) {
             // Telemetry: splits "software render slow" from "panel present
             // blocked" inside the lv_timer_handler duration numbers.
-            ESP_LOGW(TAG, "panel present took %lums", static_cast<unsigned long>(present_ms));
+            if (present_ms > s_pending_present_ms) {
+                s_pending_present_ms = present_ms;
+            }
         }
     }
     lv_display_flush_ready(disp);
@@ -465,13 +512,37 @@ void invalidateProbe(lv_event_t *e)
     const int32_t w = a->x2 - a->x1 + 1;
     const int32_t h = a->y2 - a->y1 + 1;
     if (static_cast<int64_t>(w) * h >= (static_cast<int64_t>(kWidth) * kHeight) / 4) {
-        static uint32_t s_last_log_ms = 0;
+        s_big_invalidate_w = w;
+        s_big_invalidate_h = h;
+        s_big_invalidate_x = a->x1;
+        s_big_invalidate_y = a->y1;
+        s_big_invalidate_pending = true;
+    }
+}
+
+void flushLvglTelemetry()
+{
+    if (s_pending_present_ms > 0u) {
+        const uint32_t present_ms = s_pending_present_ms;
+        s_pending_present_ms = 0u;
+        ESP_LOGW(TAG, "panel present took %lums", static_cast<unsigned long>(present_ms));
+    }
+    if (s_pending_touch_ms > 0u) {
+        const uint32_t touch_ms = s_pending_touch_ms;
+        s_pending_touch_ms = 0u;
+        ESP_LOGW(TAG, "touch read blocked %lums", static_cast<unsigned long>(touch_ms));
+    }
+    if (s_big_invalidate_pending) {
+        s_big_invalidate_pending = false;
+        static uint32_t s_last_log_ms = 0u;
         const uint32_t now = millis();
         if (now - s_last_log_ms > 1000u) {
             s_last_log_ms = now;
             ESP_LOGW(TAG, "big invalidate %ldx%ld @(%ld,%ld)",
-                     static_cast<long>(w), static_cast<long>(h),
-                     static_cast<long>(a->x1), static_cast<long>(a->y1));
+                     static_cast<long>(s_big_invalidate_w),
+                     static_cast<long>(s_big_invalidate_h),
+                     static_cast<long>(s_big_invalidate_x),
+                     static_cast<long>(s_big_invalidate_y));
         }
     }
 }
@@ -524,7 +595,9 @@ void touchRead(lv_indev_t *, lv_indev_data_t *data)
     if (dt_ms > 30u) {
         // Telemetry: the GT1151 shares the I2C bus with the audio codec; a
         // long read here means another task parked on the bus mutex.
-        ESP_LOGW(TAG, "touch read blocked %lums", static_cast<unsigned long>(dt_ms));
+        if (dt_ms > s_pending_touch_ms) {
+            s_pending_touch_ms = dt_ms;
+        }
     }
     const esp_err_t err = esp_lcd_touch_get_data(s_touch, points, &count, 1);
     if (err == ESP_OK && count > 0) {
@@ -621,6 +694,15 @@ const TrEntry kTr[] = {
     {"Cam OFF", "关摄像头"},
     {"Hold to Talk", "按住说话"},
     {"Language", "语言"},
+    {"About", "关于"},
+    {"Firmware Version", "固件版本"},
+    {"OTA Server URL", "OTA 服务器地址"},
+    {"Available Version", "可用版本"},
+    {"Older", "旧版本"},
+    {"Newer", "新版本"},
+    {"Save URL", "保存地址"},
+    {"Check Update", "检查更新"},
+    {"Install", "安装"},
     {"English\n中文", "English\n中文"},
     {"VOL-", "音量-"},
     {"VOL+", "音量+"},
@@ -761,7 +843,36 @@ const TrEntry kTr[] = {
     {"Server URL / token: web portal Media page, or AT+AI=wss://...,token",
      "服务器地址/令牌: Web 配置页媒体标签, 或 AT+AI=wss://...,token"},
     // Shared
+    {"OTA CHECKING...", "正在检查 OTA..."},
+    {"OTA DOWNLOADING...", "正在下载 OTA 固件..."},
+    {"OTA UPLOADING...", "正在上传 OTA 固件..."},
+    {"OTA CHECK FAILED", "OTA 检查失败"},
+    {"OTA UPDATE FAILED", "OTA 升级失败"},
+    {"OTA COMPLETE - REBOOTING", "OTA 完成，正在重启"},
+    {"FIRMWARE IS UP TO DATE", "固件已是最新版本"},
+    {"AT COMMAND APPLIED", "AT 指令已执行"},
+    {"AT COMMAND FAILED", "AT 指令执行失败"},
     {"Settings updated from web/serial.", "设置已从 Web/串口更新。"},
+    {"Set and save the OTA server URL.", "请设置并保存 OTA 服务器地址。"},
+    {"Tap Check Update to query available versions.", "点击检查更新以查询可用版本。"},
+    {"Checking for updates...", "正在检查更新..."},
+    {"Update check requested...", "已请求检查更新..."},
+    {"Installing firmware...", "正在安装固件..."},
+    {"Firmware install requested...", "已请求安装固件..."},
+    {"OTA server URL saved.", "OTA 服务器地址已保存。"},
+    {"Save failed: out of memory.", "保存失败：内存不足。"},
+    {"Check failed: out of memory.", "检查失败：内存不足。"},
+    {"Install failed: out of memory.", "安装失败：内存不足。"},
+    {"OTA status unavailable: out of memory.", "无法读取 OTA 状态：内存不足。"},
+    {"Save failed: URL must start with http:// or https://.",
+     "保存失败：地址必须以 http:// 或 https:// 开头。"},
+    {"Check failed: configure the OTA server first.", "检查失败：请先配置 OTA 服务器。"},
+    {"Install failed: check available versions first.", "安装失败：请先检查可用版本。"},
+    {"Selected version is already installed.", "所选版本已经安装。"},
+    {"OTA error: %s", "OTA 错误：%s"},
+    {"Latest: %s  |  %u version(s) available", "最新：%s  |  共 %u 个可用版本"},
+    {"Selected: %s", "已选择：%s"},
+    {"No versions available", "没有可用版本"},
 };
 
 const char *tr(const char *text)
@@ -849,9 +960,28 @@ void musicOutputEvent(lv_event_t *event);
 void languageEvent(lv_event_t *event);
 void updateAudioValueLabels();
 void refresh();
+void refreshOtaPage();
 void rebuildCurrentPage();
 void stopVideoView();
 lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w);
+
+NrlOtaStatus *otaUiSnapshot()
+{
+    if (s_ota_ui_status == nullptr) {
+        s_ota_ui_status = static_cast<NrlOtaStatus *>(
+            heap_caps_calloc(1, sizeof(NrlOtaStatus), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (s_ota_ui_status == nullptr) {
+            s_ota_ui_status = static_cast<NrlOtaStatus *>(
+                heap_caps_calloc(1, sizeof(NrlOtaStatus), MALLOC_CAP_8BIT));
+        }
+    }
+    if (s_ota_ui_status == nullptr) {
+        return nullptr;
+    }
+    memset(s_ota_ui_status, 0, sizeof(*s_ota_ui_status));
+    OtaService_GetStatus(s_ota_ui_status);
+    return s_ota_ui_status;
+}
 
 // Set the per-page form status line (no-op when the page has none).
 void formStatus(const char *text, uint32_t color)
@@ -1067,6 +1197,11 @@ void clearScreen()
     s_lbl_server = nullptr;
     s_lbl_detail = nullptr;
     s_lbl_form_status = nullptr;
+    s_notice_panel = nullptr;
+    s_lbl_notice = nullptr;
+    s_shown_notice[0] = '\0';
+    s_notice_sequence = 0u;
+    s_notice_color = kColorUnset;
     s_dd_wifi = nullptr;
     for (size_t i = 0; i < kWifiOptionCount; ++i) {
         s_wifi_option_ssids[i][0] = '\0';
@@ -1088,6 +1223,17 @@ void clearScreen()
     s_sw_wifi = nullptr;
     s_lbl_bt_status = nullptr;
     s_keyboard = nullptr;
+    s_ta_ota_url = nullptr;
+    s_lbl_ota_release = nullptr;
+    s_btn_ota_check = nullptr;
+    s_btn_ota_install = nullptr;
+    s_ota_selected_index = 0u;
+    s_ota_check_pending = false;
+    s_ota_update_pending = false;
+    s_ota_check_baseline_ms = 0u;
+    s_shown_ota_release[0] = '\0';
+    s_shown_ota_status[0] = '\0';
+    s_ota_status_color = kColorUnset;
     s_ta_smb_server = nullptr;
     s_ta_smb_share = nullptr;
     s_ta_smb_user = nullptr;
@@ -1364,6 +1510,7 @@ void buildConfig()
     button(scr, 24, 220, 176, 120, "Nanny", Action::Nanny);
     button(scr, 216, 220, 176, 120, "NAS", Action::Smb);
     button(scr, 408, 220, 176, 120, "ESP-NOW", Action::EspNow);
+    button(scr, 600, 220, 174, 120, "About", Action::About);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
 
     // Language selector: switching persists and rebuilds this page in place.
@@ -1372,6 +1519,51 @@ void buildConfig()
     lv_dropdown_set_options(dd_lang, "English\n中文");
     lv_dropdown_set_selected(dd_lang, static_cast<uint32_t>(s_lang));
     lv_obj_add_event_cb(dd_lang, languageEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+}
+
+void buildAbout()
+{
+    clearScreen();
+    s_page = Page::About;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    const NrlOtaStatus *ota = otaUiSnapshot();
+
+    lv_obj_t *box = panel(scr, 24, 82, 750, 270);
+    fieldLabel(box, 0, 0, "Firmware Version");
+    lv_obj_t *version = label(box, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_pos(version, 180, -4);
+    lv_obj_set_width(version, 520);
+    lv_label_set_long_mode(version, LV_LABEL_LONG_DOT);
+    lv_label_set_text(version, NRL_FIRMWARE_BANNER);
+
+    fieldLabel(box, 0, 38, "OTA Server URL");
+    s_ta_ota_url = textArea(box, 0, 60, 710, "http://ota.example.com",
+                            ota != nullptr ? ota->server_url : "",
+                            NRL_OTA_URL_MAX - 1u, false, nullptr, false);
+
+    fieldLabel(box, 0, 120, "Available Version");
+    button(box, 160, 112, 112, 46, "Older", Action::OtaOlder);
+    s_lbl_ota_release = label(box, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_pos(s_lbl_ota_release, 284, 123);
+    lv_obj_set_width(s_lbl_ota_release, 282);
+    lv_obj_set_style_text_align(s_lbl_ota_release, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_ota_release, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_ota_release, tr("No versions available"));
+    button(box, 578, 112, 112, 46, "Newer", Action::OtaNewer);
+
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 0, 178);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_label_set_long_mode(s_lbl_form_status, LV_LABEL_LONG_WRAP);
+
+    button(scr, 24, 372, 150, 76, "Back", Action::Config);
+    button(scr, 190, 372, 170, 76, "Save URL", Action::SaveOtaUrl);
+    s_btn_ota_check = button(scr, 376, 372, 180, 76, "Check Update", Action::CheckOta);
+    s_btn_ota_install = button(scr, 572, 372, 202, 76, "Install", Action::InstallOta);
+    createKeyboard(scr);
+    refreshOtaPage();
 }
 
 void sanitizeOptionText(const char *src, char *dst, size_t dst_size)
@@ -2972,6 +3164,99 @@ void pollWifiScan()
     s_last_refresh_ms = 0;
 }
 
+void setOtaPageStatus(const char *text, uint32_t color)
+{
+    if (s_lbl_form_status == nullptr) return;
+    setLabel(s_lbl_form_status, s_shown_ota_status, sizeof(s_shown_ota_status), text);
+    setLabelColor(s_lbl_form_status, s_ota_status_color, color);
+}
+
+bool saveOtaUrl(bool show_success)
+{
+    const char *url = (s_ta_ota_url != nullptr) ? lv_textarea_get_text(s_ta_ota_url) : "";
+    const NrlOtaStatus *ota = otaUiSnapshot();
+    if (ota == nullptr) {
+        setOtaPageStatus(tr("Save failed: out of memory."), kColorBad);
+        return false;
+    }
+    if (strcmp(url, ota->server_url) == 0) {
+        if (show_success) setOtaPageStatus(tr("OTA server URL saved."), kColorGood);
+        return true;
+    }
+    if (!OtaService_SetServerUrl(url)) {
+        setOtaPageStatus(tr("Save failed: URL must start with http:// or https://."), kColorBad);
+        return false;
+    }
+    s_ota_selected_index = 0u;
+    s_shown_ota_release[0] = '\0';
+    s_ota_check_pending = false;
+    s_ota_update_pending = false;
+    if (show_success) setOtaPageStatus(tr("OTA server URL saved."), kColorGood);
+    return true;
+}
+
+void checkOtaFromPage()
+{
+    if (!saveOtaUrl(false)) return;
+    const NrlOtaStatus *ota = otaUiSnapshot();
+    if (ota == nullptr) {
+        setOtaPageStatus(tr("Check failed: out of memory."), kColorBad);
+        return;
+    }
+    if (!OtaService_CheckNow()) {
+        setOtaPageStatus(tr("Check failed: configure the OTA server first."), kColorBad);
+        return;
+    }
+    s_ota_check_baseline_ms = ota->last_check_ms;
+    s_ota_check_pending = true;
+    s_ota_update_pending = false;
+    setOtaPageStatus(tr("Update check requested..."), kColorWarn);
+}
+
+void stepOtaRelease(bool newer)
+{
+    const NrlOtaStatus *ota = otaUiSnapshot();
+    if (ota == nullptr || ota->release_count == 0u) return;
+    if (newer) {
+        if (s_ota_selected_index > 0u) --s_ota_selected_index;
+    } else if (s_ota_selected_index + 1u < ota->release_count) {
+        ++s_ota_selected_index;
+    }
+    s_shown_ota_release[0] = '\0';
+    refreshOtaPage();
+}
+
+void installOtaFromPage()
+{
+    const NrlOtaStatus *ota = otaUiSnapshot();
+    if (ota == nullptr) {
+        setOtaPageStatus(tr("Install failed: out of memory."), kColorBad);
+        return;
+    }
+    const char *url = (s_ta_ota_url != nullptr) ? lv_textarea_get_text(s_ta_ota_url) : "";
+    if (strcmp(url, ota->server_url) != 0) {
+        if (!saveOtaUrl(false)) return;
+        setOtaPageStatus(tr("Install failed: check available versions first."), kColorWarn);
+        return;
+    }
+    if (ota->release_count == 0u || s_ota_selected_index >= ota->release_count) {
+        setOtaPageStatus(tr("Install failed: check available versions first."), kColorBad);
+        return;
+    }
+    const char *version = ota->releases[s_ota_selected_index].version;
+    if (strcmp(version, NRL_FIRMWARE_VERSION) == 0) {
+        setOtaPageStatus(tr("Selected version is already installed."), kColorWarn);
+        return;
+    }
+    if (!OtaService_UpdateVersion(version)) {
+        setOtaPageStatus(tr("Install failed: check available versions first."), kColorBad);
+        return;
+    }
+    s_ota_update_pending = true;
+    s_ota_check_pending = false;
+    setOtaPageStatus(tr("Firmware install requested..."), kColorWarn);
+}
+
 void saveWifiForm()
 {
     const char *ssid = (s_ta_wifi_ssid != nullptr) ? lv_textarea_get_text(s_ta_wifi_ssid) : "";
@@ -3480,6 +3765,12 @@ void action(lv_event_t *event)
         case Action::VideoTx: videoTxToggle(); break;
         case Action::Game: buildGame(); break;
         case Action::Ai: buildAi(); break;
+        case Action::About: buildAbout(); break;
+        case Action::SaveOtaUrl: (void)saveOtaUrl(true); break;
+        case Action::CheckOta: checkOtaFromPage(); break;
+        case Action::OtaOlder: stepOtaRelease(false); break;
+        case Action::OtaNewer: stepOtaRelease(true); break;
+        case Action::InstallOta: installOtaFromPage(); break;
         case Action::SaveSmb: saveSmbForm(); break;
         case Action::ClearSmb: clearSmbForm(); break;
         case Action::SaveNanny: saveNannyForm(); break;
@@ -4071,6 +4362,122 @@ void refreshDetailPage()
     setLabel(s_lbl_detail, s_shown_detail, sizeof(s_shown_detail), text);
 }
 
+void refreshOtaPage()
+{
+    if (s_page != Page::About || s_lbl_ota_release == nullptr) return;
+
+    const NrlOtaStatus *ota = otaUiSnapshot();
+    if (ota == nullptr) {
+        setOtaPageStatus(tr("OTA status unavailable: out of memory."), kColorBad);
+        return;
+    }
+    if (ota->checking) {
+        s_ota_check_pending = false;
+    } else if (s_ota_check_pending && ota->last_check_ms != s_ota_check_baseline_ms) {
+        s_ota_check_pending = false;
+    }
+    if (ota->updating) {
+        s_ota_update_pending = false;
+    } else if (s_ota_update_pending && ota->last_error[0] != '\0') {
+        s_ota_update_pending = false;
+    }
+
+    char selected[sizeof(s_shown_ota_release)] = {};
+    if (ota->release_count == 0u) {
+        s_ota_selected_index = 0u;
+        snprintf(selected, sizeof(selected), "%s", tr("No versions available"));
+    } else {
+        if (s_ota_selected_index >= ota->release_count) s_ota_selected_index = 0u;
+        snprintf(selected, sizeof(selected), tr("Selected: %s"),
+                 ota->releases[s_ota_selected_index].version);
+    }
+    setLabel(s_lbl_ota_release, s_shown_ota_release, sizeof(s_shown_ota_release), selected);
+
+    char status_text[sizeof(s_shown_ota_status)] = {};
+    uint32_t status_color = kColorSub;
+    if (ota->updating) {
+        snprintf(status_text, sizeof(status_text), "%s", tr("Installing firmware..."));
+        status_color = kColorWarn;
+    } else if (ota->checking) {
+        snprintf(status_text, sizeof(status_text), "%s", tr("Checking for updates..."));
+        status_color = kColorWarn;
+    } else if (s_ota_update_pending) {
+        snprintf(status_text, sizeof(status_text), "%s", tr("Firmware install requested..."));
+        status_color = kColorWarn;
+    } else if (s_ota_check_pending) {
+        snprintf(status_text, sizeof(status_text), "%s", tr("Update check requested..."));
+        status_color = kColorWarn;
+    } else if (ota->last_error[0] != '\0') {
+        snprintf(status_text, sizeof(status_text), tr("OTA error: %s"), ota->last_error);
+        status_color = kColorBad;
+    } else if (!ota->configured) {
+        snprintf(status_text, sizeof(status_text), "%s", tr("Set and save the OTA server URL."));
+    } else if (ota->release_count == 0u) {
+        snprintf(status_text, sizeof(status_text), "%s",
+                 tr("Tap Check Update to query available versions."));
+    } else {
+        snprintf(status_text, sizeof(status_text), tr("Latest: %s  |  %u version(s) available"),
+                 ota->latest_version[0] ? ota->latest_version : ota->releases[0].version,
+                 static_cast<unsigned>(ota->release_count));
+        status_color = (ota->latest_version[0] != '\0' &&
+                        strcmp(ota->latest_version, NRL_FIRMWARE_VERSION) != 0)
+                           ? kColorGood
+                           : kColorSub;
+    }
+    setOtaPageStatus(status_text, status_color);
+
+    const bool busy = ota->checking || ota->updating ||
+                      s_ota_check_pending || s_ota_update_pending;
+    auto set_disabled = [](lv_obj_t *obj, bool disabled) {
+        if (obj == nullptr || lv_obj_has_state(obj, LV_STATE_DISABLED) == disabled) return;
+        if (disabled) lv_obj_add_state(obj, LV_STATE_DISABLED);
+        else lv_obj_remove_state(obj, LV_STATE_DISABLED);
+    };
+    set_disabled(s_btn_ota_check, busy);
+    set_disabled(s_btn_ota_install, busy || ota->release_count == 0u);
+}
+
+void refreshDisplayNotice()
+{
+    DisplayNoticeSnapshot notice = {};
+    DISPLAY_NOTICE_Get(&notice);
+    const uint32_t now = millis();
+    const bool active = notice.text[0] != '\0' &&
+        (notice.duration_ms == 0u || now - notice.posted_ms < notice.duration_ms);
+    if (!active) {
+        if (s_notice_panel != nullptr) lv_obj_add_flag(s_notice_panel, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    uint32_t color = kColorAccent;
+    if (notice.level == DISPLAY_NOTICE_SUCCESS) color = kColorGood;
+    else if (notice.level == DISPLAY_NOTICE_WARNING) color = kColorWarn;
+    else if (notice.level == DISPLAY_NOTICE_ERROR) color = kColorBad;
+
+    if (s_notice_panel == nullptr) {
+        lv_obj_t *scr = lv_screen_active();
+        s_notice_panel = panel(scr, 120, 62, 560, 52);
+        lv_obj_set_style_bg_color(s_notice_panel, lv_color_hex(kColorPanel2), 0);
+        lv_obj_set_style_border_width(s_notice_panel, 2, 0);
+        s_lbl_notice = label(s_notice_panel, &lv_font_montserrat_20, color);
+        lv_obj_set_width(s_lbl_notice, 526);
+        lv_obj_set_style_text_align(s_lbl_notice, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(s_lbl_notice);
+        s_notice_sequence = 0u;
+        s_notice_color = kColorUnset;
+    }
+    lv_obj_remove_flag(s_notice_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_notice_panel);
+    if (s_notice_sequence != notice.sequence) {
+        s_notice_sequence = notice.sequence;
+        setLabel(s_lbl_notice, s_shown_notice, sizeof(s_shown_notice), tr(notice.text));
+    }
+    if (s_notice_color != color) {
+        setLabelColor(s_lbl_notice, s_notice_color, color);
+        lv_obj_set_style_border_color(s_notice_panel, lv_color_hex(color), 0);
+    }
+}
+
 void refresh()
 {
     // Config changed underneath us (web portal / AT console): rebuild the
@@ -4083,7 +4490,7 @@ void refresh()
                                s_page == Page::Audio || s_page == Page::Apps ||
                                s_page == Page::Nanny || s_page == Page::Smb ||
                                s_page == Page::Radio || s_page == Page::EspNow ||
-                               s_page == Page::Ai;
+                               s_page == Page::Ai || s_page == Page::About;
         const bool keyboard_open =
             s_keyboard != nullptr && !lv_obj_has_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
         if (!form_page) {
@@ -4120,6 +4527,9 @@ void refresh()
     if (s_page == Page::Ai) {
         refreshAiPage();
     }
+    if (s_page == Page::About) {
+        refreshOtaPage();
+    }
 }
 
 // Rebuild the active page so a font-engine switch takes effect on every
@@ -4142,6 +4552,7 @@ void rebuildCurrentPage()
         case Page::Video: buildVideo(); break;
         case Page::Game: buildGame(); break;
         case Page::Ai: buildAi(); break;
+        case Page::About: buildAbout(); break;
     }
     s_last_refresh_ms = 0;
 }
@@ -4243,6 +4654,7 @@ extern "C" void Display_Poll(void)
         // page isn't pointlessly rebuilt half a second later.
         s_cfg_gen_seen = CONFIG_NOTIFY_Generation();
     }
+    refreshDisplayNotice();
     // UI-latency telemetry: everything LVGL does (touch read, layout, full
     // render) runs inside this call, so its duration IS the felt lag. Warn
     // on single slow passes and print a 10 s max/count digest while hunting
@@ -4254,6 +4666,7 @@ extern "C" void Display_Poll(void)
 #endif
     lv_timer_handler();
     const uint32_t lv_ms = static_cast<uint32_t>((esp_timer_get_time() - lv_t0) / 1000);
+    flushLvglTelemetry();
 #if defined(CONFIG_FREERTOS_USE_TRACE_FACILITY) && CONFIG_FREERTOS_USE_TRACE_FACILITY
     // CPU time this task actually consumed inside the handler: splits
     // "render is computing" from "render is blocked/preempted".

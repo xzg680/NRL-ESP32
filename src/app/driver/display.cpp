@@ -37,6 +37,7 @@
 
 #include "../../lib/nrl_audio_bridge.h"
 #include "../../services/espnow_link.h"
+#include "../../services/display_notice.h"
 #include "../../services/ota_service.h"
 #include "../../lib/nrl_version.h"
 #include "external_radio.h"
@@ -112,6 +113,10 @@ constexpr int kBatteryMaxMv = 4200;
 
 constexpr uint32_t kRefreshIntervalMs = 500u;
 constexpr uint32_t kBatteryIntervalMs = 10000u;
+constexpr int kStatusBarHeight = 34;
+constexpr int kContentY = 36;
+constexpr int kBottomBarHeight = 34;
+constexpr int kContentHeight = kHeight - kContentY - kBottomBarHeight;
 
 bool s_ready = false;
 
@@ -136,6 +141,7 @@ lv_obj_t *s_lbl_batt = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_hint = nullptr;
 lv_obj_t *s_lbl_ota = nullptr;
+lv_obj_t *s_content = nullptr;
 
 adc_oneshot_unit_handle_t s_adc = nullptr;
 adc_cali_handle_t s_adc_cali = nullptr;
@@ -145,6 +151,31 @@ uint32_t s_last_refresh_ms = 0u;
 uint32_t s_last_battery_ms = 0u;
 int s_battery_mv = 0;
 bool s_time_sync_started = false;
+
+enum class MenuPage : uint8_t {
+    Main,
+    Ota,
+    About,
+};
+
+// Written by STATUS_IO_Poll() and consumed only by Display_Poll(). Keeping
+// LVGL out of the button/audio task avoids cross-task widget access.
+volatile bool s_menu_active = false;
+volatile bool s_menu_open_requested = false;
+volatile int s_menu_nav_pending = 0;
+volatile unsigned s_menu_confirm_pending = 0u;
+MenuPage s_menu_page = MenuPage::Main;
+size_t s_menu_index = 0u;
+bool s_menu_ota_requested = false;
+uint32_t s_menu_ota_check_baseline_ms = 0u;
+uint32_t s_menu_ota_refresh_ms = 0u;
+char s_menu_ota_state[224] = {};
+char s_menu_message[64] = {};
+uint32_t s_menu_message_until_ms = 0u;
+// The full OTA manifest is about 3.7 KB. Keeping it as a local variable in
+// processMenuInput() consumed most of nrl_main_loop's 6 KB stack even when the
+// main menu (not the OTA page) was being opened, corrupting its return address.
+NrlOtaStatus *s_ota_ui_status = nullptr;
 
 // Cached on-screen text, so labels are only rewritten when a value changes.
 char s_shown_callsign[16] = {};
@@ -158,6 +189,27 @@ char s_shown_ota[48] = {};
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
 
 void refreshVolume();
+void buildUi();
+void buildHomeContent();
+void buildMenuUi();
+
+NrlOtaStatus *otaUiSnapshot()
+{
+    if (s_ota_ui_status == nullptr) {
+        s_ota_ui_status = static_cast<NrlOtaStatus *>(
+            heap_caps_calloc(1, sizeof(NrlOtaStatus), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (s_ota_ui_status == nullptr) {
+            s_ota_ui_status = static_cast<NrlOtaStatus *>(
+                heap_caps_calloc(1, sizeof(NrlOtaStatus), MALLOC_CAP_8BIT));
+        }
+    }
+    if (s_ota_ui_status == nullptr) {
+        return nullptr;
+    }
+    memset(s_ota_ui_status, 0, sizeof(*s_ota_ui_status));
+    OtaService_GetStatus(s_ota_ui_status);
+    return s_ota_ui_status;
+}
 
 //============================ Panel bring-up =================================
 
@@ -559,6 +611,240 @@ lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
     return label;
 }
 
+void resetCenterWidgets()
+{
+    s_lbl_caption = nullptr;
+    s_lbl_callsign = nullptr;
+    s_lbl_ssid = nullptr;
+    s_lbl_time = nullptr;
+    s_lbl_hint = nullptr;
+    s_lbl_ota = nullptr;
+    s_shown_callsign[0] = '\0';
+    s_shown_ssid[0] = '\0';
+    s_shown_time[0] = '\0';
+    s_shown_ota[0] = '\0';
+    s_shown_state = -1;
+}
+
+void resetHomeWidgets()
+{
+    resetCenterWidgets();
+    s_content = nullptr;
+    s_lbl_wifi = nullptr;
+    s_lbl_vol = nullptr;
+    s_lbl_batt = nullptr;
+    s_lbl_ip = nullptr;
+    s_shown_wifi[0] = '\0';
+    s_shown_vol[0] = '\0';
+    s_shown_batt[0] = '\0';
+    s_shown_ip[0] = '\0';
+}
+
+lv_obj_t *prepareScreen()
+{
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_clean(scr);
+    resetHomeWidgets();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    return scr;
+}
+
+// Replace only the 240x170 centre area. The top status bar and bottom IP bar
+// remain alive and keep updating while the physical-button menu is open.
+lv_obj_t *prepareContent()
+{
+    if (s_content == nullptr) {
+        s_content = lv_obj_create(lv_screen_active());
+        lv_obj_remove_style_all(s_content);
+        lv_obj_set_pos(s_content, 0, kContentY);
+        lv_obj_set_size(s_content, kWidth, kContentHeight);
+        lv_obj_set_style_bg_color(s_content, lv_color_hex(kColorBg), 0);
+        lv_obj_set_style_bg_opa(s_content, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(s_content, LV_OBJ_FLAG_SCROLLABLE);
+    } else {
+        lv_obj_clean(s_content);
+    }
+    resetCenterWidgets();
+    return s_content;
+}
+
+void menuRow(lv_obj_t *scr, int y, const char *text, bool selected)
+{
+    lv_obj_t *row = lv_obj_create(scr);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_pos(row, 4, y);
+    lv_obj_set_size(row, kWidth - 8, 22);
+    lv_obj_set_style_bg_color(row, lv_color_hex(selected ? 0x17364A : kColorBg), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(selected ? kColorAccent : kColorBg), 0);
+    lv_obj_set_style_border_width(row, selected ? 1 : 0, 0);
+    lv_obj_set_style_radius(row, 4, 0);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *lbl = makeLabel(row, &lv_font_montserrat_14,
+                              selected ? kColorCallIdle : kColorSub);
+    lv_obj_set_width(lbl, kWidth - 24);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 7, 0);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    char line[64] = {};
+    snprintf(line, sizeof(line), "%s%s", selected ? "> " : "  ", text);
+    lv_label_set_text(lbl, line);
+}
+
+void menuFooter(lv_obj_t *scr, const char *text, uint32_t color = kColorCaption)
+{
+    lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, color);
+    lv_obj_set_width(lbl, kWidth - 8);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -3);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    lv_label_set_text(lbl, text);
+}
+
+void setMenuMessage(const char *text, uint32_t duration_ms = 3000u)
+{
+    snprintf(s_menu_message, sizeof(s_menu_message), "%s", text ? text : "");
+    s_menu_message_until_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL) + duration_ms;
+}
+
+void buildMainMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    char ptt[32] = {};
+    char nrl_codec[32] = {};
+    char now_codec[32] = {};
+    snprintf(ptt, sizeof(ptt), "PTT: %s",
+             ESPNOW_LINK_GetPttMode() == 1u ? "ESP-NOW" : "NRL");
+    snprintf(nrl_codec, sizeof(nrl_codec), "NRL CODEC: %s",
+             NRLAudioBridge_GetVoiceCodec() == 1u ? "OPUS" : "G711");
+    snprintf(now_codec, sizeof(now_codec), "NOW CODEC: %s",
+             ESPNOW_LINK_GetTxCodec() == 1u ? "OPUS" : "G711");
+    const char *items[] = {
+        "< BACK",
+        ptt,
+        nrl_codec,
+        now_codec,
+        "CHECK UPDATE",
+        "ABOUT",
+    };
+    for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); ++i) {
+        menuRow(scr, 1 + static_cast<int>(i) * 24, items[i], s_menu_index == i);
+    }
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    if (s_menu_message[0] != '\0' && static_cast<int32_t>(s_menu_message_until_ms - now) > 0) {
+        menuFooter(scr, s_menu_message, kColorApWarn);
+    } else {
+        s_menu_message[0] = '\0';
+        menuFooter(scr, "VOL+/- SELECT   PTT OK");
+    }
+}
+
+void buildAboutMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    menuRow(scr, 1, "< BACK", true);
+
+    lv_obj_t *name = makeLabel(scr, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_width(name, kWidth);
+    lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 38);
+    lv_label_set_text(name, NRL_FIRMWARE_NAME);
+
+    char version_text[48] = {};
+    snprintf(version_text, sizeof(version_text), "VERSION %s", NRL_FIRMWARE_VERSION);
+    lv_obj_t *version = makeLabel(scr, &lv_font_montserrat_20, kColorCallIdle);
+    lv_obj_set_width(version, kWidth);
+    lv_obj_set_style_text_align(version, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(version, LV_ALIGN_TOP_MID, 0, 72);
+    lv_label_set_text(version, version_text);
+
+    lv_obj_t *board = makeLabel(scr, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(board, kWidth);
+    lv_obj_set_style_text_align(board, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(board, LV_ALIGN_TOP_MID, 0, 108);
+    lv_label_set_text(board, "GEZIPAI");
+    menuFooter(scr, "PTT BACK");
+}
+
+void buildOtaMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    const NrlOtaStatus *ota = otaUiSnapshot();
+    if (ota == nullptr) {
+        s_menu_index = 0u;
+        menuRow(scr, 1, "< BACK / OTA", true);
+        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_16, kColorWeak);
+        lv_obj_set_width(lbl, kWidth - 20);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 64);
+        lv_label_set_text(lbl, "OTA STATUS UNAVAILABLE");
+        menuFooter(scr, "PTT BACK");
+        return;
+    }
+    if (s_menu_index > ota->release_count) s_menu_index = 0u;
+    menuRow(scr, 1, "< BACK / OTA", s_menu_index == 0u);
+
+    if (ota->checking || s_menu_ota_requested) {
+        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_20, kColorApWarn);
+        lv_obj_set_width(lbl, kWidth);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 64);
+        lv_label_set_text(lbl, ota->checking ? "CHECKING..." : "CHECK REQUESTED...");
+    } else if (ota->updating) {
+        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_20, kColorTx);
+        lv_obj_set_width(lbl, kWidth);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 64);
+        lv_label_set_text(lbl, "INSTALLING...");
+    } else if (ota->release_count == 0u) {
+        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_16, kColorSub);
+        lv_obj_set_width(lbl, kWidth - 20);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 58);
+        lv_label_set_text(lbl, ota->last_error[0] ? ota->last_error : "NO VERSIONS FOUND");
+    } else {
+        constexpr size_t kVisibleVersions = 4u;
+        size_t selected_release = s_menu_index > 0u ? s_menu_index - 1u : 0u;
+        size_t start = 0u;
+        if (selected_release >= kVisibleVersions) start = selected_release - kVisibleVersions + 1u;
+        if (start + kVisibleVersions > ota->release_count && ota->release_count > kVisibleVersions) {
+            start = ota->release_count - kVisibleVersions;
+        }
+        const size_t end = (start + kVisibleVersions < ota->release_count)
+                               ? start + kVisibleVersions
+                               : ota->release_count;
+        for (size_t i = start; i < end; ++i) {
+            char version[48] = {};
+            snprintf(version, sizeof(version), "%.36s%s",
+                     ota->releases[i].version,
+                     strcmp(ota->releases[i].version, NRL_FIRMWARE_VERSION) == 0
+                         ? "  CURRENT"
+                         : "");
+            menuRow(scr, 29 + static_cast<int>(i - start) * 27, version,
+                    s_menu_index == i + 1u);
+        }
+    }
+
+    if (ota->last_error[0] != '\0' && ota->release_count > 0u) {
+        menuFooter(scr, ota->last_error, kColorWeak);
+    } else if (s_menu_message[0] != '\0') {
+        menuFooter(scr, s_menu_message, kColorApWarn);
+    } else if (ota->release_count > 0u) {
+        menuFooter(scr, "SELECT VERSION   PTT INSTALL");
+    } else {
+        menuFooter(scr, "PTT BACK");
+    }
+}
+
+void buildMenuUi()
+{
+    if (s_menu_page == MenuPage::About) buildAboutMenu();
+    else if (s_menu_page == MenuPage::Ota) buildOtaMenu();
+    else buildMainMenu();
+}
+
 #if NRL_DISPLAY_BUS_RGB
 lv_obj_t *makePanel(lv_obj_t *parent, int x, int y, int w, int h)
 {
@@ -669,20 +955,48 @@ void buildWideUi()
 }
 #endif
 
+void buildHomeContent()
+{
+    lv_obj_t *content = prepareContent();
+
+    s_lbl_caption = makeLabel(content, &lv_font_montserrat_14, kColorCaption);
+    lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_MID, 0, 8);
+    lv_label_set_text(s_lbl_caption, "STANDBY");
+
+    s_lbl_callsign = makeLabel(content, &lv_font_montserrat_48, kColorCallIdle);
+    lv_obj_set_width(s_lbl_callsign, kWidth);
+    lv_obj_set_style_text_align(s_lbl_callsign, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lbl_callsign, LV_ALIGN_TOP_MID, 0, 24);
+    lv_label_set_text(s_lbl_callsign, "----");
+
+    s_lbl_ssid = makeLabel(content, &lv_font_montserrat_20, kColorSub);
+    lv_obj_align(s_lbl_ssid, LV_ALIGN_TOP_MID, 0, 86);
+    lv_label_set_text(s_lbl_ssid, "SSID -");
+
+    s_lbl_time = makeLabel(content, &lv_font_montserrat_28, kColorTime);
+    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 112);
+    lv_label_set_text(s_lbl_time, "--:--:--");
+
+    // Gezipai is not a touch screen: this is deliberately only a notification.
+    // Upgrade confirmation is AT+OTA=LATEST, the local /update page, or the
+    // physical VOL+ + VOL- chord handled by status_io.cpp.
+    s_lbl_ota = makeLabel(content, &lv_font_montserrat_14, kColorApWarn);
+    lv_obj_set_width(s_lbl_ota, kWidth);
+    lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 148);
+    lv_label_set_text(s_lbl_ota, "");
+}
+
 void buildUi()
 {
+    lv_obj_t *scr = prepareScreen();
 #if NRL_DISPLAY_BUS_RGB
     buildWideUi();
     return;
 #endif
 
-    lv_obj_t *scr = lv_screen_active();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-
     // ---- Top status bar ----
-    lv_obj_t *top = makeBar(scr, 0, 34);
+    lv_obj_t *top = makeBar(scr, 0, kStatusBarHeight);
 
     lv_obj_t *accent = lv_obj_create(scr);
     lv_obj_remove_style_all(accent);
@@ -704,35 +1018,10 @@ void buildUi()
     lv_label_set_text(s_lbl_batt, "--  " LV_SYMBOL_BATTERY_EMPTY);
 
     // ---- Centre content ----
-    s_lbl_caption = makeLabel(scr, &lv_font_montserrat_14, kColorCaption);
-    lv_obj_align(s_lbl_caption, LV_ALIGN_TOP_MID, 0, 50);
-    lv_label_set_text(s_lbl_caption, "STANDBY");
-
-    s_lbl_callsign = makeLabel(scr, &lv_font_montserrat_48, kColorCallIdle);
-    lv_obj_set_width(s_lbl_callsign, kWidth);
-    lv_obj_set_style_text_align(s_lbl_callsign, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_lbl_callsign, LV_ALIGN_TOP_MID, 0, 68);
-    lv_label_set_text(s_lbl_callsign, "----");
-
-    s_lbl_ssid = makeLabel(scr, &lv_font_montserrat_20, kColorSub);
-    lv_obj_align(s_lbl_ssid, LV_ALIGN_TOP_MID, 0, 130);
-    lv_label_set_text(s_lbl_ssid, "SSID -");
-
-    s_lbl_time = makeLabel(scr, &lv_font_montserrat_28, kColorTime);
-    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 164);
-    lv_label_set_text(s_lbl_time, "--:--:--");
-
-    // Gezipai is not a touch screen: this is deliberately only a notification.
-    // Upgrade confirmation is AT+OTA=LATEST, the local /update page, or the
-    // physical VOL+ + VOL- chord handled by status_io.cpp.
-    s_lbl_ota = makeLabel(scr, &lv_font_montserrat_14, kColorApWarn);
-    lv_obj_set_width(s_lbl_ota, kWidth);
-    lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 193);
-    lv_label_set_text(s_lbl_ota, "");
+    buildHomeContent();
 
     // ---- Bottom IP bar ----
-    lv_obj_t *bottom = makeBar(scr, kHeight - 34, 34);
+    lv_obj_t *bottom = makeBar(scr, kHeight - kBottomBarHeight, kBottomBarHeight);
     s_lbl_ip = makeLabel(bottom, &lv_font_montserrat_16, kColorIp);
     lv_obj_center(s_lbl_ip);
     lv_label_set_text(s_lbl_ip, "---");
@@ -1058,18 +1347,29 @@ void refreshOtaNotice()
     if (s_lbl_ota == nullptr) {
         return;
     }
-    NrlOtaStatus status = {};
-    OtaService_GetStatus(&status);
+    const NrlOtaStatus *status = otaUiSnapshot();
     char text[sizeof(s_shown_ota)] = {};
     uint32_t color = kColorApWarn;
-    if (status.updating) {
+    DisplayNoticeSnapshot notice = {};
+    DISPLAY_NOTICE_Get(&notice);
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    const bool notice_active = notice.text[0] != '\0' &&
+        (notice.duration_ms == 0u || now - notice.posted_ms < notice.duration_ms);
+    if (notice_active) {
+        snprintf(text, sizeof(text), "%.*s",
+                 static_cast<int>(sizeof(text) - 1u), notice.text);
+        if (notice.level == DISPLAY_NOTICE_SUCCESS) color = kColorGood;
+        else if (notice.level == DISPLAY_NOTICE_ERROR) color = kColorWeak;
+        else if (notice.level == DISPLAY_NOTICE_WARNING) color = kColorApWarn;
+        else color = kColorAccent;
+    } else if (status != nullptr && status->updating) {
         snprintf(text, sizeof(text), "OTA UPDATING...");
         color = kColorTx;
-    } else if (status.checking) {
+    } else if (status != nullptr && status->checking) {
         snprintf(text, sizeof(text), "OTA CHECKING...");
-    } else if (status.latest_version[0] != '\0' &&
-               strcmp(status.latest_version, NRL_FIRMWARE_VERSION) != 0) {
-        snprintf(text, sizeof(text), "NEW FW %.20s VOL+/-", status.latest_version);
+    } else if (status != nullptr && status->latest_version[0] != '\0' &&
+               strcmp(status->latest_version, NRL_FIRMWARE_VERSION) != 0) {
+        snprintf(text, sizeof(text), "NEW FW %.20s VOL+/-", status->latest_version);
         color = kColorGood;
     }
     if (setLabel(s_lbl_ota, s_shown_ota, sizeof(s_shown_ota), text)) {
@@ -1077,9 +1377,209 @@ void refreshOtaNotice()
     }
 }
 
+size_t menuItemCount()
+{
+    if (s_menu_page == MenuPage::Main) return 6u;
+    if (s_menu_page == MenuPage::About) return 1u;
+    const NrlOtaStatus *ota = otaUiSnapshot();
+    return (ota != nullptr ? ota->release_count : 0u) + 1u; // Back row + releases
+}
+
+void activateMainMenu()
+{
+    s_menu_page = MenuPage::Main;
+    s_menu_index = 0u;
+    s_menu_ota_requested = false;
+    s_menu_ota_state[0] = '\0';
+    buildMenuUi();
+}
+
+void confirmMainMenu()
+{
+    switch (s_menu_index) {
+        case 0:
+            s_menu_active = false;
+            s_menu_message[0] = '\0';
+            buildHomeContent();
+            break;
+        case 1: {
+            const bool select_espnow = ESPNOW_LINK_GetPttMode() == 0u;
+            if (ESPNOW_LINK_SetEnabled(select_espnow)) {
+                setMenuMessage(select_espnow ? "PTT -> ESP-NOW" : "PTT -> NRL");
+            } else {
+                setMenuMessage("ESP-NOW ENABLE FAILED");
+            }
+            buildMenuUi();
+            break;
+        }
+        case 2: {
+            const uint8_t codec = NRLAudioBridge_GetVoiceCodec() == 1u ? 0u : 1u;
+            if (NRLAudioBridge_SetVoiceCodec(codec)) {
+                setMenuMessage(codec == 1u ? "NRL CODEC -> OPUS" : "NRL CODEC -> G711");
+            } else {
+                setMenuMessage("NRL OPUS: NO MEMORY");
+            }
+            buildMenuUi();
+            break;
+        }
+        case 3: {
+            const uint8_t codec = ESPNOW_LINK_GetTxCodec() == 1u ? 0u : 1u;
+            if (ESPNOW_LINK_SetTxCodec(codec)) {
+                setMenuMessage(codec == 1u ? "NOW CODEC -> OPUS" : "NOW CODEC -> G711");
+            } else {
+                setMenuMessage("NOW OPUS: NO MEMORY");
+            }
+            buildMenuUi();
+            break;
+        }
+        case 4: {
+            const NrlOtaStatus *ota = otaUiSnapshot();
+            s_menu_page = MenuPage::Ota;
+            s_menu_index = 0u;
+            s_menu_ota_check_baseline_ms = ota != nullptr ? ota->last_check_ms : 0u;
+            s_menu_ota_requested = OtaService_CheckNow();
+            setMenuMessage(s_menu_ota_requested ? "CHECK REQUESTED" : "OTA SERVER NOT SET");
+            s_menu_ota_state[0] = '\0';
+            buildMenuUi();
+            break;
+        }
+        case 5:
+            s_menu_page = MenuPage::About;
+            s_menu_index = 0u;
+            buildMenuUi();
+            break;
+        default:
+            break;
+    }
+}
+
+void confirmOtaMenu()
+{
+    if (s_menu_index == 0u) {
+        activateMainMenu();
+        return;
+    }
+    const NrlOtaStatus *ota = otaUiSnapshot();
+    if (ota == nullptr) {
+        setMenuMessage("OTA STATUS UNAVAILABLE");
+    } else if (ota->checking || ota->updating || s_menu_ota_requested) {
+        setMenuMessage("OTA BUSY");
+    } else if (s_menu_index > ota->release_count) {
+        setMenuMessage("SELECT A VERSION");
+    } else {
+        const char *version = ota->releases[s_menu_index - 1u].version;
+        if (strcmp(version, NRL_FIRMWARE_VERSION) == 0) {
+            setMenuMessage("ALREADY INSTALLED");
+        } else if (OtaService_UpdateVersion(version)) {
+            setMenuMessage("INSTALL REQUESTED", 10000u);
+        } else {
+            setMenuMessage("INSTALL REQUEST FAILED");
+        }
+    }
+    buildMenuUi();
+}
+
+void processMenuInput(uint32_t now)
+{
+    if (s_menu_open_requested) {
+        s_menu_open_requested = false;
+        s_menu_nav_pending = 0;
+        s_menu_confirm_pending = 0u;
+        s_menu_message[0] = '\0';
+        activateMainMenu();
+    }
+    if (!s_menu_active) return;
+
+    const int nav = s_menu_nav_pending;
+    s_menu_nav_pending = 0;
+    if (nav != 0) {
+        const size_t count = menuItemCount();
+        const int steps = nav > 0 ? nav : -nav;
+        for (int i = 0; i < steps; ++i) {
+            if (nav > 0) { // VOL+ = up
+                s_menu_index = s_menu_index == 0u ? count - 1u : s_menu_index - 1u;
+            } else {       // VOL- = down
+                s_menu_index = (s_menu_index + 1u) % count;
+            }
+        }
+        buildMenuUi();
+    }
+
+    if (s_menu_confirm_pending != 0u) {
+        s_menu_confirm_pending = 0u;
+        if (s_menu_page == MenuPage::Main) confirmMainMenu();
+        else if (s_menu_page == MenuPage::About) activateMainMenu();
+        else confirmOtaMenu();
+    }
+    if (!s_menu_active) return;
+
+    if (s_menu_message[0] != '\0' && static_cast<int32_t>(now - s_menu_message_until_ms) >= 0) {
+        s_menu_message[0] = '\0';
+        buildMenuUi();
+    }
+
+    if (s_menu_page == MenuPage::Ota &&
+        (s_menu_ota_refresh_ms == 0u || now - s_menu_ota_refresh_ms >= 250u)) {
+        s_menu_ota_refresh_ms = now;
+        const NrlOtaStatus *ota = otaUiSnapshot();
+        if (ota == nullptr) {
+            setMenuMessage("OTA STATUS UNAVAILABLE");
+            buildMenuUi();
+            return;
+        }
+        if (ota->checking || ota->last_check_ms != s_menu_ota_check_baseline_ms) {
+            s_menu_ota_requested = false;
+        }
+        char state[sizeof(s_menu_ota_state)] = {};
+        int used = snprintf(state, sizeof(state), "%u|%u|%u|%u|%s|%s",
+                            ota->checking ? 1u : 0u, ota->updating ? 1u : 0u,
+                            static_cast<unsigned>(ota->release_count),
+                            s_menu_ota_requested ? 1u : 0u,
+                            ota->latest_version, ota->last_error);
+        for (size_t i = 0; i < ota->release_count && used > 0 &&
+                           static_cast<size_t>(used) < sizeof(state) - 2u; ++i) {
+            used += snprintf(state + used, sizeof(state) - static_cast<size_t>(used),
+                             "|%s", ota->releases[i].version);
+        }
+        if (strncmp(state, s_menu_ota_state, sizeof(s_menu_ota_state)) != 0) {
+            snprintf(s_menu_ota_state, sizeof(s_menu_ota_state), "%s", state);
+            if (s_menu_index > ota->release_count) s_menu_index = 0u;
+            buildMenuUi();
+        }
+    }
+}
+
 } // namespace
 
 //================================ Public API =================================
+
+extern "C" void Display_MenuOpen(void)
+{
+    s_menu_active = true;
+    s_menu_open_requested = true;
+}
+
+extern "C" bool Display_MenuIsActive(void)
+{
+    return s_menu_active;
+}
+
+extern "C" void Display_MenuNavigate(const int direction)
+{
+    if (!s_menu_active || direction == 0) return;
+    int pending = s_menu_nav_pending + (direction > 0 ? 1 : -1);
+    if (pending > 8) pending = 8;
+    if (pending < -8) pending = -8;
+    s_menu_nav_pending = pending;
+}
+
+extern "C" void Display_MenuConfirm(void)
+{
+    const unsigned pending = s_menu_confirm_pending;
+    if (s_menu_active && pending < 4u) {
+        s_menu_confirm_pending = pending + 1u;
+    }
+}
 
 extern "C" void Display_Init(void)
 {
@@ -1116,9 +1616,23 @@ extern "C" void Display_Poll(void)
     }
 
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    processMenuInput(now);
     if (s_last_battery_ms == 0u || (now - s_last_battery_ms) >= kBatteryIntervalMs) {
         s_last_battery_ms = now;
         s_battery_mv = readBatteryMv();
+    }
+    if (s_menu_active) {
+        // The menu replaces only the centre content; keep both persistent bars
+        // live so network, volume, battery and IP state remain current.
+        refreshIp();
+        refreshVolume();
+        if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
+            s_last_refresh_ms = now;
+            refreshWifi();
+            refreshBattery();
+        }
+        lv_timer_handler();
+        return;
     }
 
     // The caller caption, IP bar and volume readout react to PTT / button
@@ -1160,6 +1674,10 @@ extern "C" long Display_FramebufferBenchMBps(void) { return -1; }
 
 extern "C" void Display_Init(void) {}
 extern "C" void Display_Poll(void) {}
+extern "C" void Display_MenuOpen(void) {}
+extern "C" bool Display_MenuIsActive(void) { return false; }
+extern "C" void Display_MenuNavigate(int) {}
+extern "C" void Display_MenuConfirm(void) {}
 extern "C" int Display_GetBatteryRawMv(void) { return 0; }
 extern "C" int Display_GetBatteryCalibratedMv(void) { return 0; }
 extern "C" bool Display_SetCjkFontEngine(int) { return false; }

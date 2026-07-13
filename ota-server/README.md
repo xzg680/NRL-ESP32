@@ -28,9 +28,11 @@ $env:OTA_DEVICE_TOKEN = 'optional-device-access-token'
 After changing the Vue frontend, always rerun `vp build` and `go build` before
 restarting the server: the Go executable embeds `frontend/dist` at build time.
 
-Put Caddy/nginx in front of the process for HTTPS. Devices intentionally accept
-only `https://` OTA URLs. `OTA_DEVICE_TOKEN` is optional for a private LAN but
-strongly recommended for an Internet-facing instance.
+Devices accept both `http://` and `https://` OTA URLs. Plain HTTP is intended
+only for testing or a trusted private LAN because firmware and device reports
+are not encrypted or server-authenticated. Put Caddy/nginx in front of the
+process and use HTTPS for any other deployment. `OTA_DEVICE_TOKEN` is optional
+for a private LAN but strongly recommended for an Internet-facing instance.
 
 The site is a menu-based SPA: **Home** (board introductions), **Firmware**
 (per-board version history and changelogs), **USB Flash**, and — after admin
@@ -94,8 +96,8 @@ build, `scripts/build.py` publishes that board's complete package automatically.
 ## Device-side update controls
 
 Every board exposes its own configuration server's `/update` page, including
-boards without a display. After configuring its HTTPS OTA server, the serial
-AT console supports:
+boards without a display. After configuring its HTTP or HTTPS OTA server, the
+serial AT console supports:
 
 ```text
 AT+OTAURL=https://ota.example.com,device-token  # configure server/token
