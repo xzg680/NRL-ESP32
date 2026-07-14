@@ -98,6 +98,7 @@ const featureMatrix = [
   { zh: "状态灯", en: "Status indicator", all: "yes" },
   { zh: "彩色显示屏", en: "Color display", gezipai: "yes", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
   { zh: "触摸界面", en: "Touch interface", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
+  { zh: "触控俄罗斯方块小游戏", en: "Touch Tetris mini-game", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
   { zh: "本地实体按键 / PTT", en: "Physical buttons / PTT", gezipai: "yes", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
   { zh: "电池电压检测", en: "Battery-voltage sensing", gezipai: "yes", bh4tdv: "no", s31_korvo: "no", s31_function_coreboard: "no" },
   { zh: "TF 卡本地媒体", en: "TF-card local media", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
