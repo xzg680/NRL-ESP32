@@ -231,6 +231,15 @@ button.block {
   gap: 0.55rem;
   box-shadow: var(--shadow);
 }
+.board-image {
+  display: block;
+  width: 100%;
+  height: 150px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  background: #f8fafc;
+}
 .board-card-head {
   display: flex;
   align-items: center;

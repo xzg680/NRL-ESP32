@@ -1,8 +1,8 @@
-# NRL OTA 服务器（Go + SQLite + 内嵌 Vue）
+# NRL OTA 服务器（Go + SQLite API + 独立 Vue 前端）
 
-可执行文件会内嵌 `frontend/dist`，因此部署时只需要一个 Go 二进制文件及其数据目录。以下四种板卡共用同一套 API：`gezipai`、`bh4tdv`、`s31_korvo` 和 `s31_function_coreboard`。
+Go 可执行文件只提供 OTA API 和数据服务；请独立发布 `frontend/dist`，并通过同域名反向代理连接前端与 API。随附的 Caddy 示例会提供 SPA 静态文件，并把 API 请求转发到 Go 服务。以下四种板卡共用同一套 API：`gezipai`、`bh4tdv`、`s31_korvo` 和 `s31_function_coreboard`。
 
-先构建一次内嵌的 Vue 管理站点，再构建 Go 服务：
+独立构建并发布 Vue 管理站点，再构建 Go 服务：
 
 Vite+（`vp`）使用 `PATH` 中的 `node` 运行，要求 **Node 24 或更高版本**（见 `frontend/.node-version`）。较低版本的 Node 运行 `vp` 启动器时会报 `ERR_UNKNOWN_FILE_EXTENSION`；请先切换至 Node 24，例如执行 `nvm use 24`。
 
@@ -20,7 +20,27 @@ $env:OTA_DEVICE_TOKEN = 'optional-device-access-token'
 .\nrl-ota.exe -listen 127.0.0.1:8080 -data-dir D:\ota-data
 ```
 
-修改 Vue 前端后，重启服务之前必须重新执行 `vp build` 和 `go build`：Go 可执行文件会在构建时将 `frontend/dist` 内嵌进去。
+修改 Vue 前端后，执行 `vp build` 并发布生成的 `frontend/dist` 即可，不需要重新构建 Go 可执行文件。
+
+也可将前端单独发布为容器：
+
+```powershell
+cd ota-server/frontend
+docker build -t nrl-ota-frontend .
+docker run -d --name nrl-ota-frontend -p 8081:80 nrl-ota-frontend
+```
+
+如果前端和 API 位于不同源，请通过反向代理将 API 暴露在前端的同一域名下（参考 `Caddyfile.example`）。前端所有动态请求统一使用同源的 `/nrlota/api/` 前缀，`/nrlota/www` 仅作为静态文件目录。
+Nginx 可使用 `nginx.conf.example`，Caddy 可使用 `Caddyfile.example`；两者都会在转发到 Go 前去掉 `/nrlota/api/` 前缀。
+
+生产环境可用以下命令将前端发布到 `ota.nrlptt.com` 的 `/nrlota/www/`：
+
+```bash
+cd ota-server/frontend
+OTA_DEPLOY_USER=your-ssh-user bash deploy.sh
+```
+
+`deploy.sh` 使用 `rsync --delete`，本机需要 `vp`、`ssh`、`rsync`，且远端目录必须预先创建。
 
 设备端同时接受 `http://` 和 `https://` OTA 地址。HTTP 仅适用于测试或可信的私有局域网，因为固件和设备上报数据不会加密，也无法验证服务器身份。其他部署请使用 Caddy 或 nginx 配置 HTTPS 反向代理。内网私有部署时 `OTA_DEVICE_TOKEN` 可选；面向互联网部署时强烈建议设置。
 
@@ -45,13 +65,13 @@ python scripts/build.py s31_korvo build
 
 要用一条命令发布四种板卡的完整刷机包及 OTA 版本，请运行 `python scripts/publish_ota.py`。如只需发布部分板卡，可在命令后指定一个或多个板卡标识。脚本会从各构建目录的 `flasher_args.json` 读取全部镜像及其烧录地址，不再需要单独上传应用固件。
 
-容器化部署时，请在 `ota-server/` 目录中构建镜像，持久化挂载 `/data`，并设置两个令牌环境变量。项目提供的 `Caddyfile.example` 会终止 TLS 并将流量反向代理到容器本地端口。
+API 容器请在 `ota-server/` 目录中构建，持久化挂载 `/data`，并设置两个令牌环境变量。前端容器或构建产物需独立发布；项目提供的 `Caddyfile.example` 会终止 TLS、提供 `/nrlota/www` 下的前端静态文件并将 API 请求反向代理到 API 端口。
 
 ## USB 网页烧录器
 
 网站内置浏览器 USB 烧录器（esp-web-tools / Web Serial），可用于首次进行全量烧录。它只支持通过 HTTPS（或 localhost）访问的 Chrome/Edge，并且 **仅支持两种 ESP32-S3 板卡**：`gezipai` 与 `bh4tdv`。由于 esptool-js 不支持 ESP32-S31，`s31_korvo` 和 `s31_function_coreboard` 只能使用串口烧录，页面会给出相应提示。
 
-esp-web-tools 资源会内嵌进二进制文件。完整刷机包按版本存储在 `<data-dir>/packages/<board>/<version>/`，服务器会动态生成各板卡的 `manifest-<board>.json`，因此发布新的可烧录固件时无需重新构建 Go 二进制文件。
+esp-web-tools 资源会随独立发布的前端提供。完整刷机包按版本存储在 `<data-dir>/packages/<board>/<version>/`，API 会动态生成各板卡的 `manifest-<board>.json`，因此发布新的可烧录固件时无需重新构建任何服务。
 
 先构建所有板卡，再用一条命令发布全部完整包及其中的 OTA 应用固件：
 

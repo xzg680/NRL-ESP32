@@ -1,4 +1,4 @@
-// NRL OTA server: Go API + SQLite registry + Vue files embedded in the binary.
+// NRL OTA server: Go API + SQLite registry. The Vue frontend is deployed separately.
 package main
 
 import (
@@ -7,13 +7,11 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -29,14 +27,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-//go:embed all:frontend/dist
-var frontend embed.FS
-
 var validName = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
 
 type server struct {
 	db                                                *sql.DB
-	firmwareDir, packagesDir, adminToken, deviceToken string
+	firmwareDir, packagesDir, adminToken, deviceToken, publicPrefix string
 	adminUser, adminPassword                          string
 	sessionSecret                                     []byte
 	sessionTTL                                        time.Duration
@@ -77,10 +72,15 @@ type deviceCheck struct {
 }
 
 func main() {
-	var dataDir, listen string
+	var dataDir, listen, publicPrefix string
 	flag.StringVar(&dataDir, "data-dir", "./ota-data", "SQLite database and firmware directory")
 	flag.StringVar(&listen, "listen", "127.0.0.1:8080", "HTTP listen address (put HTTPS proxy in front in production)")
+	flag.StringVar(&publicPrefix, "public-prefix", "/nrlota/api", "public reverse-proxy prefix for API and firmware URLs")
 	flag.Parse()
+	publicPrefix = strings.Trim(publicPrefix, "/")
+	if publicPrefix != "" {
+		publicPrefix = "/" + publicPrefix
+	}
 	admin := os.Getenv("OTA_ADMIN_TOKEN")
 	if admin == "" {
 		log.Fatal("OTA_ADMIN_TOKEN is required")
@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS devices (device_id TEXT PRIMARY KEY, board_type TEXT 
 		db:            db,
 		firmwareDir:   filepath.Join(dataDir, "firmware"),
 		packagesDir:   filepath.Join(dataDir, "packages"),
+		publicPrefix:  publicPrefix,
 		adminToken:    admin,
 		deviceToken:   os.Getenv("OTA_DEVICE_TOKEN"),
 		adminUser:     adminUser,
@@ -139,38 +140,6 @@ func (s *server) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /firmware/", s.serveFirmware)
 	m.HandleFunc("GET /packages/", s.servePackage)
 	m.HandleFunc("GET /flasher/", s.serveFlasher)
-	static, err := fs.Sub(frontend, "frontend/dist")
-	if err != nil {
-		panic(fmt.Sprintf("embedded frontend is unavailable: %v", err))
-	}
-	m.Handle("/", staticHandler(static))
-}
-
-// The SPA entry is deliberately never cached. Each Vite build emits hashed
-// assets, so an old cached index.html can otherwise point browsers at removed
-// JavaScript and look like a blank page after an OTA-server upgrade.
-//
-// index.html is written out directly rather than delegated to the file server:
-// http.FileServer canonicalizes any ".../index.html" request with a redirect to
-// "./", so routing "/" through it produced an infinite redirect loop.
-func staticHandler(files fs.FS) http.Handler {
-	server := http.FileServer(http.FS(files))
-	index, err := fs.ReadFile(files, "index.html")
-	if err != nil {
-		panic(fmt.Sprintf("embedded index.html is unavailable: %v", err))
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write(index)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/assets/") {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		}
-		server.ServeHTTP(w, r)
-	})
 }
 
 // admin authorizes admin API calls. It accepts either the long-lived admin
@@ -292,7 +261,7 @@ func (s *server) uploadRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "release already exists")
 		return
 	}
-	writeJSON(w, http.StatusCreated, release{Version: version, Channel: channel, URL: "/firmware/" + name, SHA256: sha, Size: size, Notes: notes, CreatedAt: now})
+	writeJSON(w, http.StatusCreated, release{Version: version, Channel: channel, URL: s.publicPath("/firmware/" + name), SHA256: sha, Size: size, Notes: notes, CreatedAt: now})
 }
 
 func (s *server) checkDevice(w http.ResponseWriter, r *http.Request) {
@@ -365,15 +334,18 @@ func (s *server) releases(board, channel string) ([]release, error) {
 		if err := rows.Scan(&x.Version, &x.Channel, &filename, &x.SHA256, &x.Size, &x.Notes, &x.CreatedAt, &storedURL); err != nil {
 			return nil, err
 		}
-		if storedURL != "" {
-			x.URL = storedURL
-		} else {
-			x.URL = "/firmware/" + filename // legacy rows predate the url column
+		if storedURL == "" {
+			storedURL = "/firmware/" + filename // legacy rows predate the url column
 		}
+		x.URL = s.publicPath(storedURL)
 		out = append(out, x)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return versionKey(out[i].Version) > versionKey(out[j].Version) })
 	return out, rows.Err()
+}
+
+func (s *server) publicPath(path string) string {
+	return s.publicPrefix + path
 }
 func versionKey(v string) string {
 	parts := strings.FieldsFunc(v, func(r rune) bool { return r == '.' || r == '-' || r == '+' || r == '_' })
@@ -440,7 +412,7 @@ func (s *server) serveFlasher(w http.ResponseWriter, r *http.Request) {
 	parts := make([]map[string]any, 0, len(meta.Parts))
 	for _, p := range meta.Parts {
 		parts = append(parts, map[string]any{
-			"path":   fmt.Sprintf("/packages/%s/%s/%s", board, meta.Version, p.Name),
+			"path":   s.publicPath(fmt.Sprintf("/packages/%s/%s/%s", board, meta.Version, p.Name)),
 			"offset": p.Offset,
 		})
 	}
@@ -589,7 +561,7 @@ func (s *server) uploadPackage(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"board": meta.Board, "version": meta.Version, "channel": meta.Channel,
-		"app_url": appURL, "sha256": appSHA, "size": appSize,
+		"app_url": s.publicPath(appURL), "sha256": appSHA, "size": appSize,
 		"web_flashable": meta.ChipFamily != "", "parts": len(meta.Parts),
 	})
 }

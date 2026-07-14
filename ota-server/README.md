@@ -1,10 +1,12 @@
-# NRL OTA Server (Go + SQLite + embedded Vue)
+# NRL OTA Server (Go + SQLite API + separate Vue frontend)
 
-The executable embeds `frontend/dist`, so deployment is one Go binary plus its
-data directory. The API is shared by all four board identifiers:
+The Go executable serves the OTA API and data only. Deploy `frontend/dist`
+separately on the same origin (or use the frontend container); the supplied
+Caddy example routes API requests to Go and serves the SPA. The API is shared
+by all four board identifiers:
 `gezipai`, `bh4tdv`, `s31_korvo`, and `s31_function_coreboard`.
 
-Build the embedded Vue admin site once, then build Go:
+Build and publish the Vue admin site separately, then build Go:
 
 Vite+ (`vp`) runs under whatever `node` is on `PATH`; it needs **Node 24+**
 (see `frontend/.node-version`). An older Node fails with
@@ -25,8 +27,33 @@ $env:OTA_DEVICE_TOKEN = 'optional-device-access-token'
 .\nrl-ota.exe -listen 127.0.0.1:8080 -data-dir D:\ota-data
 ```
 
-After changing the Vue frontend, always rerun `vp build` and `go build` before
-restarting the server: the Go executable embeds `frontend/dist` at build time.
+After changing the Vue frontend, run `vp build` and publish the resulting
+`frontend/dist` directory; rebuilding the Go executable is not required.
+
+To publish the frontend as its own container:
+
+```powershell
+cd ota-server/frontend
+docker build -t nrl-ota-frontend .
+docker run -d --name nrl-ota-frontend -p 8081:80 nrl-ota-frontend
+```
+
+When the frontend and API are served from different origins, configure a reverse
+proxy to expose the API under the frontend origin (as in `Caddyfile.example`).
+The frontend uses the single same-origin dynamic prefix `/nrlota/api/`; static
+files are served separately from `/nrlota/www`.
+Use `nginx.conf.example` for Nginx, or `Caddyfile.example` for Caddy. Both
+strip `/nrlota/api/` before proxying to Go.
+
+For the production host, publish the built frontend to `/nrlota/www/` with:
+
+```bash
+cd ota-server/frontend
+OTA_DEPLOY_USER=your-ssh-user bash deploy.sh
+```
+
+`deploy.sh` uses `rsync --delete`; it requires `vp`, `ssh`, and `rsync` locally,
+and requires the target directory to already exist on `ota.nrlptt.com`.
 
 Devices accept both `http://` and `https://` OTA URLs. Plain HTTP is intended
 only for testing or a trusted private LAN because firmware and device reports
@@ -63,9 +90,10 @@ identifiers to publish only those boards. The script reads every image and its
 flash offset from each build's `flasher_args.json`; a separate app-only upload
 is not needed.
 
-For a container deployment, build from `ota-server/`, mount `/data` persistently,
-and set the two token environment variables. The included
-`Caddyfile.example` terminates TLS and proxies to the local container port.
+For the API container, build from `ota-server/`, mount `/data` persistently,
+and set the two token environment variables. Deploy the frontend container (or
+the built `frontend/dist`) separately. The included `Caddyfile.example`
+terminates TLS, serves `/nrlota/www`, and proxies API requests to the API port.
 
 ## USB web flasher
 
@@ -75,10 +103,10 @@ localhost), and **only for the two ESP32-S3 boards** (`gezipai`, `bh4tdv`) —
 esptool-js has no ESP32-S31 support, so `s31_korvo` and `s31_function_coreboard`
 are serial-only and the page says so.
 
-The esp-web-tools assets ship embedded in the binary. Complete flash packages
-are stored versioned under `<data-dir>/packages/<board>/<version>/`, and the
-server generates each `manifest-<board>.json` dynamically. Publishing new
-flashable firmware therefore does not require rebuilding the Go binary.
+The esp-web-tools assets ship with the separately published frontend. Complete
+flash packages are stored versioned under `<data-dir>/packages/<board>/<version>/`,
+and the API generates each `manifest-<board>.json` dynamically. Publishing new
+flashable firmware does not require rebuilding either service.
 
 Build all boards, then publish every package and its OTA app image in one run:
 

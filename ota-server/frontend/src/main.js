@@ -5,6 +5,10 @@
 import { createApp, computed, ref, watch } from "vue/dist/vue.esm-bundler.js";
 import "./style.css";
 
+// The reverse proxy exposes all dynamic OTA endpoints under one prefix; every
+// other URL is a static frontend asset served directly by the web server.
+const apiURL = (path) => `/nrlota/api${path}`;
+
 // Board catalog for the public "功能介绍" section. Kept here (not in the DB) so
 // the marketing copy ships with the frontend and stays bilingual. Order defines
 // the order boards appear on the page and in the firmware history.
@@ -13,6 +17,7 @@ const boards = [
     id: "gezipai",
     chip: "ESP32-S3",
     flashable: true,
+    image: "/boards/gezipai.jpg",
     zh: {
       name: "格子派 gezipai",
       tagline: "ESP32-S3 彩色显示终端",
@@ -28,13 +33,14 @@ const boards = [
     id: "bh4tdv",
     chip: "ESP32-S3",
     flashable: true,
+    image: "/boards/bh4tdv-esp32-3188.jpg",
     zh: {
-      name: "BH4TDV",
+      name: "BH4TDV ESP32 3188",
       tagline: "ESP32-S3 无屏电台接口",
       features: ["连接外部电台的射频接口", "无显示屏、精简固件", "Wi-Fi 远程控制与 AT 指令"],
     },
     en: {
-      name: "BH4TDV",
+      name: "BH4TDV ESP32 3188",
       tagline: "ESP32-S3 headless radio interface",
       features: ["Interfaces with an external transceiver", "Headless, minimal firmware", "Wi-Fi remote control and AT commands"],
     },
@@ -43,6 +49,7 @@ const boards = [
     id: "s31_korvo",
     chip: "ESP32-S31 · RISC-V",
     flashable: false,
+    image: "/boards/s31-korvo.png",
     zh: {
       name: "S31 Korvo",
       tagline: "ESP32-S31 全功能开发板",
@@ -58,6 +65,7 @@ const boards = [
     id: "s31_function_coreboard",
     chip: "ESP32-S31 · RISC-V",
     flashable: false,
+    image: "/boards/s31-function-coreboard.png",
     zh: {
       name: "S31 功能核心板",
       tagline: "ESP32-S31 精简核心板",
@@ -310,7 +318,7 @@ const app = createApp({
       try {
         await Promise.all(
           boards.map(async (b) => {
-            const response = await fetch(`/api/v1/releases?board=${encodeURIComponent(b.id)}`);
+            const response = await fetch(apiURL(`/api/v1/releases?board=${encodeURIComponent(b.id)}`));
             if (!response.ok) throw new Error(await requestError(response));
             next[b.id] = (await response.json()).releases || [];
           }),
@@ -322,7 +330,7 @@ const app = createApp({
     }
 
     async function loadDevices() {
-      const response = await fetch("/api/v1/admin/devices", { headers: { "X-OTA-Token": session.value } });
+      const response = await fetch(apiURL("/api/v1/admin/devices"), { headers: { "X-OTA-Token": session.value } });
       if (!response.ok) throw new Error(await requestError(response));
       devices.value = (await response.json()).devices || [];
     }
@@ -330,7 +338,7 @@ const app = createApp({
     async function login() {
       loginError.value = "";
       try {
-        const response = await fetch("/api/v1/admin/login", {
+        const response = await fetch(apiURL("/api/v1/admin/login"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: username.value, password: password.value }),
@@ -384,7 +392,7 @@ const app = createApp({
       const file = firmware.value?.files?.[0];
       if (!file) return;
       publishMessage.value = t("publishing");
-      const response = await fetch("/api/v1/admin/releases", {
+      const response = await fetch(apiURL("/api/v1/admin/releases"), {
         method: "POST",
         headers: {
           "X-OTA-Token": session.value,
@@ -412,7 +420,7 @@ const app = createApp({
       return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
     };
     const localizedBoards = computed(() =>
-      boards.map((b) => ({ id: b.id, chip: b.chip, flashable: b.flashable, ...b[language.value] })),
+      boards.map((b) => ({ id: b.id, chip: b.chip, flashable: b.flashable, image: b.image, ...b[language.value] })),
     );
 
     // A board is only web-flashable if its full-flash manifest has been staged
@@ -426,7 +434,7 @@ const app = createApp({
           .filter((b) => b.flashable)
           .map(async (b) => {
             try {
-              const response = await fetch(`/flasher/manifest-${b.id}.json`, { cache: "no-store" });
+              const response = await fetch(apiURL(`/flasher/manifest-${b.id}.json`), { cache: "no-store" });
               next[b.id] = response.ok;
             } catch {
               next[b.id] = false;
@@ -628,6 +636,7 @@ const app = createApp({
           <h2 class="section-h">{{ t('boardsHeading') }}</h2>
           <div class="board-grid">
             <article v-for="b in localizedBoards" :key="b.id" class="board-card">
+              <img class="board-image" :src="b.image" :alt="b.name" />
               <div class="board-card-head">
                 <h3>{{ b.name }}</h3>
                 <span class="chip">{{ b.chip }}</span>
@@ -689,7 +698,7 @@ const app = createApp({
                   <p v-if="!secureContext" class="unsupported">{{ t('flashNeedsHttps') }}</p>
                   <p v-else-if="!webSerialAvailable" class="unsupported">{{ t('flashUnsupported') }}</p>
                   <template v-else>
-                    <esp-web-install-button :manifest="'/flasher/manifest-' + b.id + '.json'">
+                    <esp-web-install-button :manifest="apiURL('/flasher/manifest-' + b.id + '.json')">
                       <button slot="activate" class="flash-btn primary">{{ t('flashButton') }}</button>
                       <span slot="unsupported" class="unsupported">{{ t('flashUnsupported') }}</span>
                       <span slot="not-allowed" class="unsupported">{{ t('flashNotAllowed') }}</span>
