@@ -46,6 +46,15 @@ OTA_DEPLOY_USER=your-ssh-user bash deploy.sh
 
 `deploy.sh` 使用 `rsync --delete`，本机需要 `vp`、`ssh`、`rsync`，且远端目录必须预先创建。
 
+Windows PowerShell 请使用原生 OpenSSH 发布脚本：
+
+```powershell
+cd ota-server\frontend
+.\deploy.ps1 -DeployUser your-ssh-user
+```
+
+该脚本使用新版 Windows 自带的 `scp`。与 `rsync` 不同，它不会清理远端旧的哈希资源文件。
+
 设备端同时接受 `http://` 和 `https://` OTA 地址。HTTP 仅适用于测试或可信的私有局域网，因为固件和设备上报数据不会加密，也无法验证服务器身份。其他部署请使用 Caddy 或 nginx 配置 HTTPS 反向代理。内网私有部署时 `OTA_DEVICE_TOKEN` 可选；面向互联网部署时强烈建议设置。
 
 网站是菜单式单页应用（SPA），提供以下页面：

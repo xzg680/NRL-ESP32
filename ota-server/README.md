@@ -59,6 +59,16 @@ OTA_DEPLOY_USER=your-ssh-user bash deploy.sh
 `deploy.sh` uses `rsync --delete`; it requires `vp`, `ssh`, and `rsync` locally,
 and requires the target directory to already exist on `ota.nrlptt.com`.
 
+On Windows PowerShell, use the native OpenSSH deployment script instead:
+
+```powershell
+cd ota-server\frontend
+.\deploy.ps1 -DeployUser your-ssh-user
+```
+
+It uses `scp`, which is included with current Windows OpenSSH. Unlike `rsync`,
+it does not prune old hashed assets.
+
 Devices accept both `http://` and `https://` OTA URLs. Plain HTTP is intended
 only for testing or a trusted private LAN because firmware and device reports
 are not encrypted or server-authenticated. Put Caddy/nginx in front of the
