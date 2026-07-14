@@ -79,6 +79,33 @@ const boards = [
   },
 ];
 
+// ✓ = supported, △ = supported with a board-specific limitation, — = unavailable.
+// Keep this matrix aligned with README.md and board_pins.h so the home page is
+// a practical selection guide instead of four isolated marketing cards.
+const featureMatrix = [
+  { zh: "NRL UDP 网络语音桥接（G.711 / Opus）", en: "NRL UDP voice bridge (G.711 / Opus)", all: "yes" },
+  { zh: "Wi-Fi 配置门户、远程 AT 命令与设备 OTA", en: "Wi-Fi portal, remote AT commands, and device OTA", all: "yes" },
+  { zh: "网页 USB 首次全量刷机（Chrome / Edge）", en: "Browser USB full flashing (Chrome / Edge)", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
+  { zh: "BLE 蓝牙配网", en: "BLE provisioning", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
+  { zh: "板载音频编解码", en: "Onboard audio codec", all: "yes" },
+  { zh: "电台 PTT / SQL 控制", en: "Radio PTT / squelch control", gezipai: "yes", bh4tdv: "yes", s31_korvo: "partial", s31_function_coreboard: "partial" },
+  { zh: "三位频道选择（0–7）", en: "Three-bit channel selection (0–7)", gezipai: "no", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
+  { zh: "SCI 串口透明传输", en: "SCI serial passthrough", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "yes" },
+  { zh: "状态灯", en: "Status indicator", all: "yes" },
+  { zh: "彩色显示屏", en: "Color display", gezipai: "yes", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
+  { zh: "触摸界面", en: "Touch interface", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
+  { zh: "本地实体按键 / PTT", en: "Physical buttons / PTT", gezipai: "yes", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
+  { zh: "电池电压检测", en: "Battery-voltage sensing", gezipai: "yes", bh4tdv: "no", s31_korvo: "no", s31_function_coreboard: "no" },
+  { zh: "TF 卡本地媒体", en: "TF-card local media", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
+  { zh: "USB 主机 / U 盘存储", en: "USB host / flash storage", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
+  { zh: "千兆以太网", en: "Gigabit Ethernet", gezipai: "no", bh4tdv: "no", s31_korvo: "no", s31_function_coreboard: "yes" },
+  { zh: "蓝牙耳机 HFP / A2DP", en: "Bluetooth headset HFP / A2DP", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
+  { zh: "ESP-NOW 脱网对讲", en: "ESP-NOW offline intercom", all: "yes" },
+  { zh: "本地音乐、网络收音机与定时播报", en: "Local music, Internet radio, and timed playback", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "partial" },
+  { zh: "小智 AI 语音助手", en: "Xiaozhi AI voice assistant", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "yes" },
+  { zh: "NRL 视频通话（DVP 摄像头）", en: "NRL video calls (DVP camera)", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
+];
+
 const messages = {
   zh: {
     title: "NRL OTA 固件中心",
@@ -100,6 +127,9 @@ const messages = {
     boardsHeading: "支持的板卡",
     chip: "主控",
     features: "特性",
+    featureMatrixHeading: "功能支持对照",
+    featureMatrixHint: "✓ 支持　△ 部分支持或受板卡外设限制　— 不支持",
+    function: "功能",
     historyHeading: "固件历史",
     latest: "最新",
     version: "版本",
@@ -191,6 +221,9 @@ const messages = {
     boardsHeading: "Supported boards",
     chip: "SoC",
     features: "Features",
+    featureMatrixHeading: "Feature comparison",
+    featureMatrixHint: "✓ Supported　△ Limited by board hardware　— Unavailable",
+    function: "Function",
     historyHeading: "Firmware history",
     latest: "Latest",
     version: "Version",
@@ -422,6 +455,10 @@ const app = createApp({
     const localizedBoards = computed(() =>
       boards.map((b) => ({ id: b.id, chip: b.chip, flashable: b.flashable, image: b.image, ...b[language.value] })),
     );
+    const localizedFeatureMatrix = computed(() =>
+      featureMatrix.map((row) => ({ ...row, label: row[language.value] })),
+    );
+    const featureMark = (state) => ({ yes: "✓", partial: "△", no: "—" }[state] || "—");
 
     // A board is only web-flashable if its full-flash manifest has been staged
     // into the server's data-dir. Probe so boards without a staged package show
@@ -591,6 +628,8 @@ const app = createApp({
       setLanguage,
       boardName,
       localizedBoards,
+      localizedFeatureMatrix,
+      featureMark,
       loadHistory,
       login,
       logout,
@@ -648,6 +687,29 @@ const app = createApp({
               <code class="board-id">{{ b.id }}</code>
             </article>
           </div>
+          <section class="panel feature-matrix-panel">
+            <div class="feature-matrix-head">
+              <div>
+                <h2 class="section-h">{{ t('featureMatrixHeading') }}</h2>
+                <p class="hint">{{ t('featureMatrixHint') }}</p>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="feature-matrix">
+                <thead>
+                  <tr><th>{{ t('function') }}</th><th v-for="b in localizedBoards" :key="b.id">{{ b.name }}</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in localizedFeatureMatrix" :key="row.label">
+                    <th>{{ row.label }}</th>
+                    <td v-for="b in localizedBoards" :key="b.id">
+                      <span :class="['feature-mark', 'feature-' + (row[b.id] || row.all)]">{{ featureMark(row[b.id] || row.all) }}</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <!-- Firmware download / history -->

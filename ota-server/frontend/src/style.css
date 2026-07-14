@@ -288,6 +288,54 @@ button.block {
   padding: 0.1rem 0.4rem;
   align-self: flex-start;
 }
+.feature-matrix-panel {
+  margin-top: 1.5rem;
+  padding: 1.35rem;
+}
+.feature-matrix-head {
+  margin-bottom: 0.8rem;
+}
+.feature-matrix-head .section-h {
+  margin-bottom: 0.25rem;
+}
+.feature-matrix {
+  min-width: 860px;
+  font-size: 0.88rem;
+}
+.feature-matrix th:first-child {
+  min-width: 260px;
+  text-align: left;
+}
+.feature-matrix th:not(:first-child),
+.feature-matrix td {
+  width: 150px;
+  text-align: center;
+}
+.feature-matrix td {
+  vertical-align: middle;
+}
+.feature-mark {
+  display: inline-flex;
+  width: 1.65rem;
+  height: 1.65rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 1rem;
+}
+.feature-yes {
+  color: #047857;
+  background: #d1fae5;
+}
+.feature-partial {
+  color: #b45309;
+  background: #fef3c7;
+}
+.feature-no {
+  color: #64748b;
+  background: #f1f5f9;
+}
 
 /* Firmware history */
 .board-history-head {
@@ -601,6 +649,18 @@ textarea {
   }
   .board-id {
     background: #1e2b45;
+  }
+  .feature-yes {
+    color: #6ee7b7;
+    background: #064e3b;
+  }
+  .feature-partial {
+    color: #fcd34d;
+    background: #78350f;
+  }
+  .feature-no {
+    color: #94a3b8;
+    background: #1e293b;
   }
   th {
     background: #111a2b;
