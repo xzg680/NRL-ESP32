@@ -56,8 +56,9 @@ cd ota-server/frontend
 OTA_DEPLOY_USER=your-ssh-user bash deploy.sh
 ```
 
-`deploy.sh` uses `rsync --delete`; it requires `vp`, `ssh`, and `rsync` locally,
-and requires the target directory to already exist on `ota.nrlptt.com`.
+`deploy.sh` runs `vp install --frozen-lockfile` then `vp build`, and uses
+`rsync --delete` to publish. It requires `vp`, `ssh`, and `rsync` locally, and
+requires the target directory to already exist on `ota.nrlptt.com`.
 
 On Windows PowerShell, use the native OpenSSH deployment script instead:
 

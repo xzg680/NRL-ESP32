@@ -44,7 +44,8 @@ cd ota-server/frontend
 OTA_DEPLOY_USER=your-ssh-user bash deploy.sh
 ```
 
-`deploy.sh` 使用 `rsync --delete`，本机需要 `vp`、`ssh`、`rsync`，且远端目录必须预先创建。
+`deploy.sh` 会先运行 `vp install --frozen-lockfile` 和 `vp build`，再使用
+`rsync --delete` 发布。本机需要 `vp`、`ssh`、`rsync`，且远端目录必须预先创建。
 
 Windows PowerShell 请使用原生 OpenSSH 发布脚本：
 

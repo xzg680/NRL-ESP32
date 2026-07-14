@@ -23,6 +23,9 @@ $distDir = Join-Path $scriptDir 'dist'
 
 Push-Location $scriptDir
 try {
+    & vp install --frozen-lockfile
+    if ($LASTEXITCODE -ne 0) { throw "vp install failed with exit code $LASTEXITCODE." }
+
     & vp build
     if ($LASTEXITCODE -ne 0) { throw "vp build failed with exit code $LASTEXITCODE." }
 
