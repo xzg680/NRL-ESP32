@@ -5,9 +5,9 @@
 import { createApp, computed, ref, watch } from "vue/dist/vue.esm-bundler.js";
 import "./style.css";
 
-// The reverse proxy exposes all dynamic OTA endpoints under one prefix; every
-// other URL is a static frontend asset served directly by the web server.
-const apiURL = (path) => `/nrlota/api${path}`;
+// The deployed OTA API already owns its /api/v1 routes; static files are
+// served separately by the web server.
+const apiURL = (path) => path;
 
 // Board catalog for the public "功能介绍" section. Kept here (not in the DB) so
 // the marketing copy ships with the frontend and stays bilingual. Order defines
