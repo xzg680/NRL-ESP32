@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [string]$DeployUser,
+    [string]$DeployUser = '',
     [string]$DeployHost = 'ota.nrlptt.com',
-    [string]$RemoteBinary = '/nrlota/nrl-ota',
-    [string]$Service = 'nrl-ota.service'
+    [string]$RemoteBinary = '/nrlota/nrlota',
+    [string]$Service = 'nrlota.service'
 )
 
 $ErrorActionPreference = 'Stop'

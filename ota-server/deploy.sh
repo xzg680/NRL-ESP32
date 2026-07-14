@@ -6,8 +6,8 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 host="${OTA_DEPLOY_HOST:-ota.nrlptt.com}"
-remote_binary="${OTA_BACKEND_BINARY:-/nrlota/nrl-ota}"
-service="${OTA_BACKEND_SERVICE:-nrl-ota.service}"
+remote_binary="${OTA_BACKEND_BINARY:-/nrlota/nrlota}"
+service="${OTA_BACKEND_SERVICE:-nrlota.service}"
 remote="${OTA_DEPLOY_USER}@${host}"
 output_dir="$script_dir/dist"
 output_file="$output_dir/nrl-ota-linux-amd64"
