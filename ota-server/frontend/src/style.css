@@ -226,7 +226,7 @@ button.block {
   gap: 1rem;
 }
 .board-intro-grid .board-card {
-  min-height: clamp(780px, 100vh, 1080px);
+  min-height: 0;
   padding: 1.15rem;
 }
 .board-card {
