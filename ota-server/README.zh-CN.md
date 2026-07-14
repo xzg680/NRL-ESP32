@@ -22,6 +22,17 @@ $env:OTA_DEVICE_TOKEN = 'optional-device-access-token'
 
 修改 Vue 前端后，执行 `vp build` 并发布生成的 `frontend/dist` 即可，不需要重新构建 Go 可执行文件。
 
+在 Windows PowerShell 中发布 Linux（`amd64`）API 后端：
+
+```powershell
+cd ota-server
+.\deploy.ps1 -DeployUser your-ssh-user
+```
+
+脚本默认上传到 `/nrlota/nrl-ota`，保留 `/nrlota/nrl-ota.previous`，然后重启
+`nrl-ota.service`。如服务器路径或服务名不同，可用 `-RemoteBinary`、`-Service`
+覆盖。Linux/macOS 可使用 `OTA_DEPLOY_USER=... bash deploy.sh`。
+
 也可将前端单独发布为容器：
 
 ```powershell

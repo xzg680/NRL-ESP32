@@ -30,6 +30,17 @@ $env:OTA_DEVICE_TOKEN = 'optional-device-access-token'
 After changing the Vue frontend, run `vp build` and publish the resulting
 `frontend/dist` directory; rebuilding the Go executable is not required.
 
+To publish the Linux (`amd64`) API server from Windows PowerShell:
+
+```powershell
+cd ota-server
+.\deploy.ps1 -DeployUser your-ssh-user
+```
+
+The script uploads to `/nrlota/nrl-ota`, retains `/nrlota/nrl-ota.previous`,
+then restarts `nrl-ota.service`. Override `-RemoteBinary` or `-Service` if the
+server uses different names. The Linux/macOS equivalent is `OTA_DEPLOY_USER=... bash deploy.sh`.
+
 To publish the frontend as its own container:
 
 ```powershell
