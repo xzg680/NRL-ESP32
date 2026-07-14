@@ -21,12 +21,12 @@ const boards = [
     zh: {
       name: "格子派 gezipai",
       tagline: "ESP32-S3 彩色显示终端",
-      features: ["彩色 LCD 显示（非触摸，按键操作）", "LVGL 图形界面", "Wi-Fi 联网、语音播报与 OTA 升级"],
+      features: ["ES7210 麦克风 ADC + ES8311 DAC 音频链路", "240×240 ST7789 彩色屏与 LVGL 图形界面", "音量+/音量-/PTT 三按键、电池电压检测", "三色状态灯、SCI 串口透明传输", "BLE 配网、Wi-Fi 配置门户、远程 AT 与 OTA 升级"],
     },
     en: {
       name: "Gezipai",
       tagline: "ESP32-S3 color display terminal",
-      features: ["Color LCD (display-only, button controls)", "LVGL graphical UI", "Wi-Fi, voice prompts and OTA updates"],
+      features: ["ES7210 microphone ADC and ES8311 DAC audio path", "240×240 ST7789 color display with LVGL UI", "Volume up/down/PTT buttons and battery-voltage sensing", "Three-color status LED and SCI serial passthrough", "BLE provisioning, Wi-Fi portal, remote AT, and OTA updates"],
     },
   },
   {
@@ -37,12 +37,12 @@ const boards = [
     zh: {
       name: "BH4TDV ESP32 3188",
       tagline: "ESP32-S3 无屏电台接口",
-      features: ["连接外部电台的射频接口", "无显示屏、精简固件", "Wi-Fi 远程控制与 AT 指令"],
+      features: ["ES8311 全双工音频，连接 Moto3188 / NRL 电台", "PTT 输出、SQL 检测与三色状态灯", "三位频道选择输出，支持 0–7 共 8 个频道", "SCI 串口透明传输；无板载屏幕", "BLE 配网、Wi-Fi 配置门户、远程 AT 与 OTA 升级"],
     },
     en: {
       name: "BH4TDV ESP32 3188",
       tagline: "ESP32-S3 headless radio interface",
-      features: ["Interfaces with an external transceiver", "Headless, minimal firmware", "Wi-Fi remote control and AT commands"],
+      features: ["ES8311 full-duplex audio for Moto3188 / NRL radios", "PTT output, squelch detection, and three-color status LEDs", "Three-bit channel selection for channels 0–7", "SCI serial passthrough; no onboard display", "BLE provisioning, Wi-Fi portal, remote AT, and OTA updates"],
     },
   },
   {
@@ -53,12 +53,12 @@ const boards = [
     zh: {
       name: "S31 Korvo",
       tagline: "ESP32-S31 全功能开发板",
-      features: ["RGB LCD 与电容触摸", "OV3660 摄像头（720p）", "音频编解码与 WS2812 灯效", "LVGL 图形界面"],
+      features: ["ES8389 音频、800×480 RGB 电容触摸屏与 LVGL 界面", "ADC 按键：音量、模式和 PTT；板载 RGB 状态灯", "TF 卡、USB-OTG 主机、本地音乐与网络收音机", "蓝牙 HFP 耳机 / A2DP、ESP-NOW 脱网对讲、AI 语音", "兼容 DVP 摄像头的 NRL 视频通话；当前未启用外接 SCI"],
     },
     en: {
       name: "S31 Korvo",
       tagline: "ESP32-S31 full-featured dev board",
-      features: ["RGB LCD with capacitive touch", "OV3660 camera (720p)", "Audio codec and WS2812 lighting", "LVGL graphical UI"],
+      features: ["ES8389 audio, 800×480 RGB capacitive touch display, and LVGL UI", "ADC volume/mode/PTT buttons and onboard RGB status LED", "TF card, USB-OTG host, local music, and Internet radio", "Bluetooth HFP headset / A2DP, ESP-NOW intercom, and AI voice", "NRL video calls with compatible DVP cameras; external SCI is disabled"],
     },
   },
   {
@@ -69,12 +69,12 @@ const boards = [
     zh: {
       name: "S31 功能核心板",
       tagline: "ESP32-S31 精简核心板",
-      features: ["紧凑无屏核心板", "WS2812 状态指示灯", "Wi-Fi 联网与 OTA 升级"],
+      features: ["ES8311 音频编解码，适合网络语音与电台桥接", "YT8531 千兆以太网，Wi-Fi 可作为回退连接", "USB-A 主机、WS2812 RGB 状态灯与 SCI 串口", "紧凑无屏、无实体音量/PTT 按键的核心板方案", "Wi-Fi 配置门户、远程 AT 与 OTA 升级"],
     },
     en: {
       name: "S31 Function Coreboard",
       tagline: "ESP32-S31 compact core board",
-      features: ["Compact, screenless core board", "WS2812 status indicator LED", "Wi-Fi networking and OTA updates"],
+      features: ["ES8311 audio codec for network voice and radio bridging", "YT8531 Gigabit Ethernet with Wi-Fi fallback", "USB-A host, WS2812 RGB status LED, and SCI serial port", "Compact screenless core board without volume/PTT buttons", "Wi-Fi configuration portal, remote AT, and OTA updates"],
     },
   },
 ];
@@ -634,7 +634,7 @@ const app = createApp({
             <p class="subtitle">{{ t('subtitle') }}</p>
           </div>
           <h2 class="section-h">{{ t('boardsHeading') }}</h2>
-          <div class="board-grid">
+          <div class="board-grid board-intro-grid">
             <article v-for="b in localizedBoards" :key="b.id" class="board-card">
               <img class="board-image" :src="b.image" :alt="b.name" />
               <div class="board-card-head">
