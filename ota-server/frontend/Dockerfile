@@ -6,6 +6,8 @@ COPY --chown=vp:vp . ./
 RUN vp build
 
 FROM nginx:1.27-alpine
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# The official nginx entrypoint renders this template with API_UPSTREAM.
+ENV API_UPSTREAM=http://nrl-ota:8080
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /src/dist /usr/share/nginx/html
 EXPOSE 80

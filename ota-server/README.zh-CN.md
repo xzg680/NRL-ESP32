@@ -30,6 +30,10 @@ docker build -t nrl-ota-frontend .
 docker run -d --name nrl-ota-frontend -p 8081:80 nrl-ota-frontend
 ```
 
+前端容器默认把 `/nrlota/api/` 代理到 `http://nrl-ota:8080`。如 Go API
+使用其他可访问地址，可覆盖 `API_UPSTREAM`，例如
+`-e API_UPSTREAM=http://host.docker.internal:8080`。
+
 如果前端和 API 位于不同源，请通过反向代理将 API 暴露在前端的同一域名下（参考 `Caddyfile.example`）。前端所有动态请求统一使用同源的 `/nrlota/api/` 前缀，`/nrlota/www` 仅作为静态文件目录。
 Nginx 可使用 `nginx.conf.example`，Caddy 可使用 `Caddyfile.example`；两者都会在转发到 Go 前去掉 `/nrlota/api/` 前缀。
 

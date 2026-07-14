@@ -38,6 +38,10 @@ docker build -t nrl-ota-frontend .
 docker run -d --name nrl-ota-frontend -p 8081:80 nrl-ota-frontend
 ```
 
+The frontend container proxies `/nrlota/api/` to `http://nrl-ota:8080` by
+default. Override `API_UPSTREAM` when the Go API uses another reachable address,
+for example `-e API_UPSTREAM=http://host.docker.internal:8080`.
+
 When the frontend and API are served from different origins, configure a reverse
 proxy to expose the API under the frontend origin (as in `Caddyfile.example`).
 The frontend uses the single same-origin dynamic prefix `/nrlota/api/`; static
