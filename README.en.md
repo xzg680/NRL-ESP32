@@ -240,7 +240,7 @@ python scripts/build.py s31_function_coreboard build      # S31 function core bo
 python scripts/build.py gezipai menuconfig                # change config
 ```
 
-Each board has its own `build/<board>/` directory and `sdkconfig`, so you can switch boards without clobbering. Board config: `NRL_BOARD` is passed per board via `-DNRL_BOARD_ID`; the partition table and other Kconfig come from `sdkconfig.defaults` (S31 also appends `sdkconfig.defaults.esp32s31`; bh4tdv overrides the partition table via `sdkconfig.bh4tdv.defaults`).
+Each board has its own `build/<board>/` directory, generated `sdkconfig`, and one complete `sdkconfig.<board>.defaults` file. Board configurations are not layered on shared defaults. `NRL_BOARD` is passed per board via `-DNRL_BOARD_ID`.
 
 GitHub Actions builds all four boards natively with the official ESP-IDF image on every push, pull request, or manual run, uploading each board's `firmware` / `partition-table` / `bootloader` as artifacts and publishing to a Release on tags.
 

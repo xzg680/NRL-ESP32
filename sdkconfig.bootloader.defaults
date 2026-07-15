@@ -5,7 +5,7 @@
 #   * it inherits the esp_err_to_name lookup being disabled (otherwise IDF 6.2's
 #     idf_define_esp_err_codes() generates a *_esp_err_codes.c that PlatformIO
 #     never produces -> "bootloader_support_esp_err_codes.c not found"), but
-#   * it does NOT inherit the app's PSRAM tuning (sdkconfig.defaults.esp32s31's
+#   * it does NOT inherit the app's PSRAM tuning (the S31 board defaults'
 #     SPIRAM_SPEED_250M / SPIRAM_XIP_FROM_PSRAM). The bootloader does not use
 #     PSRAM, and pulling XIP/250M into it makes the 2nd-stage bootloader crash on
 #     entry (boot loop). Keeping this file free of PSRAM keys leaves the

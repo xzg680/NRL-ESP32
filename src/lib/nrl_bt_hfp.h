@@ -7,7 +7,7 @@
 // out of the headset's speaker. HFP narrowband (CVSD, 8 kHz mono PCM16) matches
 // the project's 8 kHz G.711 pipeline directly, so no resampling is needed.
 //
-// Only S31 builds this for real (Bluedroid host, see sdkconfig.defaults.esp32s31
+// Only S31 builds this for real (Bluedroid host, see the S31 board defaults
 // + CONFIG_BT_HFP_AG_ENABLE). On every other board these are no-op stubs.
 
 #include <stdbool.h>

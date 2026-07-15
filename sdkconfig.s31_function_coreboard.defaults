@@ -1,7 +1,264 @@
-# ESP32-S31-Function-CoreBoard-1 board-specific options.
-# Target-wide CPU/PSRAM/Bluetooth/partition defaults come from
-# sdkconfig.defaults.esp32s31 automatically.
+# Complete sdkconfig defaults for the ESP32-S31-Function-CoreBoard-1.
 
+# --- Linker: orphan section handling ---
+# PlatformIO's toolchain-riscv32-esp (and the xtensa one) link against picolibc,
+# which emits .fini_array / .fini_array_onexit sections (global destructors /
+# atexit). ESP-IDF's linker scripts are newlib-oriented and don't place those,
+# so with the default CONFIG_COMPILER_ORPHAN_SECTIONS_ERROR a clean link fails
+# with "unplaced orphan section `.fini_array`". The IDF-bundled toolchain used by
+# the official examples is newlib and never hits this. Demote to a warning so the
+# linker just places the (never-executed on an embedded app) sections.
+CONFIG_COMPILER_ORPHAN_SECTIONS_WARNING=y
+
+# --- esp_err_to_name lookup ---
+# Disabled because ESP-IDF 6.2 generates per-component <name>_esp_err_codes.c
+# sources via an idf_define_esp_err_codes() CMake custom command (see
+# tools/cmake/err_codes.cmake). PlatformIO espressif32 7.0.1 lists those sources
+# for compilation but never runs the generator, so the build fails with
+# "app_update_esp_err_codes.c not found". Turning the lookup off makes
+# idf_define_esp_err_codes() a no-op (no generated source). Trade-off:
+# esp_err_to_name() returns the numeric code instead of a human-readable string.
+# CONFIG_ESP_ERR_TO_NAME_LOOKUP is not set
+
+CONFIG_FREERTOS_HZ=1000
+# CONFIG_ESPTOOLPY_FLASHSIZE_2MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+# CONFIG_PARTITION_TABLE_SINGLE_APP is not set
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# --- Main task stack ---
+# IDF's default main-task stack (3584 B) is too small for our boot path:
+# initApp() opens the WiFi/HTTPD/audio/network stacks back-to-back. Match
+# arduino-esp32's old CONFIG_ARDUINO_LOOP_STACK_SIZE=8192 and a bit more.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+# CONFIG_SPIRAM_MEMTEST is not set
+# CONFIG_SR_NSN_WEBRTC is not set
+CONFIG_SR_NSN_NSNET2=y
+# CONFIG_SR_WN_WN9_HILEXIN is not set
+CONFIG_SR_MN_CN_NONE=y
+# CONFIG_SR_MN_CN_MULTINET6_QUANT is not set
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# --- WiFi voice latency tuning ---
+# AMPDU TX aggregation batches up to TX_BA_WIN frames into a single 802.11
+# aggregate before transmitting. For a tcpdump trace of our 62.5 ms G.711
+# voice flow this manifests as 2-packet bursts separated by 80-100 ms gaps
+# (the MAC waits for a TX opportunity, then dumps the queue). Disabling
+# AMPDU TX trades raw throughput for steady per-packet TX timing; we never
+# saturate WiFi bandwidth so it's the right trade for a walkie-talkie.
+# Pin the lwIP/TCPIP task to core 0 so it doesn't migrate into the audio
+# task's core mid-frame.
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+# CONFIG_LWIP_TCPIP_TASK_AFFINITY_NO_AFFINITY is not set
+
+# --- HTTP config portal ---
+# Browser POSTs often carry User-Agent/Sec-Fetch/etc. headers larger than the
+# IDF httpd defaults. Keep the portal tolerant of normal mobile/desktop
+# browsers while still bounding parser buffers.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+CONFIG_HTTPD_MAX_URI_LEN=1024
+
+# Permit unencrypted OTA downloads for trusted LAN deployments. HTTPS remains
+# supported and should be used whenever the network path is not fully trusted.
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
+
+# --- esp_audio_codec: compile only the codecs the media stack uses ---------
+# Decoders kept: AAC, MP3, FLAC, OPUS, PCM/WAV (+ M4A/TS simple-dec parsers).
+# Everything else is dead weight in the 5 MB OTA app slots (the unused codec
+# libraries alone pushed the S31 image past the partition size once the Opus
+# encoder for NRL packet type 8 landed).
+# CONFIG_AUDIO_DECODER_AMRNB_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_AMRWB_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_VORBIS_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_ADPCM_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_ALAC_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_SBC_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_LC3_SUPPORT is not set
+# CONFIG_AUDIO_DECODER_G722_SUPPORT is not set
+# CONFIG_AUDIO_SIMPLE_DEC_OGG_SUPPORT is not set
+# Encoders: only Opus (NRL wideband voice + xiaozhi AI uplink).
+# CONFIG_AUDIO_ENCODER_AAC_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_G711_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_AMRNB_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_AMRWB_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_ADPCM_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_ALAC_SUPPORT is not set
+# CONFIG_AUDIO_ENCODER_PCM_SUPPORT is not set
+# SBC encoder stays on: the S31 A2DP source path encodes SBC in the app.
+CONFIG_AUDIO_ENCODER_SBC_SUPPORT=y
+# CONFIG_AUDIO_ENCODER_LC3_SUPPORT is not set
+# --- ESP32-S31 core settings ---
+# These reach the app build only; the 2nd-stage bootloader uses
+# sdkconfig.bootloader.defaults, so none of this can boot-loop it.
+#
+# --- CPU speed: 320 MHz (ESP32-S31 default) ---
+# S31 supports 320 MHz and its ESP-IDF Kconfig defaults to that speed.
+# CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240 is not set
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_320=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=320
+
+# --- PSRAM speed: 250 MHz ---
+# Keep the S31 media/audio buffers at the board-supported high-speed setting.
+CONFIG_SPIRAM_SPEED_250M=y
+
+# Flash auto-suspend: keep the cache alive during config-save flash writes so
+# other CPU code (and any cached PSRAM access) isn't stalled.
+CONFIG_SPI_FLASH_AUTO_SUSPEND=y
+
+# --- Console on UART0 (not USB-Serial-JTAG) ---
+# Route ESP_LOG and the AT console through UART0.
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is not set
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# --- Bluetooth: Classic BT + HFP Audio Gateway (for a BT headset) ---
+# S31 has Classic BT in silicon (SOC_BT_CLASSIC_SUPPORTED). HFP needs the
+# Bluedroid host + Classic BT; Bluedroid and NimBLE are mutually exclusive.
+# This board drops BLE provisioning and uses the SoftAP portal instead.
+# ble_config.cpp and the esp-nimble-cpp component are compiled out for S31 (see
+# src/lib/ble_config.cpp guard and src/CMakeLists.txt).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+# CONFIG_BT_NIMBLE_ENABLED is not set
+CONFIG_BT_BLUEDROID_ENABLED=y
+# Controller in BR/EDR-only mode (Classic). Auto-enables BT_CTRL_BREDR_ENABLE.
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+# Allow one (e)SCO link for HFP voice -- the controller default is 0 (no audio).
+CONFIG_BT_CTRL_BR_EDR_MAX_SYNC_CONN=1
+# Single-headset device: we only ever use ONE peer link, so shrink the host
+# link table (default 4) and the controller's ACL RX queue (default 6) -- each
+# entry is internal RAM. MAX_ACL_CONN must stay at 2 though: dropping the
+# controller to 1 ACL slot stopped the boot-time OOM but broke connecting
+# entirely -- the page/inbound collision handling has no spare slot, so every
+# connect returned HCI "Conn Limit Exceeded" (0x09) and no headset could link.
+# 2 is the functional floor; the internal RAM it needs is freed by the Wi-Fi
+# trims below (buffer pools + AMPDU off).
+CONFIG_BT_CTRL_BR_EDR_MAX_ACL_CONN=2
+CONFIG_BT_ACL_CONNECTIONS=2
+CONFIG_BT_CTRL_BR_EDR_ACLU_RX_BUF_NB=4
+# SCO/voice PCM travels over HCI so the app receives/sends it via data callbacks.
+CONFIG_BT_CTRL_BR_EDR_SCO_DATA_PATH_HCI=y
+# Bluedroid Classic profiles: HFP Audio Gateway (voice) + A2DP source
+# (music to the headset; app-side SBC encoding via esp_audio_codec).
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_A2DP_ENABLE=y
+# A2DP SOURCE uses the app-encoded-SBC (external codec) model: nrl_bt_hfp.cpp
+# encodes SBC via esp_sbc_enc and ships frames with esp_a2d_source_audio_data_send
+# + esp_a2d_source_register_stream_endpoint. Those APIs REQUIRE this flag -- without
+# it the endpoint register fails ("UNKNOWN ERROR"), which is why music never reached
+# the BT headset. Enabling it also drops Bluedroid's internal SBC encoder (saves RAM).
+CONFIG_BT_A2DP_USE_EXTERNAL_CODEC=y
+CONFIG_BT_HFP_ENABLE=y
+CONFIG_BT_HFP_AG_ENABLE=y
+# CONFIG_BT_HFP_CLIENT_ENABLE is not set
+# SCO audio over HCI (PCM frames delivered to the app), narrowband CVSD 8 kHz to
+# match the project's 8 kHz G.711 pipeline (no resample); WBS 16 kHz left off.
+CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI=y
+# CONFIG_BT_HFP_WBS_ENABLE is not set
+# Bluedroid allocates its host workqueue and profile objects when the user turns
+# BT on. The S31 UI/media build keeps internal RAM busy by then, so let BT move
+# PSRAM-capable allocations out of internal RAM and keep the small internal
+# blocks available for task/queue resources such as bt_workqueue.
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
+# The real bottleneck: this chip boots with only ~211 KB of internal DRAM, and by
+# the time the user turns BT on the app is down to ~38 KB free / 29 KB largest
+# block -- too little for Classic BT (the controller's mempool + Bluedroid's
+# bt_workqueue, all FreeRTOS tasks/queues whose stacks MUST live in internal
+# RAM), so startup fails and the stack aborts. BT_ALLOCATION_FROM_SPIRAM_FIRST
+# alone doesn't help because the shortfall is internal-only resources.
+# (SPIRAM_TRY_ALLOCATE_WIFI_LWIP was tried and made it WORSE: Wi-Fi's RX/TX DMA
+# buffers can't live in PSRAM, so it hit "wifi:mem fail" and starved internal RAM
+# down to <1 KB. Do not re-enable it.)
+#
+# Instead free internal RAM by trimming Wi-Fi's buffer pools. The app carries
+# only low-bandwidth G.711 voice (UDP) plus config traffic, so the stock buffer
+# counts are wildly oversized here; cutting them reclaims tens of KB of internal
+# RAM for the BT stack with no audible effect on the voice path.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=2
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8
+# Keep AMPDU RX ON but with the smallest Block-Ack window (RX_BA_WIN=2 above).
+# Turning aggregation fully OFF was tried and caused continuous WiFi stutter: the
+# AP kept trying to set up Block-Ack and our side kept tearing it down
+# ("[ADDBA] RX DELBA reason:37" churn), destabilising the voice link. Leaving RX
+# aggregation on with a 2-deep window keeps the AP happy while holding only a
+# tiny reorder buffer. TX aggregation stays off (we send only small voice frames,
+# so TX A-MPDU buys nothing and its buffers are pure overhead here).
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=y
+# CONFIG_ESP_WIFI_AMPDU_TX_ENABLED is not set
+
+# Wi-Fi/BT coexistence: UDP voice (Wi-Fi) and SCO (BT) share the single radio.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# --- Give Bluetooth its own core (core 1); Wi-Fi + app stay on core 0 ---
+# By default the Wi-Fi task, BT controller and Bluedroid host are ALL pinned to
+# core 0 while core 1 sits idle. Core 0 then preempts the BT work two ways:
+#   * the high-priority Wi-Fi task preempts the BT SCO data path while receiving
+#     the downlink stream -> (e)SCO frame jitter heard as a continuous "warble"
+#     (present only while a stream is active, clean once it stops; eSCO
+#     retransmission can't fix it because it is CPU preemption, not RF loss);
+#   * the app/lwIP tasks preempt the controller during connection setup ->
+#     role-switch/LMP collisions and dropped links.
+# Pinning the BT controller + Bluedroid host to the otherwise-idle core 1 gives
+# Bluetooth a dedicated core: stable connections AND clean SCO, while Wi-Fi RX
+# and the app keep core 0.
+# CONFIG_BT_CTRL_PINNED_TO_CORE_CHOICE_0 is not set
+CONFIG_BT_CTRL_PINNED_TO_CORE_CHOICE_1=y
+# CONFIG_BT_BLUEDROID_PINNED_TO_CORE_0 is not set
+CONFIG_BT_BLUEDROID_PINNED_TO_CORE_1=y
+
+# --- Full CA certificate bundle (S31 only) ---
+# Net radio / HLS sources sit behind assorted CDNs (observed: Ali CDN roots
+# missing from the default "most common" subset -> TLS handshake fails).
+# The S31's 7 MB app slots have room for the full bundle.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# Radio-stream CDNs frequently serve incomplete chains (no intermediate
+# cert), which mbedtls cannot repair. media_decoder retries such streams
+# without verification (public audio; availability over authenticity).
+# These options only permit that fallback path -- connections that attach
+# the cert bundle still verify normally.
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
+# --- Partition table: 7 MB app slots (S31 only) ---
+# The media stack (MP3/AAC/FLAC decoder libs + esp-sr + LVGL + FreeType)
+# outgrew part-gezipai.csv's 5 MB app partitions; part-s31.csv widens them
+# to 7 MB and shrinks the oversized model partition (srmodels.bin ~330 KB).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="part-s31.csv"
+CONFIG_PARTITION_TABLE_FILENAME="part-s31.csv"
+
+# --- Compiler optimization: -O2 (S31 only) ---
+# The shared defaults inherit the legacy "default" (-Og debug) level; LVGL's
+# software renderer and the audio decoders are 2-3x slower there, which reads
+# directly as UI latency on the 800x480 panel.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# --- FreeRTOS runtime stats (S31 only) ---
+# Powers the top-bar per-core CPU load readout and the AT+TOP per-task CPU
+# list used to hunt UI-latency regressions on this board.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+
+# --- FatFs filename encoding (TF card / USB drive music library) ---
+# Default ANSI/OEM (CP437) cannot represent Chinese long filenames: readdir
+# falls back to the 8.3 short alias (".flac" -> ".FLA") and the playlist
+# scanner skips the file. The UTF-8 API returns the LFN verbatim, which also
+# feeds the CJK-capable music UI font directly.
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+
+# --- Function CoreBoard Ethernet ---
 CONFIG_ETH_ENABLED=y
 CONFIG_ETH_USE_ESP32_EMAC=y
 

@@ -49,10 +49,10 @@ set(app_sources
     lib/wifi_config_portal_view.cpp
 )
 
-# LVGL is vendored under components/lvgl/ only for the gezipai board (the
-# fetch_lvgl.py extra_script runs only in [env:gezipai]). On bh4tdv, the
-# directory is absent and display.cpp's `#include <lvgl.h>` is itself gated
-# behind `#if NRL_HAS_DISPLAY`, so we must not declare the dependency.
+# LVGL is vendored under components/lvgl/ only for display-equipped boards.
+# On bh4tdv and the S31 Function CoreBoard, display sources compile their LVGL
+# code out through board capability macros, so we must not declare the
+# dependency even if a developer's shared worktree already contains LVGL.
 set(app_priv_requires
     app_update
     bt
@@ -93,17 +93,13 @@ set(app_priv_requires
 if(NOT IDF_TARGET STREQUAL "esp32s31")
     list(APPEND app_priv_requires h2zero__esp-nimble-cpp)
 endif()
-if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../components/lvgl/lvgl.h")
+if(NOT NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_FUNCTION_COREBOARD" AND
+   EXISTS "${CMAKE_CURRENT_LIST_DIR}/../components/lvgl/lvgl.h")
     list(APPEND app_priv_requires lvgl)
 endif()
-# Both S31 build entries register the vendored component directory. Function
-# CoreBoard compiles all Korvo-only call sites out through board capability
-# macros, while keeping one stable S31 dependency graph for IDF's early
-# component-requirement discovery pass.
-if(IDF_TARGET STREQUAL "esp32s31" AND
-   EXISTS "${CMAKE_CURRENT_LIST_DIR}/../vendor/esp32_s31_korvo/CMakeLists.txt")
-    list(APPEND app_priv_requires esp32_s31_korvo)
-endif()
+# Korvo's BSP is linked from the top-level CMakeLists after project(), where the
+# custom board selection is reliably available. Declaring it here would make
+# ESP-IDF's early requirement scan pull the display BSP into every S31 build.
 # USB flash drive + SMB network share (storage_service backends) -- the
 # component dependencies themselves are target-gated in idf_component.yml.
 if(IDF_TARGET STREQUAL "esp32s31")

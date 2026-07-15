@@ -1,10 +1,4 @@
-# --- RGB LCD notes (S31) ---
-# The S31 RGB panel streams two full framebuffers straight from PSRAM via GDMA
-# (no bounce buffer; display_s31.cpp) and needs PSRAM at 250 MHz for the bandwidth
-# (set in sdkconfig.defaults.esp32s31). Do NOT enable CONFIG_LCD_RGB_RESTART_IN_VSYNC
-# or CONFIG_LCD_RGB_ISR_IRAM_SAFE: both corrupt/flicker this board. Because GDMA
-# reads PSRAM directly (bypassing the CPU cache), flash/codec writes that disable
-# the cache no longer disturb the panel, so there is no volume-change drift.
+# Complete sdkconfig defaults for the Gezipai ESP32-S3 board.
 
 # --- Linker: orphan section handling ---
 # PlatformIO's toolchain-riscv32-esp (and the xtensa one) link against picolibc,
@@ -86,27 +80,6 @@ CONFIG_HTTPD_MAX_URI_LEN=1024
 # supported and should be used whenever the network path is not fully trusted.
 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 
-# --- LVGL (格子派 ST7789 LCD UI; see src/app/driver/display.cpp) ---
-# LVGL is vendored at components/lvgl and driven straight from the Arduino
-# loop(), so it runs with no OS layer (LV_OS_NONE). These options configure
-# LVGL through Kconfig (LV_CONF_SKIP=y, the default), so no lv_conf.h is used.
-CONFIG_LV_COLOR_DEPTH_16=y
-CONFIG_LV_OS_NONE=y
-CONFIG_LV_USE_CLIB_MALLOC=y
-CONFIG_LV_USE_CLIB_STRING=y
-CONFIG_LV_USE_CLIB_SPRINTF=y
-CONFIG_LV_FONT_FMT_TXT_LARGE=y
-# Montserrat sizes used by the UI: status bar (14), IP bar (16), SSID (20),
-# clock (28) and the large caller callsign (48).
-CONFIG_LV_FONT_MONTSERRAT_14=y
-CONFIG_LV_FONT_MONTSERRAT_16=y
-CONFIG_LV_FONT_MONTSERRAT_20=y
-CONFIG_LV_FONT_MONTSERRAT_28=y
-CONFIG_LV_FONT_MONTSERRAT_48=y
-CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
-CONFIG_LV_BUILD_EXAMPLES=n
-CONFIG_LV_BUILD_DEMOS=n
-
 # --- esp_audio_codec: compile only the codecs the media stack uses ---------
 # Decoders kept: AAC, MP3, FLAC, OPUS, PCM/WAV (+ M4A/TS simple-dec parsers).
 # Everything else is dead weight in the 5 MB OTA app slots (the unused codec
@@ -132,3 +105,49 @@ CONFIG_LV_BUILD_DEMOS=n
 # SBC encoder stays on: the S31 A2DP source path encodes SBC in the app.
 CONFIG_AUDIO_ENCODER_SBC_SUPPORT=y
 # CONFIG_AUDIO_ENCODER_LC3_SUPPORT is not set
+# ESP32-S3-only defaults shared by gezipai and bh4tdv.
+
+# --- PSRAM speed: 80 MHz (S3 octal PSRAM) ---
+CONFIG_SPIRAM_SPEED_80M=y
+
+# --- CPU speed: 240 MHz (S3 UI/audio headroom) ---
+# CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160 is not set
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# --- Bluetooth (NimBLE host) ---
+# Gezipai and BH4TDV use BLE provisioning through src/lib/ble_config.cpp.
+# The S31 board-specific defaults use Bluedroid + Classic BT instead.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+# CONFIG_BT_BLUEDROID_ENABLED is not set
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+# CONFIG_BT_NIMBLE_ROLE_CENTRAL is not set
+# CONFIG_BT_NIMBLE_ROLE_OBSERVER is not set
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_PINNED_TO_CORE_0=y
+# CONFIG_BT_BLE_50_FEATURES_SUPPORTED is not set
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_BLE_42_ADV_EN=y
+CONFIG_BT_BLE_42_SCAN_EN=y
+
+# Keep Wi-Fi voice packets evenly spaced; throughput is not the bottleneck.
+# CONFIG_ESP_WIFI_AMPDU_TX_ENABLED is not set
+# Shared LVGL defaults for display-equipped boards.
+
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_OS_NONE=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_FONT_FMT_TXT_LARGE=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+CONFIG_LV_BUILD_EXAMPLES=n
+CONFIG_LV_BUILD_DEMOS=n

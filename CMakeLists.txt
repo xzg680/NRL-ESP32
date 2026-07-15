@@ -75,14 +75,31 @@ if(IDF_TARGET STREQUAL "esp32s31")
         target_compile_options(${bt_lib} PRIVATE -Wno-error=stringop-truncation)
     endif()
 
-    # LVGL's vendored ESP cmake only REQUIRES esp_timer; its FreeType binding
-    # (CONFIG_LV_USE_FREETYPE, S31 only) needs the freetype component's headers
-    # and library, so wire them up here instead of patching the vendored tree.
-    idf_component_get_property(lvgl_lib lvgl COMPONENT_LIB)
-    idf_component_get_property(freetype_lib espressif__freetype COMPONENT_LIB)
-    idf_component_get_property(ppa_lib esp_driver_ppa COMPONENT_LIB)
-    idf_component_get_property(esp_mm_lib esp_mm COMPONENT_LIB)
-    if(lvgl_lib)
+    # Component requirement discovery runs before custom project variables are
+    # reliably available inside src/CMakeLists.txt. Connect the Korvo BSP after
+    # project() instead, when the selected board is known and both component
+    # targets exist. Function CoreBoard never registers or links this BSP.
+    if(NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_KORVO")
+        idf_component_get_property(src_lib src COMPONENT_LIB)
+        idf_component_get_property(korvo_bsp_lib esp32_s31_korvo COMPONENT_LIB)
+        if(src_lib AND korvo_bsp_lib)
+            target_link_libraries(${src_lib} PRIVATE ${korvo_bsp_lib})
+        endif()
+    endif()
+
+    # LVGL is fetched only for display-equipped boards. The S31 Function
+    # CoreBoard has no display, so do not query a component that is deliberately
+    # absent from that build.
+    if(NOT NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_FUNCTION_COREBOARD" AND
+       EXISTS "${CMAKE_CURRENT_LIST_DIR}/components/lvgl/lvgl.h")
+        # LVGL's vendored ESP cmake only REQUIRES esp_timer; its FreeType binding
+        # (CONFIG_LV_USE_FREETYPE, S31 only) needs the freetype component's headers
+        # and library, so wire them up here instead of patching the vendored tree.
+        idf_component_get_property(lvgl_lib lvgl COMPONENT_LIB)
+        idf_component_get_property(freetype_lib espressif__freetype COMPONENT_LIB)
+        idf_component_get_property(ppa_lib esp_driver_ppa COMPONENT_LIB)
+        idf_component_get_property(esp_mm_lib esp_mm COMPONENT_LIB)
+
         # LVGL 9.5.0's Espressif PPA backend checks the P4-style L2 cache line
         # Kconfig, while S31 exposes only the L1 DCache line size. They are both
         # 64 bytes on this board, so provide the missing alias for LVGL only.
@@ -97,9 +114,9 @@ if(IDF_TARGET STREQUAL "esp32s31")
         if(esp_mm_lib)
             target_link_libraries(${lvgl_lib} PUBLIC ${esp_mm_lib})
         endif()
-    endif()
-    if(lvgl_lib AND freetype_lib)
-        target_link_libraries(${lvgl_lib} PUBLIC ${freetype_lib})
+        if(freetype_lib)
+            target_link_libraries(${lvgl_lib} PUBLIC ${freetype_lib})
+        endif()
     endif()
 
     # libsmb2 is legacy C89-style code (old-style definitions, implicit

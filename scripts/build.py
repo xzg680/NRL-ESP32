@@ -30,37 +30,37 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# board -> (IDF target, NRL_BOARD macro, SDKCONFIG_DEFAULTS list, needs LVGL,
+# board -> (IDF target, NRL_BOARD macro, board sdkconfig defaults, needs LVGL,
 #           extra -D args). Keep in sync with the CI matrix in
 #           .github/workflows/firmware.yml.
 BOARDS = {
     "gezipai": dict(
         target="esp32s3",
         macro="NRL_BOARD_GEZIPAI",
-        sdkconfig=["sdkconfig.defaults"],
+        sdkconfig=["sdkconfig.gezipai.defaults"],
         lvgl=True,
         extra=[],
     ),
     "bh4tdv": dict(
         target="esp32s3",
         macro="NRL_BOARD_BH4TDV",
-        sdkconfig=["sdkconfig.defaults", "sdkconfig.bh4tdv.defaults"],
+        sdkconfig=["sdkconfig.bh4tdv.defaults"],
         lvgl=False,
         extra=[],
     ),
     "s31_korvo": dict(
         target="esp32s31",
         macro="NRL_BOARD_S31_KORVO",
-        sdkconfig=["sdkconfig.defaults", "sdkconfig.defaults.esp32s31"],
+        sdkconfig=["sdkconfig.s31_korvo.defaults"],
         lvgl=True,
         extra=["-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"],
     ),
     "s31_function_coreboard": dict(
         target="esp32s31",
         macro="NRL_BOARD_S31_FUNCTION_COREBOARD",
-        sdkconfig=["sdkconfig.defaults", "sdkconfig.defaults.esp32s31", "sdkconfig.s31_function_coreboard.defaults"],
+        sdkconfig=["sdkconfig.s31_function_coreboard.defaults"],
         lvgl=False,
-        extra=["-DNRL_EXTRA_COMPONENT_DIRS=vendor/esp32_s31_korvo"],
+        extra=[],
     ),
 }
 

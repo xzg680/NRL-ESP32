@@ -17,12 +17,6 @@ dependencies:
   # component dependency on registry lvgl conflicts with our vendored LVGL.
   espressif/esp_new_jpeg:
     version: "^1.0.2"
-  # FreeType for the vector CJK font engine on the S31 LCD (LV_USE_FREETYPE).
-  # S31-only: the other boards keep the smaller bitmap-font-only build.
-  espressif/freetype:
-    version: "^2.13.3"
-    rules:
-      - if: "target == esp32s31"
   # USB flash drive playback: USB-OTG Host MSC -> FatFS at /usb
   # (docs/architecture.md 3.5). S31-only -- that's the board with the
   # USB-OTG host port.
@@ -49,8 +43,8 @@ dependencies:
     rules:
       - if: "target == esp32s31"
   # esp-nimble-cpp: pure-IDF C++ wrapper around the NimBLE host stack used by
-  # src/lib/ble_config.cpp. Requires CONFIG_BT_NIMBLE_ENABLED=y (set in
-  # sdkconfig.defaults); Bluedroid must be off (mutually exclusive stacks).
+  # src/lib/ble_config.cpp. Requires CONFIG_BT_NIMBLE_ENABLED=y in the S3 board
+  # defaults; Bluedroid must be off (mutually exclusive stacks).
   h2zero/esp-nimble-cpp:
     version: ">=2.2.0"
     rules:

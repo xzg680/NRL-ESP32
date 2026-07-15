@@ -243,7 +243,7 @@ REBOOT
 - 状态标题随收发实时变化：`STANDBY`（待机）、`RECEIVING`（接收中）、`TRANSMITTING`（发送中）、`FULL DUPLEX`（同时收发）。
 - 底部：局域网 IP；进入配网（AP）状态时显示配置热点 IP（琥珀色）；**发送或接收语音时改为显示 NRL 服务器 host —— 发送为红色、接收为青色，显示配置的 host 字符串而非解析后的 IP**。
 
-LVGL（9.3.0）以**本地组件**形式内置在 `components/lvgl`，不经 ESP-IDF 组件管理器联网下载，因此本机和 CI 离线即可编译。LVGL 与 esp_lcd 的对接（缓冲区、刷新、tick）直接写在 `display.cpp` 里，未使用 `esp_lvgl_port`。LVGL 字体、颜色深度等通过 Kconfig 配置在 `sdkconfig.defaults`。
+LVGL 以**本地组件**形式放在 `components/lvgl`。LVGL 与 esp_lcd 的对接（缓冲区、刷新、tick）直接写在显示驱动中；相关 Kconfig 只存在于带屏板卡自己的 defaults 文件中，无屏板卡不加载 LVGL。
 
 ## 启动流程
 
@@ -289,10 +289,9 @@ python scripts/build.py s31_function_coreboard build      # S31 功能核心板
 python scripts/build.py gezipai menuconfig                # 修改配置
 ```
 
-每块板有独立的 `build/<board>/` 目录与 `sdkconfig`，可随意切换互不干扰。板级配置：
-`NRL_BOARD` 由脚本通过 `-DNRL_BOARD_ID` 传入；分区表与其它 Kconfig 来自
-`sdkconfig.defaults`（S31 追加 `sdkconfig.defaults.esp32s31`，bh4tdv 用
-`sdkconfig.bh4tdv.defaults` 覆盖分区表）。
+每块板有独立的 `build/<board>/` 目录、`sdkconfig` 和一份完整的
+`sdkconfig.<board>.defaults`，可随意切换且互不叠加配置。`NRL_BOARD` 由脚本通过
+`-DNRL_BOARD_ID` 传入。
 
 GitHub Actions 会在每次 push、pull request 或手动触发时，用官方 ESP-IDF 镜像原生构建
 四块板，并上传各板的 `firmware` / `partition-table` / `bootloader` 作为构建产物，
