@@ -79,6 +79,30 @@ static bool blinkPhase(const unsigned long now_ms, const unsigned long period_ms
 
 namespace {
 
+// Soft PTT is also available on screenless boards, but the following state is
+// only meaningful on boards that actually have physical volume/PTT keys. Keep
+// it out of the Function CoreBoard binary instead of compiling inert GPIO -1
+// paths that generate unused-variable warnings.
+constexpr unsigned long kDefaultPttTimeoutMs = 300000UL;
+
+bool s_net_audio_active = false;
+unsigned long s_last_heartbeat_rx_ms = 0UL;
+#if NRL_BOARD == NRL_BOARD_S31_KORVO
+bool s_ws2812_ready = false;
+#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+led_strip_handle_t s_ws2812 = nullptr;
+#endif
+
+// PTT transmit state also serves soft PTT, so it remains available even when
+// a board deliberately has no physical controls.
+bool s_tx_active = false;
+bool s_tx_latched = false;
+bool s_tx_suppressed = false;
+bool s_soft_ptt_held = false;
+unsigned long s_tx_since_ms = 0UL;
+SemaphoreHandle_t s_poll_mutex = nullptr;
+
+#if !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
 constexpr unsigned long kButtonDebounceMs = 30UL;
 constexpr unsigned long kVolumeSaveDelayMs = 2000UL;
 // Volume +/- auto-repeat: after the first press, wait this long before the
@@ -88,9 +112,6 @@ constexpr unsigned long kVolumeRepeatIntervalMs = 80UL;
 // A press shorter than this toggles the transmit latch; a longer press is a
 // momentary (push-to-talk) hold that ends the moment the button is released.
 constexpr unsigned long kPttLongPressMs = 500UL;
-// Fallback transmit timeout, used only if the stored config cannot be read.
-constexpr unsigned long kDefaultPttTimeoutMs = 300000UL;
-
 struct DebouncedButton {
     int pin;
     int raw_level;
@@ -110,13 +131,6 @@ DebouncedButton s_btn_ptt      = {NRL_PIN_BTN_PTT,      1, false, 0UL};
 AutoRepeat s_btn_vol_up_repeat   = {false, 0UL};
 AutoRepeat s_btn_vol_down_repeat = {false, 0UL};
 
-bool s_net_audio_active = false;
-unsigned long s_last_heartbeat_rx_ms = 0UL;
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
-bool s_ws2812_ready = false;
-#elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
-led_strip_handle_t s_ws2812 = nullptr;
-#endif
 bool s_volume_dirty = false;
 unsigned long s_volume_change_ms = 0UL;
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
@@ -127,16 +141,7 @@ unsigned long s_pending_volume_ms = 0UL;
 constexpr unsigned long kMenuChordGraceMs = 100UL;
 #endif
 
-// PTT transmit state machine.
-bool s_tx_active = false;            // effective transmit gate (IsSqlActive)
-bool s_tx_latched = false;           // latched on by a short press
-bool s_tx_suppressed = false;        // timeout fired during the current hold
-bool s_soft_ptt_held = false;        // on-screen "network" area pressed (hold-to-talk)
 unsigned long s_ptt_press_ms = 0UL;  // press-down time of the current press
-unsigned long s_tx_since_ms = 0UL;   // when transmit last switched on
-// STATUS_IO_Poll() runs from both the main loop and the bridge task; this
-// mutex keeps the two from racing inside the button / PTT state machine.
-SemaphoreHandle_t s_poll_mutex = nullptr;
 
 #if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
 adc_oneshot_unit_handle_t s_button_adc = nullptr;
@@ -454,6 +459,8 @@ static void pollGezipaiMenuButtons(const unsigned long now)
 }
 #endif
 
+#endif  // !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
+
 // Effective PTT auto-off timeout in milliseconds, from the persisted config.
 static unsigned long pttTimeoutMs(void)
 {
@@ -701,11 +708,13 @@ extern "C" void STATUS_IO_Poll(void)
 
     // Persist the volume only after the user stops adjusting, so a burst of
     // button taps does not hammer the EEPROM.
+#if !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
     if (s_volume_dirty && (now - s_volume_change_ms) >= kVolumeSaveDelayMs) {
         s_volume_dirty = false;
         EXTERNAL_RADIO_SaveConfig();
         ESP_LOGI(TAG, "line_out_volume saved");
     }
+#endif
 
     if (s_poll_mutex != nullptr) {
         xSemaphoreGive(s_poll_mutex);

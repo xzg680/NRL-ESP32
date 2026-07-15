@@ -160,6 +160,16 @@ const messages = {
       "RISC-V 芯片暂不支持网页刷机，请使用串口烧录（scripts/build.py <board> flash）。",
     flashUnavailable: "该板卡暂未上传可刷写的固件包。",
     flashTip: "若无法识别设备，请按住 BOOT 再插入 USB 后重试。",
+    navSerial: "串口调试",
+    serialHeading: "串口调试终端",
+    serialIntro: "连接已运行的板卡后，可直接查看调试输出并输入 AT 指令。日志显示区与命令输入行独立，输出不会打断正在编辑的命令。",
+    serialBoard: "板卡型号",
+    serialConnect: "连接串口",
+    serialDisconnect: "断开连接",
+    serialReady: "已连接，输入 AT 查看命令列表。",
+    serialUnsupported: "当前浏览器不支持 Web Serial，请使用 Chrome 或 Edge。",
+    serialConnectFailed: "串口连接失败：{error}",
+    serialWriteFailed: "命令发送失败：{error}",
     loadFailed: "加载失败：{error}",
     adminArea: "管理员",
     adminHint: "输入管理员用户名和密码，登录后可查看设备状态并发布固件。",
@@ -256,6 +266,17 @@ const messages = {
       "RISC-V chip — not web-flashable. Use serial flashing (scripts/build.py <board> flash).",
     flashUnavailable: "No flashable firmware package has been staged for this board yet.",
     flashTip: "If the device is not detected, hold BOOT while plugging in USB, then retry.",
+    navSerial: "Serial debug",
+    serialHeading: "Serial debug terminal",
+    serialIntro:
+      "Connect a running board to view debug output and send AT commands. Output and command entry are separate, so incoming logs never interrupt typing.",
+    serialBoard: "Board model",
+    serialConnect: "Connect serial",
+    serialDisconnect: "Disconnect",
+    serialReady: "Connected. Type AT to list commands.",
+    serialUnsupported: "This browser does not support Web Serial. Use Chrome or Edge.",
+    serialConnectFailed: "Serial connection failed: {error}",
+    serialWriteFailed: "Command send failed: {error}",
     loadFailed: "Load failed: {error}",
     adminArea: "Administrator",
     adminHint: "Sign in with the administrator username and password to view device status and publish firmware.",
@@ -325,6 +346,115 @@ const app = createApp({
     const loginError = ref("");
     const secureContext = window.isSecureContext;
     const webSerialAvailable = "serial" in navigator;
+
+    // Serial debug terminal. Keep the log view and command entry as separate
+    // DOM elements: ESP_LOG output can arrive at any time without moving or
+    // corrupting what the user is currently typing.
+    const serialBoard = ref("s31_korvo");
+    const serialPort = ref(null);
+    const serialConnected = ref(false);
+    const serialOutput = ref("");
+    const serialInput = ref("");
+    const serialMessage = ref("");
+    const serialOutputEl = ref(null);
+    const serialPrompt = computed(() => `${boardName(serialBoard.value)}# `);
+    let activeSerialReader = null;
+    let serialReadTask = null;
+
+    function appendSerialOutput(text) {
+      serialOutput.value = (serialOutput.value + text).slice(-200000);
+      setTimeout(() => {
+        const output = serialOutputEl.value;
+        if (output) output.scrollTop = output.scrollHeight;
+      });
+    }
+
+    async function readSerial(port) {
+      const reader = port.readable.getReader();
+      const decoder = new TextDecoder();
+      activeSerialReader = reader;
+      try {
+        while (serialConnected.value && serialPort.value === port) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value) appendSerialOutput(decoder.decode(value, { stream: true }));
+        }
+        const tail = decoder.decode();
+        if (tail) appendSerialOutput(tail);
+      } catch (error) {
+        if (serialConnected.value) {
+          appendSerialOutput(`\r\n[serial read error: ${error.message}]\r\n`);
+        }
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // The port may already have been closed by the browser.
+        }
+        if (activeSerialReader === reader) activeSerialReader = null;
+        if (serialPort.value === port) serialConnected.value = false;
+      }
+    }
+
+    async function connectSerial() {
+      if (!webSerialAvailable) {
+        serialMessage.value = t("serialUnsupported");
+        return;
+      }
+      serialMessage.value = "";
+      try {
+        const port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200, bufferSize: 8192 });
+        serialPort.value = port;
+        serialConnected.value = true;
+        appendSerialOutput(`[${serialPrompt.value}${t("serialReady")}]\r\n`);
+        serialReadTask = readSerial(port);
+      } catch (error) {
+        serialMessage.value = t("serialConnectFailed", { error: error.message });
+      }
+    }
+
+    async function disconnectSerial() {
+      const port = serialPort.value;
+      serialConnected.value = false;
+      try {
+        await activeSerialReader?.cancel();
+      } catch {
+        // A disconnected device may reject cancellation.
+      }
+      try {
+        await serialReadTask;
+      } catch {
+        // readSerial reports its own error in the terminal.
+      }
+      try {
+        await port?.close();
+      } catch {
+        // The browser may already have closed the port.
+      }
+      if (serialPort.value === port) serialPort.value = null;
+      serialReadTask = null;
+    }
+
+    async function sendSerialCommand() {
+      const command = serialInput.value;
+      if (!serialConnected.value || !serialPort.value || command.length === 0) return;
+      serialInput.value = "";
+      appendSerialOutput(`${serialPrompt.value}${command}\r\n`);
+      const writer = serialPort.value.writable.getWriter();
+      try {
+        await writer.write(new TextEncoder().encode(`${command}\r\n`));
+      } catch (error) {
+        serialMessage.value = t("serialWriteFailed", { error: error.message });
+      } finally {
+        writer.releaseLock();
+      }
+    }
+
+    function openSerialDebug(boardId) {
+      serialBoard.value = boardId;
+      setView("serial");
+    }
 
     // publish form
     const board = ref("s31_korvo");
@@ -487,11 +617,11 @@ const app = createApp({
       flasherReady.value = next;
     }
 
-    // Views: home | firmware | flash | login | devices | publish. The devices
+    // Views: home | firmware | flash | serial | login | devices | publish. The devices
     // and publish views are gated behind a valid session; navigating to them
     // while logged out sends the user to login. Keep the URL hash in sync for
     // refresh/back support.
-    const views = ["home", "firmware", "flash", "login", "devices", "publish"];
+    const views = ["home", "firmware", "flash", "serial", "login", "devices", "publish"];
     const adminViews = ["devices", "publish"];
     function setView(next) {
       if (adminViews.includes(next) && !authed.value) next = "login";
@@ -624,6 +754,17 @@ const app = createApp({
       flasherReady,
       secureContext,
       webSerialAvailable,
+      serialBoard,
+      serialConnected,
+      serialOutput,
+      serialInput,
+      serialMessage,
+      serialOutputEl,
+      serialPrompt,
+      connectSerial,
+      disconnectSerial,
+      sendSerialCommand,
+      openSerialDebug,
       board,
       version,
       channel,
@@ -655,6 +796,7 @@ const app = createApp({
           <button :class="{ active: view === 'home' }" @click="setView('home')">{{ t('navHome') }}</button>
           <button :class="{ active: view === 'firmware' }" @click="setView('firmware')">{{ t('navFirmware') }}</button>
           <button :class="{ active: view === 'flash' }" @click="setView('flash')">{{ t('navFlash') }}</button>
+          <button :class="{ active: view === 'serial' }" @click="setView('serial')">{{ t('navSerial') }}</button>
           <button v-if="authed" :class="{ active: view === 'devices' }" @click="setView('devices')">{{ t('navDevices') }}</button>
           <button v-if="authed" :class="{ active: view === 'publish' }" @click="setView('publish')">{{ t('navPublish') }}</button>
         </nav>
@@ -777,8 +919,38 @@ const app = createApp({
                 <p v-else class="empty">{{ t('flashUnavailable') }}</p>
               </template>
               <p v-else class="tagline serial-only">{{ t('flashSerialOnly') }}</p>
+              <button class="ghost serial-open" @click="openSerialDebug(b.id)">{{ t('navSerial') }}</button>
               <code class="board-id">{{ b.id }}</code>
             </article>
+          </div>
+        </section>
+
+        <!-- Interactive Web Serial terminal. The editable line is deliberately
+             outside the scrolling debug output, so logs never disrupt typing. -->
+        <section v-else-if="view === 'serial'" class="view">
+          <div class="view-head">
+            <h1>{{ t('serialHeading') }}</h1>
+            <p class="subtitle">{{ t('serialIntro') }}</p>
+          </div>
+          <div class="panel serial-panel">
+            <div class="serial-toolbar">
+              <label>{{ t('serialBoard') }}
+                <select v-model="serialBoard" :disabled="serialConnected">
+                  <option v-for="b in localizedBoards" :key="b.id" :value="b.id">{{ b.name }}</option>
+                </select>
+              </label>
+              <button v-if="!serialConnected" class="primary" :disabled="!webSerialAvailable" @click="connectSerial">{{ t('serialConnect') }}</button>
+              <button v-else class="ghost" @click="disconnectSerial">{{ t('serialDisconnect') }}</button>
+            </div>
+            <p v-if="!webSerialAvailable" class="unsupported">{{ t('serialUnsupported') }}</p>
+            <p v-if="serialMessage" class="error">{{ serialMessage }}</p>
+            <div class="serial-terminal" @click="$refs.serialCommand?.focus()">
+              <pre ref="serialOutputEl" class="serial-output">{{ serialOutput }}</pre>
+              <form class="serial-command" @submit.prevent="sendSerialCommand">
+                <span class="serial-prompt">{{ serialPrompt }}</span>
+                <input ref="serialCommand" v-model="serialInput" :disabled="!serialConnected" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="AT command">
+              </form>
+            </div>
           </div>
         </section>
 

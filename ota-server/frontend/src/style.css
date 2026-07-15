@@ -619,6 +619,72 @@ textarea {
   font-size: 0.85rem;
 }
 
+/* Interactive serial terminal. The scrollable output and editable command row
+   are separate so an asynchronous ESP_LOG line cannot interrupt typing. */
+.serial-open {
+  align-self: flex-start;
+}
+.serial-panel {
+  max-width: 960px;
+}
+.serial-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.serial-toolbar label {
+  min-width: min(360px, 100%);
+}
+.serial-terminal {
+  min-height: 440px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #111827;
+  border-radius: 0.45rem;
+  background: #111827;
+  color: #d1fae5;
+  font: 0.9rem/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+.serial-output {
+  flex: 1;
+  min-height: 390px;
+  max-height: 62vh;
+  overflow: auto;
+  margin: 0;
+  padding: 1rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.serial-command {
+  display: flex;
+  align-items: center;
+  min-height: 2.8rem;
+  padding: 0 0.8rem;
+  border-top: 1px solid #334155;
+  background: #0b1220;
+}
+.serial-prompt {
+  flex: 0 0 auto;
+  color: #86efac;
+  font-weight: 700;
+  white-space: pre;
+}
+.serial-command input {
+  min-width: 0;
+  padding: 0.35rem 0.45rem;
+  border: 0;
+  background: transparent;
+  color: #f8fafc;
+  font: inherit;
+  outline: none;
+}
+.serial-command input:focus {
+  border: 0;
+  outline: none;
+}
+
 /* Footer */
 .app-footer {
   border-top: 1px solid var(--line);
@@ -711,5 +777,12 @@ textarea {
   }
   .publish-grid {
     grid-template-columns: 1fr;
+  }
+  .serial-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .serial-toolbar label {
+    min-width: 0;
   }
 }
