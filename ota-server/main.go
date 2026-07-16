@@ -30,11 +30,11 @@ import (
 var validName = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$`)
 
 type server struct {
-	db                                                *sql.DB
+	db                                                              *sql.DB
 	firmwareDir, packagesDir, adminToken, deviceToken, publicPrefix string
-	adminUser, adminPassword                          string
-	sessionSecret                                     []byte
-	sessionTTL                                        time.Duration
+	adminUser, adminPassword                                        string
+	sessionSecret                                                   []byte
+	sessionTTL                                                      time.Duration
 }
 
 // A flash package is one build's complete flash image set. The server stores it
@@ -75,7 +75,7 @@ func main() {
 	var dataDir, listen, publicPrefix string
 	flag.StringVar(&dataDir, "data-dir", "./ota-data", "SQLite database and firmware directory")
 	flag.StringVar(&listen, "listen", "127.0.0.1:8080", "HTTP listen address (put HTTPS proxy in front in production)")
-	flag.StringVar(&publicPrefix, "public-prefix", "/nrlota/api", "public reverse-proxy prefix for API and firmware URLs")
+	flag.StringVar(&publicPrefix, "public-prefix", "/api", "public reverse-proxy prefix for firmware and web-flasher URLs")
 	flag.Parse()
 	publicPrefix = strings.Trim(publicPrefix, "/")
 	if publicPrefix != "" {
@@ -137,9 +137,20 @@ func (s *server) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/v1/admin/devices", s.listDevices)
 	m.HandleFunc("POST /api/v1/devices/check", s.checkDevice)
 	m.HandleFunc("GET /api/v1/releases", s.listReleases)
-	m.HandleFunc("GET /firmware/", s.serveFirmware)
-	m.HandleFunc("GET /packages/", s.servePackage)
-	m.HandleFunc("GET /flasher/", s.serveFlasher)
+	s.publicGET(m, "/firmware/", s.serveFirmware)
+	s.publicGET(m, "/packages/", s.servePackage)
+	s.publicGET(m, "/flasher/", s.serveFlasher)
+}
+
+// publicGET keeps the backend's original root paths available for direct use
+// and also exposes them below publicPrefix for a same-origin reverse proxy. The
+// prefixed handler removes that external mount point before the existing file
+// and manifest handlers inspect r.URL.Path.
+func (s *server) publicGET(m *http.ServeMux, path string, handler http.HandlerFunc) {
+	m.HandleFunc("GET "+path, handler)
+	if s.publicPrefix != "" {
+		m.Handle("GET "+s.publicPrefix+path, http.StripPrefix(s.publicPrefix, handler))
+	}
 }
 
 // admin authorizes admin API calls. It accepts either the long-lived admin
@@ -388,7 +399,9 @@ func (s *server) serveFirmware(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveFlasher generates the esp-web-tools manifest for a board on the fly from
-// its latest uploaded flash package: GET /flasher/manifest-<board>.json. The
+// its latest uploaded flash package. The default public URL is
+// GET /api/flasher/manifest-<board>.json; the unprefixed path remains available
+// for direct backend access. The
 // manifest points at the package parts under /packages/. Boards whose package
 // has no chip_family (not web-flashable, e.g. the ESP32-S31) return 404.
 func (s *server) serveFlasher(w http.ResponseWriter, r *http.Request) {

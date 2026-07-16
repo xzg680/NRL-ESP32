@@ -49,16 +49,18 @@ docker build -t nrl-ota-frontend .
 docker run -d --name nrl-ota-frontend -p 8081:80 nrl-ota-frontend
 ```
 
-The frontend container proxies `/nrlota/api/` to `http://nrl-ota:8080` by
+The frontend container proxies `/api/` to `http://nrl-ota:8080` by
 default. Override `API_UPSTREAM` when the Go API uses another reachable address,
 for example `-e API_UPSTREAM=http://host.docker.internal:8080`.
 
 When the frontend and API are served from different origins, configure a reverse
 proxy to expose the API under the frontend origin (as in `Caddyfile.example`).
-The frontend uses the single same-origin dynamic prefix `/nrlota/api/`; static
+The frontend uses the single same-origin dynamic prefix `/api/`; static
 files are served separately from `/nrlota/www`.
 Use `nginx.conf.example` for Nginx, or `Caddyfile.example` for Caddy. Both
-strip `/nrlota/api/` before proxying to Go.
+preserve `/api/` when proxying to Go. The backend defaults to
+`-public-prefix /api`, which is also used in firmware download and web-flasher
+manifest URLs.
 
 For the production host, publish the built frontend to `/nrlota/www/` with:
 
@@ -131,7 +133,8 @@ are serial-only and the page says so.
 
 The esp-web-tools assets ship with the separately published frontend. Complete
 flash packages are stored versioned under `<data-dir>/packages/<board>/<version>/`,
-and the API generates each `manifest-<board>.json` dynamically. Publishing new
+and the API generates each `/api/flasher/manifest-<board>.json` dynamically.
+Publishing new
 flashable firmware does not require rebuilding either service.
 
 Build all boards, then publish every package and its OTA app image in one run:

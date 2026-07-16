@@ -2,7 +2,7 @@ ota.example.com {
     root * /nrlota/www
     encode zstd gzip
 
-    handle_path /nrlota/api/* {
+    handle /api/* {
         reverse_proxy 127.0.0.1:8080
     }
 

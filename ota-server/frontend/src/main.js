@@ -5,8 +5,9 @@
 import { createApp, computed, ref, watch } from "vue/dist/vue.esm-bundler.js";
 import "./style.css";
 
-// The deployed OTA API already owns its /api/v1 routes; static files are
-// served separately by the web server.
+// All dynamic requests share /api/: JSON endpoints already live below
+// /api/v1, while firmware files and web-flasher manifests are mounted there by
+// the backend's public-prefix setting. Static files stay at the site root.
 const apiURL = (path) => path;
 
 // Board catalog for the public "功能介绍" section. Kept here (not in the DB) so
@@ -607,8 +608,16 @@ const app = createApp({
           .filter((b) => b.flashable)
           .map(async (b) => {
             try {
-              const response = await fetch(apiURL(`/flasher/manifest-${b.id}.json`), { cache: "no-store" });
-              next[b.id] = response.ok;
+              const response = await fetch(apiURL(`/api/flasher/manifest-${b.id}.json`), {
+                cache: "no-store",
+              });
+              const contentType = response.headers.get("content-type") || "";
+              if (!response.ok || !contentType.toLowerCase().includes("application/json")) {
+                next[b.id] = false;
+                return;
+              }
+              const manifest = await response.json();
+              next[b.id] = Array.isArray(manifest.builds) && manifest.builds.length > 0;
             } catch {
               next[b.id] = false;
             }
@@ -771,6 +780,7 @@ const app = createApp({
       notes,
       firmware,
       publishMessage,
+      apiURL,
       t,
       setLanguage,
       boardName,
@@ -908,7 +918,7 @@ const app = createApp({
                   <p v-if="!secureContext" class="unsupported">{{ t('flashNeedsHttps') }}</p>
                   <p v-else-if="!webSerialAvailable" class="unsupported">{{ t('flashUnsupported') }}</p>
                   <template v-else>
-                    <esp-web-install-button :manifest="apiURL('/flasher/manifest-' + b.id + '.json')">
+                    <esp-web-install-button :manifest="apiURL('/api/flasher/manifest-' + b.id + '.json')">
                       <button slot="activate" class="flash-btn primary">{{ t('flashButton') }}</button>
                       <span slot="unsupported" class="unsupported">{{ t('flashUnsupported') }}</span>
                       <span slot="not-allowed" class="unsupported">{{ t('flashNotAllowed') }}</span>

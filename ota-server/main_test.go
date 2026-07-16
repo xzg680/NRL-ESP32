@@ -59,7 +59,7 @@ func TestUploadPackageUpgradesMatchingAppOnlyRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := &server{db: db, firmwareDir: firmwareDir, packagesDir: packagesDir, adminToken: "admin"}
+	s := &server{db: db, firmwareDir: firmwareDir, packagesDir: packagesDir, publicPrefix: "/api", adminToken: "admin"}
 	meta := packageMeta{
 		Board: "gezipai", Version: "0.6.0", Channel: "stable", Notes: "complete",
 		ChipFamily: "ESP32-S3", AppOffset: 0x10000,
@@ -94,6 +94,34 @@ func TestUploadPackageUpgradesMatchingAppOnlyRelease(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(firmwareDir, oldName)); !os.IsNotExist(err) {
 		t.Fatalf("old app-only image still exists, stat error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	s.routes(mux)
+
+	manifestRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(manifestRecorder, httptest.NewRequest(http.MethodGet, "/api/flasher/manifest-gezipai.json", nil))
+	if manifestRecorder.Code != http.StatusOK {
+		t.Fatalf("manifest status = %d, body = %s", manifestRecorder.Code, manifestRecorder.Body.String())
+	}
+	var manifest struct {
+		Builds []struct {
+			Parts []struct {
+				Path string `json:"path"`
+			} `json:"parts"`
+		} `json:"builds"`
+	}
+	if err = json.Unmarshal(manifestRecorder.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := manifest.Builds[0].Parts[0].Path, "/api/packages/gezipai/0.6.0/bootloader.bin"; got != want {
+		t.Fatalf("manifest part path = %q, want %q", got, want)
+	}
+
+	packageRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(packageRecorder, httptest.NewRequest(http.MethodGet, "/api/packages/gezipai/0.6.0/nrl-esp32.bin", nil))
+	if packageRecorder.Code != http.StatusOK || !bytes.Equal(packageRecorder.Body.Bytes(), app) {
+		t.Fatalf("package response status = %d, body = %q", packageRecorder.Code, packageRecorder.Body.Bytes())
 	}
 }
 

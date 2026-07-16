@@ -140,7 +140,6 @@ def main() -> int:
     parser.add_argument(
         "boards",
         nargs="*",
-        choices=BOARDS,
         metavar="BOARD",
         help="board(s) to publish; omitted means all four boards",
     )
@@ -148,6 +147,15 @@ def main() -> int:
     parser.add_argument("--channel", default=os.environ.get("OTA_CHANNEL", "stable"))
     parser.add_argument("--notes", default=os.environ.get("OTA_RELEASE_NOTES", ""))
     args = parser.parse_args()
+
+    unknown_boards = sorted(set(args.boards) - set(BOARDS))
+    if unknown_boards:
+        parser.error(
+            "unknown board(s): "
+            + ", ".join(unknown_boards)
+            + "; choose from: "
+            + ", ".join(BOARDS)
+        )
 
     base = os.environ.get("OTA_SERVER_URL", "").rstrip("/")
     token = os.environ.get("OTA_UPLOAD_TOKEN", "")
