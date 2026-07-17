@@ -250,12 +250,20 @@ button.block {
 }
 .board-card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 .board-card h3 {
-  font-size: 1.05rem;
+  font-size: 1rem;
+}
+.board-card-head h3 {
+  flex: 1 0 auto;
+  white-space: nowrap;
+}
+.board-card-head .chip {
+  margin-left: auto;
 }
 .chip {
   font-size: 0.72rem;
@@ -310,6 +318,9 @@ button.block {
 .feature-matrix td {
   width: 150px;
   text-align: center;
+}
+.feature-matrix thead th:not(:first-child) {
+  white-space: nowrap;
 }
 .feature-matrix td {
   vertical-align: middle;
