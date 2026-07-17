@@ -1,0 +1,122 @@
+#ifndef SRC_SERVICES_APRS_SERVICE_H
+#define SRC_SERVICES_APRS_SERVICE_H
+
+// APRS transceiver service (all four boards):
+//
+//  - Position beacons from a GPS on the SCI/COM port (NMEA RMC/GGA, tee'd from
+//    the transparent-serial uplink), falling back to a configured default
+//    lat/lon while the GPS is absent or has no fix.
+//  - Network side: APRS-IS TCP client (configurable server, default
+//    asia.aprs2.net:14580). Beacons go up as TNC2 lines; packets received from the
+//    server feed the station list. Passcode is derived from the callsign.
+//  - RF side: Bell 202 AFSK via the audio router. TX pushes modulated PCM
+//    frames (AUDIO_SRC_APRS -> speaker -> radio mic, VOX keying); RX taps the
+//    mic (AUDIO_SRC_MIC -> AUDIO_SINK_APRS), demodulates, and forwards decoded
+//    frames to APRS-IS (iGate direction, qAR) besides listing them.
+//  - Station list lives in PSRAM: callsign-SSID, position, altitude, comment,
+//    course/speed as reported, plus distance/bearing from our own position and
+//    a speed derived from successive packets of the same station.
+//
+// Master switch plus independent net/RF-TX/RF-RX switches, all persisted in
+// NVS. Configurable from web portal and AT (AT+APRS...).
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    bool enabled;         // master switch
+    bool net_enabled;     // APRS-IS uplink/downlink
+    bool rf_tx_enabled;   // AFSK beacon out through speaker/radio
+    bool rf_rx_enabled;   // demodulate mic audio
+    uint8_t ssid;         // APRS SSID appended to the radio callsign
+    char symbol_table;    // e.g. '/'
+    char symbol_code;     // e.g. 'I' for the /I TCP/IP symbol
+    uint16_t beacon_interval_s;
+    int32_t default_lat_e6; // microdegrees, used when GPS has no fix
+    int32_t default_lon_e6;
+    uint16_t server_port;
+    char server_host[65];
+    char path[17];        // RF digi path, e.g. "WIDE1-1"
+    char comment[41];     // beacon comment
+} AprsConfig;
+
+typedef struct {
+    char name[10];      // callsign-SSID or object/item name
+    char symbol[3];
+    float lat;          // degrees, +N
+    float lon;          // degrees, +E
+    float altitude_m;   // NAN when unknown
+    float speed_kmh;    // as reported in the packet, NAN when unknown
+    uint16_t course_deg;    // 0 unknown, 360 = north
+    float derived_speed_kmh; // from successive positions, NAN when unknown
+    float distance_km;  // from our own (GPS or default) position
+    uint16_t bearing_deg;
+    uint32_t age_s;     // seconds since last heard
+    uint32_t pkt_count;
+    uint8_t via_rf;     // 1 = heard on RF, 0 = from APRS-IS
+    char comment[40];
+} AprsStationInfo;
+
+void APRS_SERVICE_Init(void);
+
+// Master switch; persists and starts/stops the whole service.
+bool APRS_SERVICE_SetEnabled(bool enabled);
+bool APRS_SERVICE_IsEnabled(void);
+
+// Sub-switches (persisted).
+bool APRS_SERVICE_SetNetEnabled(bool enabled);
+bool APRS_SERVICE_SetRfTxEnabled(bool enabled);
+bool APRS_SERVICE_SetRfRxEnabled(bool enabled);
+
+// Configuration (persisted; NULL/out-of-range rejected).
+bool APRS_SERVICE_SetServer(const char *host, uint16_t port);
+bool APRS_SERVICE_SetSsid(uint8_t ssid);                    // 0..15
+bool APRS_SERVICE_SetSymbol(char table, char code);
+bool APRS_SERVICE_SetBeaconInterval(uint16_t seconds);      // 10..3600
+bool APRS_SERVICE_SetDefaultPosition(double lat, double lon);
+// WGS-84 coordinates in the APRS/NMEA style used for config input:
+// "ddmm.mmmm[N|S]" for latitude, "dddmm.mmmm[E|W]" for longitude (hemisphere
+// letter optional, a leading '-' also means S/W). Parse returns false on
+// malformed or out-of-range input; Format always writes the letter form.
+bool APRS_SERVICE_ParseAprsCoord(const char *text, bool is_lat, double *deg_out);
+void APRS_SERVICE_FormatAprsCoord(double deg, bool is_lat, char *out, size_t out_size);
+bool APRS_SERVICE_SetPath(const char *path);
+bool APRS_SERVICE_SetComment(const char *comment);
+void APRS_SERVICE_GetConfig(AprsConfig *out);
+
+// Queue a beacon immediately (both directions as enabled).
+bool APRS_SERVICE_SendBeaconNow(void);
+
+// GPS/NMEA byte tee from the SCI serial poll (nrl_audio_bridge).
+void APRS_SERVICE_FeedSciBytes(const uint8_t *data, size_t size);
+
+// Own current position: GPS fix when fresh, else the configured default.
+// Returns true when the position came from a live GPS fix.
+bool APRS_SERVICE_GetOwnPosition(double *lat, double *lon, double *alt_m);
+
+// Status for UI/web.
+bool APRS_SERVICE_IsNetConnected(void);
+uint32_t APRS_SERVICE_GetRxCount(void);   // frames decoded from RF
+uint32_t APRS_SERVICE_GetTxCount(void);   // beacons sent
+bool APRS_SERVICE_GpsHasFix(void);
+
+// Station list snapshot, ordered most-recently-heard first. Returns the
+// number of entries copied. Bump-counter lets displays skip refreshes
+// (S31 FULL-mode renders are expensive).
+size_t APRS_SERVICE_GetStations(AprsStationInfo *out, size_t max_count);
+uint32_t APRS_SERVICE_GetStationRevision(void);
+
+// Last raw packet heard (TNC2 text, RF or IS) for the gezipai live ticker.
+// Returns the monotonically increasing sequence of that packet (0 = none yet).
+uint32_t APRS_SERVICE_GetLastPacket(char *out, size_t out_size);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // SRC_SERVICES_APRS_SERVICE_H

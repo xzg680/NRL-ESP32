@@ -35,6 +35,7 @@ typedef enum {
     AUDIO_SRC_BT_HFP_MIC,   // Bluetooth headset mic, 8 kHz SCO
     AUDIO_SRC_ESPNOW,       // ESP-NOW peer voice, G.711-decoded 8 kHz
     AUDIO_SRC_AI,           // xiaozhi AI TTS voice, Opus-decoded 16 kHz
+    AUDIO_SRC_APRS,         // AFSK-modulated APRS beacon PCM, 8 kHz
     AUDIO_SRC_COUNT
 } AudioRouterSource_t;
 
@@ -44,6 +45,7 @@ typedef enum {
     AUDIO_SINK_BT_HFP,      // Bluetooth headset speaker, 8 kHz SCO
     AUDIO_SINK_ESPNOW,      // ESP-NOW broadcast uplink (G.711), 8 kHz
     AUDIO_SINK_AI,          // xiaozhi AI mic uplink (Opus-encoded), 16 kHz
+    AUDIO_SINK_APRS,        // AFSK demodulator mic tap, 16 kHz
     AUDIO_SINK_COUNT
 } AudioRouterSink_t;
 

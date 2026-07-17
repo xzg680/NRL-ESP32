@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{TITLE}}</title>
-  <link rel="stylesheet" href="/portal.css?v={{VERSION}}">
+  <link rel="stylesheet" href="/portal.css?v={{VERSION}}-aprs2">
 </head>
 <body>
   <main class="shell">
@@ -29,7 +29,7 @@
     <nav class="nav">
       <a class="{{NETWORK_ACTIVE}}" href="/" data-i18n="wifiConfig">WiFi Config</a>
       <a class="{{DEVICE_ACTIVE}}" href="/nrl" data-i18n="nrlConfig">NRL Config</a>
-      <a class="{{AUDIO_ACTIVE}}" href="/audio" data-i18n="audioSettings">Audio Settings</a>{{MEDIA_TAB}}
+      <a class="{{AUDIO_ACTIVE}}" href="/audio" data-i18n="audioSettings">Audio Settings</a>{{MEDIA_TAB}}{{APRS_TAB}}
       <a href="/update" data-i18n="firmwareUpdate">Firmware Update</a>
     </nav>
 
@@ -42,6 +42,6 @@
     {{FORM_SECTIONS}}
     <div class="footer-links">{{FOOTER}}</div>
   </main>
-  <script src="/portal.js?v={{VERSION}}"></script>
+  <script src="/portal.js?v={{VERSION}}-aprs2"></script>
 </body>
 </html>

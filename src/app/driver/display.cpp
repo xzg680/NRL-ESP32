@@ -36,15 +36,18 @@
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD == NRL_BOARD_GEZIPAI
 
 #include "../../lib/nrl_audio_bridge.h"
+#include "../../services/aprs_service.h"
 #include "../../services/espnow_link.h"
 #include "../../services/display_notice.h"
 #include "../../services/ota_service.h"
 #include "../../lib/nrl_version.h"
 #include "external_radio.h"
+#include "fonts/lv_font_cjk.h"
 #include "status_io.h"
 
 #include "../../lib/nrl_net_compat.h"
 
+#include <math.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +110,10 @@ constexpr uint32_t kColorWeak     = 0xF87171;  // weak signal / low battery
 constexpr uint32_t kColorTx       = 0xFF6B6B;  // transmitting (PTT held)
 constexpr uint32_t kColorDuplex   = 0xA78BFA;  // transmitting + receiving
 
+// APRS packets may contain Chinese comments. Keep the normal Latin UI font,
+// but fall back to the bundled 16px GB2312 font for the ticker only.
+lv_font_t s_font_aprs_16;
+
 // Battery pack assumed to be a single Li-ion cell (3.0 V .. 4.2 V).
 constexpr int kBatteryMinMv = 3000;
 constexpr int kBatteryMaxMv = 4200;
@@ -156,6 +163,7 @@ enum class MenuPage : uint8_t {
     Main,
     Ota,
     About,
+    Aprs,
 };
 
 // Written by STATUS_IO_Poll() and consumed only by Display_Poll(). Keeping
@@ -169,6 +177,8 @@ size_t s_menu_index = 0u;
 bool s_menu_ota_requested = false;
 uint32_t s_menu_ota_check_baseline_ms = 0u;
 uint32_t s_menu_ota_refresh_ms = 0u;
+uint32_t s_menu_aprs_refresh_ms = 0u;
+uint32_t s_menu_aprs_revision = 0u;
 char s_menu_ota_state[224] = {};
 char s_menu_message[64] = {};
 uint32_t s_menu_message_until_ms = 0u;
@@ -185,7 +195,7 @@ char s_shown_wifi[28] = {};
 char s_shown_vol[16] = {};
 char s_shown_batt[20] = {};
 char s_shown_ip[96] = {};
-char s_shown_ota[48] = {};
+char s_shown_ota[160] = {}; // sized for a scrolling APRS monitor line
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
 
 void refreshVolume();
@@ -727,6 +737,7 @@ void buildMainMenu()
         nrl_codec,
         now_codec,
         "CHECK UPDATE",
+        "APRS LIST",
         "ABOUT",
     };
     for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); ++i) {
@@ -838,10 +849,52 @@ void buildOtaMenu()
     }
 }
 
+// Dedicated APRS page: BACK row plus the most recent stations heard, one
+// compact line per station (callsign, distance, speed, age).
+void buildAprsMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    menuRow(scr, 1, "< BACK / APRS", true);
+
+    AprsStationInfo stations[5];
+    const size_t count = APRS_SERVICE_GetStations(stations, 5);
+    if (!APRS_SERVICE_IsEnabled()) {
+        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, kColorSub);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 60);
+        lv_label_set_text(lbl, "APRS OFF (web/AT+APRS=ON)");
+    } else if (count == 0u) {
+        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, kColorSub);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 60);
+        lv_label_set_text(lbl, "NO STATIONS HEARD YET");
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const AprsStationInfo &s = stations[i];
+        char dist[16] = "--";
+        if (!isnan(s.distance_km)) {
+            snprintf(dist, sizeof(dist), "%.1fkm", static_cast<double>(s.distance_km));
+        }
+        char spd[16] = "";
+        if (!isnan(s.speed_kmh)) {
+            snprintf(spd, sizeof(spd), " %.0fkm/h", static_cast<double>(s.speed_kmh));
+        } else if (!isnan(s.derived_speed_kmh)) {
+            snprintf(spd, sizeof(spd), " ~%.0fkm/h", static_cast<double>(s.derived_speed_kmh));
+        }
+        char age[12];
+        if (s.age_s < 60u) snprintf(age, sizeof(age), "%lus", static_cast<unsigned long>(s.age_s));
+        else snprintf(age, sizeof(age), "%lum", static_cast<unsigned long>(s.age_s / 60u));
+        char line[64];
+        snprintf(line, sizeof(line), "%s %s%s %s %s",
+                 s.name, dist, spd, s.via_rf ? "RF" : "IS", age);
+        menuRow(scr, 25 + static_cast<int>(i) * 24, line, false);
+    }
+    menuFooter(scr, "PTT BACK");
+}
+
 void buildMenuUi()
 {
     if (s_menu_page == MenuPage::About) buildAboutMenu();
     else if (s_menu_page == MenuPage::Ota) buildOtaMenu();
+    else if (s_menu_page == MenuPage::Aprs) buildAprsMenu();
     else buildMainMenu();
 }
 
@@ -980,10 +1033,12 @@ void buildHomeContent()
     // Gezipai is not a touch screen: this is deliberately only a notification.
     // Upgrade confirmation is AT+OTA=LATEST, the local /update page, or the
     // physical VOL+ + VOL- chord handled by status_io.cpp.
-    s_lbl_ota = makeLabel(content, &lv_font_montserrat_14, kColorApWarn);
+    s_lbl_ota = makeLabel(content, &s_font_aprs_16, kColorApWarn);
     lv_obj_set_width(s_lbl_ota, kWidth);
     lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 148);
+    // Doubles as the APRS monitor ticker; long packet lines scroll circularly.
+    lv_label_set_long_mode(s_lbl_ota, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_ota, "");
 }
 
@@ -1371,6 +1426,15 @@ void refreshOtaNotice()
                strcmp(status->latest_version, NRL_FIRMWARE_VERSION) != 0) {
         snprintf(text, sizeof(text), "NEW FW %.20s VOL+/-", status->latest_version);
         color = kColorGood;
+    } else if (APRS_SERVICE_IsEnabled()) {
+        // Lowest priority: live APRS monitor -- the latest packet heard
+        // (RF or APRS-IS) scrolls across this line.
+        char packet[sizeof(text)] = {};
+        if (APRS_SERVICE_GetLastPacket(packet, sizeof(packet)) != 0u && packet[0] != '\0') {
+            snprintf(text, sizeof(text), "APRS %.*s",
+                     static_cast<int>(sizeof(text) - 6u), packet);
+            color = kColorAccent;
+        }
     }
     if (setLabel(s_lbl_ota, s_shown_ota, sizeof(s_shown_ota), text)) {
         lv_obj_set_style_text_color(s_lbl_ota, lv_color_hex(color), 0);
@@ -1379,8 +1443,9 @@ void refreshOtaNotice()
 
 size_t menuItemCount()
 {
-    if (s_menu_page == MenuPage::Main) return 6u;
+    if (s_menu_page == MenuPage::Main) return 7u;
     if (s_menu_page == MenuPage::About) return 1u;
+    if (s_menu_page == MenuPage::Aprs) return 1u;
     const NrlOtaStatus *ota = otaUiSnapshot();
     return (ota != nullptr ? ota->release_count : 0u) + 1u; // Back row + releases
 }
@@ -1444,6 +1509,13 @@ void confirmMainMenu()
             break;
         }
         case 5:
+            s_menu_page = MenuPage::Aprs;
+            s_menu_index = 0u;
+            s_menu_aprs_refresh_ms = 0u;
+            s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
+            buildMenuUi();
+            break;
+        case 6:
             s_menu_page = MenuPage::About;
             s_menu_index = 0u;
             buildMenuUi();
@@ -1509,6 +1581,7 @@ void processMenuInput(uint32_t now)
         s_menu_confirm_pending = 0u;
         if (s_menu_page == MenuPage::Main) confirmMainMenu();
         else if (s_menu_page == MenuPage::About) activateMainMenu();
+        else if (s_menu_page == MenuPage::Aprs) activateMainMenu();
         else confirmOtaMenu();
     }
     if (!s_menu_active) return;
@@ -1544,6 +1617,18 @@ void processMenuInput(uint32_t now)
         if (strncmp(state, s_menu_ota_state, sizeof(s_menu_ota_state)) != 0) {
             snprintf(s_menu_ota_state, sizeof(s_menu_ota_state), "%s", state);
             if (s_menu_index > ota->release_count) s_menu_index = 0u;
+            buildMenuUi();
+        }
+    }
+
+    // Keep the APRS station page live: redraw when a packet lands and every
+    // few seconds anyway so the age column ticks.
+    if (s_menu_page == MenuPage::Aprs) {
+        const uint32_t revision = APRS_SERVICE_GetStationRevision();
+        if (revision != s_menu_aprs_revision ||
+            s_menu_aprs_refresh_ms == 0u || now - s_menu_aprs_refresh_ms >= 3000u) {
+            s_menu_aprs_revision = revision;
+            s_menu_aprs_refresh_ms = now;
             buildMenuUi();
         }
     }
@@ -1592,6 +1677,8 @@ extern "C" void Display_Init(void)
     if (!initLvgl()) {
         return;
     }
+    s_font_aprs_16 = lv_font_montserrat_16;
+    s_font_aprs_16.fallback = &lv_font_cjk_16;
 #if NRL_DISPLAY_BUS_RGB
     initTouch();
 #endif

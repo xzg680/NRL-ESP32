@@ -11,6 +11,7 @@
 
 #include "../lib/ble_config.h"
 #include "../services/ai_assistant.h"
+#include "../services/aprs_service.h"
 #include "../services/espnow_link.h"
 #include "../services/video_call.h"
 #include "../services/music_player.h"
@@ -204,6 +205,11 @@ static void initApp()
     // waiting for the bridge task to start WiFi if needed.
     ESPNOW_LINK_Init();
     logDramMark("espnow");
+
+    // APRS transceiver: GPS beacons to APRS-IS and/or AFSK over the radio,
+    // plus RF demodulation into the station list. Idles until enabled.
+    APRS_SERVICE_Init();
+    logDramMark("aprs");
 
     // xiaozhi AI assistant: reconnects in the background when configured.
     AI_Init();

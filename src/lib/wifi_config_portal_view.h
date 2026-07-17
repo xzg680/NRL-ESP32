@@ -23,6 +23,7 @@ struct WifiConfigPortalPageState {
     bool device_active;
     bool audio_active;
     bool media_active;
+    bool aprs_active;
     std::string footer;
 };
 
@@ -34,6 +35,8 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
 // Media / voice-link page: S31 gets the full media stack; gezipai/bh4tdv get
 // the PTT target, NRL codec and ESP-NOW intercom controls.
 std::string WifiConfigPortalView_BuildMediaSections(void);
+// APRS page: switches, APRS-IS/beacon settings and the stations-heard table.
+std::string WifiConfigPortalView_BuildAprsSections(void);
 std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
                                                  const WifiConfigPortalPageState &state,
                                                  const std::string &form_sections);

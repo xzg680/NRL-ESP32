@@ -11,6 +11,7 @@
 #include "../../lib/nrl_wifi.h"
 #include "../../media/cover_decoder.h"
 #include "../../services/ai_assistant.h"
+#include "../../services/aprs_service.h"
 #include "../../services/config_notify.h"
 #include "../../services/display_notice.h"
 #include "../../services/espnow_link.h"
@@ -28,6 +29,7 @@
 #include "status_io.h"
 
 #include <dirent.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,6 +101,7 @@ enum class Page : uint8_t {
     Game,
     Ai,
     About,
+    Aprs,
 };
 
 enum class Action : intptr_t {
@@ -151,6 +154,7 @@ enum class Action : intptr_t {
     OtaOlder,
     OtaNewer,
     InstallOta,
+    Aprs,
 };
 
 enum class AudioControl : intptr_t {
@@ -329,6 +333,15 @@ lv_obj_t *s_btn_ai_talk_label = nullptr;
 lv_obj_t *s_btn_ai_talk = nullptr;
 lv_obj_t *s_sw_ai = nullptr;
 char s_shown_ai_status[224] = {};
+
+// APRS page: master switch, status line and the stations-heard list.
+lv_obj_t *s_sw_aprs = nullptr;
+lv_obj_t *s_lbl_aprs_status = nullptr;
+lv_obj_t *s_lbl_aprs_list = nullptr;
+char s_shown_aprs_status[128] = {};
+char s_shown_aprs_list[704] = {};
+uint32_t s_aprs_seen_revision = 0u;
+uint32_t s_aprs_last_refresh_ms = 0u;
 
 lv_obj_t *s_img_video = nullptr;
 lv_obj_t *s_lbl_video_status = nullptr;
@@ -961,6 +974,8 @@ void languageEvent(lv_event_t *event);
 void updateAudioValueLabels();
 void refresh();
 void refreshOtaPage();
+void refreshAprsPage();
+void buildAprs();
 void rebuildCurrentPage();
 void stopVideoView();
 lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w);
@@ -1280,6 +1295,11 @@ void clearScreen()
     s_btn_ai_talk = nullptr;
     s_sw_ai = nullptr;
     s_shown_ai_status[0] = '\0';
+    s_sw_aprs = nullptr;
+    s_lbl_aprs_status = nullptr;
+    s_lbl_aprs_list = nullptr;
+    s_shown_aprs_status[0] = '\0';
+    s_shown_aprs_list[0] = '\0';
 }
 
 void topBar(lv_obj_t *scr)
@@ -1459,11 +1479,12 @@ void buildApps()
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
     // ESP-NOW lives under Config (it's a settings entry, not an app).
-    button(scr, 24, 84, 138, 120, "Music", Action::Music);
-    button(scr, 182, 84, 138, 120, "Radio", Action::Radio);
-    button(scr, 340, 84, 138, 120, "Video", Action::Video);
-    button(scr, 498, 84, 138, 120, "AI", Action::Ai);
-    button(scr, 656, 84, 118, 120, "Tetris", Action::Game);
+    button(scr, 24, 84, 118, 120, "Music", Action::Music);
+    button(scr, 150, 84, 118, 120, "Radio", Action::Radio);
+    button(scr, 276, 84, 118, 120, "Video", Action::Video);
+    button(scr, 402, 84, 118, 120, "AI", Action::Ai);
+    button(scr, 528, 84, 118, 120, "Tetris", Action::Game);
+    button(scr, 654, 84, 120, 120, "APRS", Action::Aprs);
 
     // Shared playback target: one setting for everything the music player
     // outputs (music / nanny beacon / net radio), so it lives here next to
@@ -2999,6 +3020,146 @@ void buildAi()
     refreshAiPage();
 }
 
+// ---- APRS -------------------------------------------------------------------
+
+void aprsEnableEvent(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target_obj(event);
+    const bool want = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (!APRS_SERVICE_SetEnabled(want)) {
+        if (want) {
+            lv_obj_remove_state(sw, LV_STATE_CHECKED);
+        }
+        formStatus("APRS service unavailable.", kColorBad);
+    } else {
+        formStatus(want ? "APRS enabled." : "APRS disabled.", kColorSub);
+    }
+    s_aprs_last_refresh_ms = 0u;
+    s_last_refresh_ms = 0;
+}
+
+// Rebuild the status line and station list only when a packet arrived or the
+// age column needs a tick -- Aprs is a FULL-render surface, so every
+// lv_label_set_text here repaints the whole screen.
+void refreshAprsPage()
+{
+    if (s_lbl_aprs_status == nullptr || s_lbl_aprs_list == nullptr) {
+        return;
+    }
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    const uint32_t revision = APRS_SERVICE_GetStationRevision();
+    if (revision == s_aprs_seen_revision && s_aprs_last_refresh_ms != 0u &&
+        now - s_aprs_last_refresh_ms < 3000u) {
+        return;
+    }
+    s_aprs_seen_revision = revision;
+    s_aprs_last_refresh_ms = now;
+
+    AprsConfig cfg;
+    APRS_SERVICE_GetConfig(&cfg);
+    char status[sizeof(s_shown_aprs_status)];
+    snprintf(status, sizeof(status),
+             "%s | IS %s | RF tx %s rx %s | GPS %s | rx %lu tx %lu",
+             cfg.enabled ? "ON" : "OFF",
+             APRS_SERVICE_IsNetConnected() ? "linked" : "--",
+             cfg.rf_tx_enabled ? "on" : "off",
+             cfg.rf_rx_enabled ? "on" : "off",
+             APRS_SERVICE_GpsHasFix() ? "fix" : "--",
+             static_cast<unsigned long>(APRS_SERVICE_GetRxCount()),
+             static_cast<unsigned long>(APRS_SERVICE_GetTxCount()));
+    if (strcmp(status, s_shown_aprs_status) != 0) {
+        snprintf(s_shown_aprs_status, sizeof(s_shown_aprs_status), "%s", status);
+        lv_label_set_text(s_lbl_aprs_status, status);
+    }
+
+    AprsStationInfo stations[8];
+    const size_t count = APRS_SERVICE_GetStations(stations, 8);
+    char list[sizeof(s_shown_aprs_list)];
+    size_t used = 0;
+    if (count == 0u) {
+        snprintf(list, sizeof(list), "%s",
+                 cfg.enabled ? "No stations heard yet." : "APRS is off.");
+    } else {
+        list[0] = '\0';
+        for (size_t i = 0; i < count && used < sizeof(list) - 8u; ++i) {
+            const AprsStationInfo &s = stations[i];
+            char dist[16] = "--";
+            if (!isnan(s.distance_km)) {
+                snprintf(dist, sizeof(dist), "%.1fkm", static_cast<double>(s.distance_km));
+            }
+            char spd[20] = "";
+            if (!isnan(s.speed_kmh)) {
+                snprintf(spd, sizeof(spd), "  %.0fkm/h", static_cast<double>(s.speed_kmh));
+            } else if (!isnan(s.derived_speed_kmh)) {
+                snprintf(spd, sizeof(spd), "  ~%.0fkm/h",
+                         static_cast<double>(s.derived_speed_kmh));
+            }
+            char alt[16] = "";
+            if (!isnan(s.altitude_m)) {
+                snprintf(alt, sizeof(alt), "  %.0fm", static_cast<double>(s.altitude_m));
+            }
+            char age[12];
+            if (s.age_s < 60u) {
+                snprintf(age, sizeof(age), "%lus", static_cast<unsigned long>(s.age_s));
+            } else {
+                snprintf(age, sizeof(age), "%lum", static_cast<unsigned long>(s.age_s / 60u));
+            }
+            used += static_cast<size_t>(snprintf(
+                list + used, sizeof(list) - used, "%s%-9s  %8.4f %9.4f%s%s  %s  %s  %.20s",
+                i > 0 ? "\n" : "", s.name, static_cast<double>(s.lat),
+                static_cast<double>(s.lon), alt, spd, s.via_rf ? "RF" : "IS", age,
+                s.comment));
+        }
+    }
+    if (strcmp(list, s_shown_aprs_list) != 0) {
+        snprintf(s_shown_aprs_list, sizeof(s_shown_aprs_list), "%s", list);
+        lv_label_set_text(s_lbl_aprs_list, list);
+    }
+}
+
+void buildAprs()
+{
+    clearScreen();
+    s_page = Page::Aprs;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    lv_obj_t *box = panel(scr, 24, 82, 750, 270);
+    fieldLabel(box, 0, 0, "APRS Transceiver");
+    s_sw_aprs = lv_switch_create(box);
+    lv_obj_set_pos(s_sw_aprs, 640, -6);
+    lv_obj_set_size(s_sw_aprs, 64, 34);
+    if (APRS_SERVICE_IsEnabled()) {
+        lv_obj_add_state(s_sw_aprs, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(s_sw_aprs, aprsEnableEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_lbl_aprs_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_aprs_status, 0, 30);
+    lv_obj_set_width(s_lbl_aprs_status, 710);
+    lv_label_set_long_mode(s_lbl_aprs_status, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_aprs_status, "--");
+
+    s_lbl_aprs_list = label(box, &lv_font_montserrat_16, kColorText);
+    lv_obj_set_pos(s_lbl_aprs_list, 0, 60);
+    lv_obj_set_width(s_lbl_aprs_list, 710);
+    lv_label_set_long_mode(s_lbl_aprs_list, LV_LABEL_LONG_CLIP);
+    lv_label_set_text(s_lbl_aprs_list, "--");
+
+    s_lbl_form_status = label(scr, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 280, 396);
+    lv_obj_set_width(s_lbl_form_status, 494);
+    lv_label_set_long_mode(s_lbl_form_status, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_form_status,
+                      tr("Server / position / RF switches: web portal APRS page or AT+APRS."));
+
+    button(scr, 24, 372, 230, 76, "Back", Action::Apps);
+
+    s_aprs_seen_revision = APRS_SERVICE_GetStationRevision() - 1u; // force fill
+    s_aprs_last_refresh_ms = 0u;
+    refreshAprsPage();
+}
+
 // ---- Games ------------------------------------------------------------------
 
 void gameExit()
@@ -3765,6 +3926,7 @@ void action(lv_event_t *event)
         case Action::VideoTx: videoTxToggle(); break;
         case Action::Game: buildGame(); break;
         case Action::Ai: buildAi(); break;
+        case Action::Aprs: buildAprs(); break;
         case Action::About: buildAbout(); break;
         case Action::SaveOtaUrl: (void)saveOtaUrl(true); break;
         case Action::CheckOta: checkOtaFromPage(); break;
@@ -4530,6 +4692,9 @@ void refresh()
     if (s_page == Page::About) {
         refreshOtaPage();
     }
+    if (s_page == Page::Aprs) {
+        refreshAprsPage();
+    }
 }
 
 // Rebuild the active page so a font-engine switch takes effect on every
@@ -4553,6 +4718,7 @@ void rebuildCurrentPage()
         case Page::Game: buildGame(); break;
         case Page::Ai: buildAi(); break;
         case Page::About: buildAbout(); break;
+        case Page::Aprs: buildAprs(); break;
     }
     s_last_refresh_ms = 0;
 }

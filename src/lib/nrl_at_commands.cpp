@@ -10,6 +10,7 @@
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
 #include "services/ai_assistant.h"
+#include "services/aprs_service.h"
 #include "services/display_notice.h"
 #include "services/espnow_link.h"
 #include "services/video_call.h"
@@ -29,6 +30,7 @@
 #include <lwip/sockets.h>
 
 #include <ctype.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1334,6 +1336,260 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         }
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ESPNOW_CODEC",
                            (ESPNOW_LINK_GetTxCodec() == 1u) ? "OPUS" : "G711");
+        return;
+    }
+
+    // APRS transceiver family:
+    //   AT+APRS=ON|OFF|?          master switch / status summary
+    //   AT+APRS_NET=ON|OFF        APRS-IS uplink/downlink
+    //   AT+APRS_TX=ON|OFF         AFSK beacon out through the radio
+    //   AT+APRS_RX=ON|OFF         demodulate radio audio
+    //   AT+APRS_SERVER=host:port  APRS-IS server
+    //   AT+APRS_SSID=0..15        SSID appended to the radio callsign
+    //   AT+APRS_SYMBOL=/I         symbol table+code (TCP/IP by default)
+    //   AT+APRS_INTERVAL=60       beacon interval, seconds
+    //   AT+APRS_POS=ddmm.mmmm,dddmm.mmmm
+    //                              default WGS-84 position (N/E automatic)
+    //   AT+APRS_PATH=WIDE1-1      RF digi path
+    //   AT+APRS_COMMENT=text      beacon comment
+    //   AT+APRS_BEACON            queue a beacon right now
+    //   AT+APRS_LIST              recent stations heard
+    if (stringEqualsIgnoreCase(command.command, "APRS")) {
+        if (is_query) {
+            AprsConfig cfg;
+            APRS_SERVICE_GetConfig(&cfg);
+            char status[96];
+            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s gps=%s rx=%lu tx=%lu",
+                     cfg.enabled ? "ON" : "OFF",
+                     cfg.net_enabled ? "ON" : "OFF",
+                     APRS_SERVICE_IsNetConnected() ? "(conn)" : "",
+                     cfg.rf_tx_enabled ? "ON" : "OFF",
+                     cfg.rf_rx_enabled ? "ON" : "OFF",
+                     APRS_SERVICE_GpsHasFix() ? "FIX" : "NO",
+                     static_cast<unsigned long>(APRS_SERVICE_GetRxCount()),
+                     static_cast<unsigned long>(APRS_SERVICE_GetTxCount()));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS", status);
+            return;
+        }
+        bool enabled = false;
+        if (!parseBoolValue(command.value, &enabled) || !APRS_SERVICE_SetEnabled(enabled)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS",
+                           enabled ? "ON" : "OFF");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_NET") ||
+        stringEqualsIgnoreCase(command.command, "APRS_TX") ||
+        stringEqualsIgnoreCase(command.command, "APRS_RX")) {
+        AprsConfig cfg;
+        APRS_SERVICE_GetConfig(&cfg);
+        const bool is_net = stringEqualsIgnoreCase(command.command, "APRS_NET");
+        const bool is_tx = stringEqualsIgnoreCase(command.command, "APRS_TX");
+        if (!is_query) {
+            bool enabled = false;
+            bool ok = parseBoolValue(command.value, &enabled);
+            if (ok) {
+                if (is_net) {
+                    ok = APRS_SERVICE_SetNetEnabled(enabled);
+                } else if (is_tx) {
+                    ok = APRS_SERVICE_SetRfTxEnabled(enabled);
+                } else {
+                    ok = APRS_SERVICE_SetRfRxEnabled(enabled);
+                }
+            }
+            if (!ok) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", command.command);
+                return;
+            }
+            APRS_SERVICE_GetConfig(&cfg);
+        }
+        const bool state = is_net ? cfg.net_enabled : (is_tx ? cfg.rf_tx_enabled : cfg.rf_rx_enabled);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           command.command, state ? "ON" : "OFF");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_SERVER")) {
+        if (!is_query) {
+            char host[65] = {};
+            unsigned port = 14580;
+            const char *colon = strrchr(command.value, ':');
+            if (colon != nullptr && colon != command.value) {
+                const size_t host_len = static_cast<size_t>(colon - command.value);
+                if (host_len >= sizeof(host) || sscanf(colon + 1, "%u", &port) != 1) {
+                    appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_SERVER");
+                    return;
+                }
+                memcpy(host, command.value, host_len);
+            } else {
+                snprintf(host, sizeof(host), "%.64s", command.value);
+            }
+            if (port == 0 || port > 65535u || !APRS_SERVICE_SetServer(host, static_cast<uint16_t>(port))) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_SERVER");
+                return;
+            }
+        }
+        AprsConfig cfg;
+        APRS_SERVICE_GetConfig(&cfg);
+        char server[80];
+        snprintf(server, sizeof(server), "%s:%u", cfg.server_host, static_cast<unsigned>(cfg.server_port));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_SERVER", server);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_SSID")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            unsigned ssid = 0;
+            if (sscanf(command.value, "%u", &ssid) != 1 || ssid > 15u ||
+                !APRS_SERVICE_SetSsid(static_cast<uint8_t>(ssid))) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_SSID");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        char text[8];
+        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg.ssid));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_SSID", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_SYMBOL")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            if (strlen(command.value) != 2u ||
+                !APRS_SERVICE_SetSymbol(command.value[0], command.value[1])) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_SYMBOL");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        char text[4] = {cfg.symbol_table, cfg.symbol_code, '\0'};
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_SYMBOL", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_INTERVAL")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            unsigned seconds = 0;
+            if (sscanf(command.value, "%u", &seconds) != 1 || seconds > 65535u ||
+                !APRS_SERVICE_SetBeaconInterval(static_cast<uint16_t>(seconds))) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_INTERVAL");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        char text[8];
+        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg.beacon_interval_s));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_INTERVAL", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_POS")) {
+        if (!is_query) {
+            double lat = 0.0, lon = 0.0;
+            const char *comma = strchr(command.value, ',');
+            if (comma == nullptr) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_POS");
+                return;
+            }
+            char lat_text[24] = {};
+            const size_t lat_len = static_cast<size_t>(comma - command.value);
+            if (lat_len == 0u || lat_len >= sizeof(lat_text)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_POS");
+                return;
+            }
+            memcpy(lat_text, command.value, lat_len);
+            if (!APRS_SERVICE_ParseAprsCoord(lat_text, true, &lat) ||
+                !APRS_SERVICE_ParseAprsCoord(comma + 1, false, &lon) ||
+                !APRS_SERVICE_SetDefaultPosition(lat, lon)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_POS");
+                return;
+            }
+        }
+        double lat = 0.0, lon = 0.0, alt = 0.0;
+        const bool fix = APRS_SERVICE_GetOwnPosition(&lat, &lon, &alt);
+        char text[64];
+        char lat_text[16], lon_text[16];
+        APRS_SERVICE_FormatAprsCoord(lat, true, lat_text, sizeof(lat_text));
+        APRS_SERVICE_FormatAprsCoord(lon, false, lon_text, sizeof(lon_text));
+        snprintf(text, sizeof(text), "%s,%s %s", lat_text, lon_text, fix ? "GPS" : "DEFAULT");
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_POS", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_PATH")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            if (!APRS_SERVICE_SetPath(command.value)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_PATH");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_PATH",
+                           cfg.path[0] != '\0' ? cfg.path : "(none)");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_COMMENT")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            if (!APRS_SERVICE_SetComment(command.value)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_COMMENT");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_COMMENT",
+                           cfg.comment[0] != '\0' ? cfg.comment : "(none)");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_BEACON")) {
+        if (!APRS_SERVICE_SendBeaconNow()) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_OFF");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_BEACON", "QUEUED");
+        return;
+    }
+
+    // Station list. Replies must fit the 1024-byte remote-AT UDP budget, so
+    // cap the station count and keep each line compact.
+    if (stringEqualsIgnoreCase(command.command, "APRS_LIST")) {
+        AprsStationInfo stations[8];
+        const size_t count = APRS_SERVICE_GetStations(stations, 8);
+        if (count == 0) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_LIST", "EMPTY");
+            return;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            const AprsStationInfo &s = stations[i];
+            char line[104];
+            char spd[16] = "-";
+            if (!isnan(s.speed_kmh)) {
+                snprintf(spd, sizeof(spd), "%.0fkm/h", static_cast<double>(s.speed_kmh));
+            } else if (!isnan(s.derived_speed_kmh)) {
+                snprintf(spd, sizeof(spd), "~%.0fkm/h", static_cast<double>(s.derived_speed_kmh));
+            }
+            char dist[16] = "-";
+            if (!isnan(s.distance_km)) {
+                snprintf(dist, sizeof(dist), "%.1fkm", static_cast<double>(s.distance_km));
+            }
+            snprintf(line, sizeof(line), "%.4f,%.4f %s %s %s %lus",
+                     static_cast<double>(s.lat), static_cast<double>(s.lon),
+                     dist, spd, s.via_rf ? "RF" : "IS",
+                     static_cast<unsigned long>(s.age_s));
+            if (!appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                                    s.name, line)) {
+                break;
+            }
+        }
         return;
     }
 

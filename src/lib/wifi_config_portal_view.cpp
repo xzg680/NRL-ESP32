@@ -8,6 +8,7 @@
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
 #include "../services/ai_assistant.h"
+#include "../services/aprs_service.h"
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
 #include "../services/nanny.h"
@@ -77,6 +78,7 @@ static std::string htmlEscape(const char *text)
 // JSON string escaping for values embedded in an inline <script> block:
 // besides the usual JSON escapes, '<' is escaped so a stored URL/name can
 // never smuggle a "</script>" into the page.
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 static std::string jsonScriptEscape(const char *text)
 {
     std::string out;
@@ -102,6 +104,7 @@ static std::string jsonScriptEscape(const char *text)
     }
     return out;
 }
+#endif
 
 // Replace every occurrence of `token` in `html` with `value`. Arduino's
 // String::replace had identical semantics; we re-implement it on std::string
@@ -517,6 +520,44 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
 #endif
 }
 
+std::string WifiConfigPortalView_BuildAprsSections(void)
+{
+    std::string html = std::string(kWifiConfigPortalAprsSectionsTemplate);
+    AprsConfig cfg;
+    APRS_SERVICE_GetConfig(&cfg);
+
+    char status[96];
+    snprintf(status, sizeof(status), "%s | APRS-IS %s | GPS %s",
+             cfg.enabled ? "ON" : "OFF",
+             APRS_SERVICE_IsNetConnected() ? "connected" : "--",
+             APRS_SERVICE_GpsHasFix() ? "fix" : "--");
+    replaceToken(html, "{{APRS_STATUS}}", status);
+    replaceToken(html, "{{APRS_ENABLED_CHECKED}}", checkedAttr(cfg.enabled));
+    replaceToken(html, "{{APRS_NET_CHECKED}}", checkedAttr(cfg.net_enabled));
+    replaceToken(html, "{{APRS_TX_CHECKED}}", checkedAttr(cfg.rf_tx_enabled));
+    replaceToken(html, "{{APRS_RX_CHECKED}}", checkedAttr(cfg.rf_rx_enabled));
+    replaceToken(html, "{{APRS_SERVER_HOST}}", htmlEscape(cfg.server_host));
+    replaceToken(html, "{{APRS_SERVER_PORT}}", fromU32(cfg.server_port));
+    replaceToken(html, "{{APRS_SSID}}", fromU32(cfg.ssid));
+    {
+        char symbol[3] = {cfg.symbol_table, cfg.symbol_code, '\0'};
+        replaceToken(html, "{{APRS_SYMBOL}}", htmlEscape(symbol));
+    }
+    replaceToken(html, "{{APRS_INTERVAL}}", fromU32(cfg.beacon_interval_s));
+    {
+        char lat[24], lon[24];
+        APRS_SERVICE_FormatAprsCoord(static_cast<double>(cfg.default_lat_e6) / 1e6,
+                                     true, lat, sizeof(lat));
+        APRS_SERVICE_FormatAprsCoord(static_cast<double>(cfg.default_lon_e6) / 1e6,
+                                     false, lon, sizeof(lon));
+        replaceToken(html, "{{APRS_LAT}}", lat);
+        replaceToken(html, "{{APRS_LON}}", lon);
+    }
+    replaceToken(html, "{{APRS_PATH}}", htmlEscape(cfg.path));
+    replaceToken(html, "{{APRS_COMMENT}}", htmlEscape(cfg.comment));
+    return html;
+}
+
 std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
                                                  const WifiConfigPortalPageState &state,
                                                  const std::string &form_sections)
@@ -534,6 +575,11 @@ std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *conf
         std::string media_tab = std::string(kWifiConfigPortalMediaTabTemplate);
         replaceToken(media_tab, "{{MEDIA_ACTIVE}}", state.media_active ? "active" : "");
         replaceToken(html, "{{MEDIA_TAB}}", media_tab);
+    }
+    {
+        std::string aprs_tab = std::string(kWifiConfigPortalAprsTabTemplate);
+        replaceToken(aprs_tab, "{{APRS_ACTIVE}}", state.aprs_active ? "active" : "");
+        replaceToken(html, "{{APRS_TAB}}", aprs_tab);
     }
     replaceToken(html, "{{AP_IP}}", ipToString(nrlWifiApIp()));
     replaceToken(html, "{{STA_IP}}", staIpOrNotConnected(nrlNetworkIp()));

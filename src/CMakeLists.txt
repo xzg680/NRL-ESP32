@@ -10,6 +10,7 @@ set(app_sources
     media/media_metadata.cpp
     media/opus_voice.cpp
     services/ai_assistant.cpp
+    services/aprs_service.cpp
     services/config_notify.cpp
     services/display_notice.cpp
     services/espnow_link.cpp
@@ -36,6 +37,10 @@ set(app_sources
     app/driver/s31_i2c.cpp
     app/driver/sci_serial.cpp
     app/driver/status_io.cpp
+    lib/aprs/aprs_ax25.cpp
+    lib/aprs/aprs_crc_ccit.c
+    lib/aprs/aprs_modem.cpp
+    lib/aprs/parse_aprs.cpp
     lib/ble_config.cpp
     lib/nrl_bt_hfp.cpp
     lib/nrl_ethernet.cpp
@@ -120,4 +125,16 @@ idf_component_register(
     # registered as a plain component via EXTRA_COMPONENT_DIRS, so it needs this
     # explicitly or the link fails with "undefined reference to app_main".
     WHOLE_ARCHIVE
+)
+
+# Vendored APRS sources (aprsc parser / VP-Digi modem, see file headers) keep
+# their upstream style; exempt them from the warnings -Werror would trip on.
+# Must come after idf_component_register: the early component requirement scan
+# runs this file in script mode where set_source_files_properties is invalid.
+set_source_files_properties(
+    lib/aprs/parse_aprs.cpp
+    lib/aprs/aprs_ax25.cpp
+    lib/aprs/aprs_modem.cpp
+    PROPERTIES COMPILE_OPTIONS
+    "-Wno-parentheses;-Wno-type-limits;-Wno-implicit-fallthrough;-Wno-unused-variable;-Wno-unused-but-set-variable;-Wno-unused-label;-Wno-unused-value"
 )

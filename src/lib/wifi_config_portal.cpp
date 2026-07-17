@@ -13,6 +13,7 @@
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
 #include "../services/ai_assistant.h"
+#include "../services/aprs_service.h"
 #include "../services/display_notice.h"
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
@@ -22,6 +23,7 @@
 
 #include <driver/gpio.h>
 #include <esp_http_server.h>
+#include <math.h>
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_ota_ops.h>
@@ -1070,7 +1072,8 @@ static void sendConfigPage(const char *title,
                            const bool device_active,
                            const bool audio_active,
                            const std::string &footer,
-                           const bool media_active = false)
+                           const bool media_active = false,
+                           const bool aprs_active = false)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     const WifiConfigPortalPageState state = {
@@ -1084,6 +1087,7 @@ static void sendConfigPage(const char *title,
         .device_active = device_active,
         .audio_active = audio_active,
         .media_active = media_active,
+        .aprs_active = aprs_active,
         .footer = footer,
     };
     sendChunkedHtml(200, WifiConfigPortalView_BuildConfigPage(config, state, form_sections));
@@ -1166,6 +1170,186 @@ static esp_err_t handleMediaPage(httpd_req_t *req)
                    false,
                    "",
                    true);
+    return ESP_OK;
+}
+
+static bool parseUIntArg(const std::string &text, unsigned long *out_value);
+
+static esp_err_t handleAprsPage(httpd_req_t *req)
+{
+    s_server.bind(req);
+    sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " APRS").c_str(),
+                   "APRS",
+                   "aprsHeadline",
+                   "GPS beacons to APRS-IS and AFSK over the radio; stations heard are listed below.",
+                   "aprsIntro",
+                   "/save_aprs",
+                   WifiConfigPortalView_BuildAprsSections(),
+                   false,
+                   false,
+                   false,
+                   "",
+                   false,
+                   true);
+    return ESP_OK;
+}
+
+static void sendAprsSavedJson(const bool ok)
+{
+    AprsConfig cfg;
+    APRS_SERVICE_GetConfig(&cfg);
+    std::string body;
+    body.reserve(384);
+    body += "{\"ok\":";
+    body += ok ? "true" : "false";
+    body += ",\"fields\":{";
+    auto appendField = [&body](const char *name, const std::string &value, const bool first = false) {
+        if (!first) {
+            body += ",";
+        }
+        body += "\"";
+        body += name;
+        body += "\":\"";
+        body += jsonEscape(value);
+        body += "\"";
+    };
+    appendField("aprs_enabled", cfg.enabled ? "1" : "0", true);
+    appendField("aprs_net", cfg.net_enabled ? "1" : "0");
+    appendField("aprs_tx", cfg.rf_tx_enabled ? "1" : "0");
+    appendField("aprs_rx", cfg.rf_rx_enabled ? "1" : "0");
+    char lat[16] = {};
+    char lon[16] = {};
+    APRS_SERVICE_FormatAprsCoord(static_cast<double>(cfg.default_lat_e6) / 1e6,
+                                 true, lat, sizeof(lat));
+    APRS_SERVICE_FormatAprsCoord(static_cast<double>(cfg.default_lon_e6) / 1e6,
+                                 false, lon, sizeof(lon));
+    appendField("aprs_lat", lat);
+    appendField("aprs_lon", lon);
+    body += "}}";
+    s_server.send(200, "application/json; charset=utf-8", body);
+}
+
+static esp_err_t handleSaveAprs(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    bool ok = true;
+
+    if (s_server.hasArg("aprs_present")) {
+        ok = APRS_SERVICE_SetEnabled(s_server.hasArg("aprs_enabled"));
+    }
+    if (ok && s_server.hasArg("aprs_net_present")) {
+        ok = APRS_SERVICE_SetNetEnabled(s_server.hasArg("aprs_net"));
+    }
+    if (ok && s_server.hasArg("aprs_tx_present")) {
+        ok = APRS_SERVICE_SetRfTxEnabled(s_server.hasArg("aprs_tx"));
+    }
+    if (ok && s_server.hasArg("aprs_rx_present")) {
+        ok = APRS_SERVICE_SetRfRxEnabled(s_server.hasArg("aprs_rx"));
+    }
+    if (ok && s_server.hasArg("aprs_server")) {
+        unsigned long port = 14580UL;
+        ok = parseUIntArg(s_server.arg("aprs_port"), &port) && port > 0UL && port <= 65535UL &&
+             APRS_SERVICE_SetServer(s_server.arg("aprs_server").c_str(),
+                                    static_cast<uint16_t>(port));
+    }
+    if (ok && s_server.hasArg("aprs_ssid")) {
+        unsigned long ssid = 0UL;
+        ok = parseUIntArg(s_server.arg("aprs_ssid"), &ssid) && ssid <= 15UL &&
+             APRS_SERVICE_SetSsid(static_cast<uint8_t>(ssid));
+    }
+    if (ok && s_server.hasArg("aprs_symbol")) {
+        const std::string symbol = s_server.arg("aprs_symbol");
+        ok = symbol.size() == 2u && APRS_SERVICE_SetSymbol(symbol[0], symbol[1]);
+    }
+    if (ok && s_server.hasArg("aprs_interval")) {
+        unsigned long seconds = 0UL;
+        ok = parseUIntArg(s_server.arg("aprs_interval"), &seconds) && seconds <= 65535UL &&
+             APRS_SERVICE_SetBeaconInterval(static_cast<uint16_t>(seconds));
+    }
+    if (ok && s_server.hasArg("aprs_lat") && s_server.hasArg("aprs_lon")) {
+        double lat = 0.0;
+        double lon = 0.0;
+        ok = APRS_SERVICE_ParseAprsCoord(s_server.arg("aprs_lat").c_str(), true, &lat) &&
+             APRS_SERVICE_ParseAprsCoord(s_server.arg("aprs_lon").c_str(), false, &lon) &&
+             APRS_SERVICE_SetDefaultPosition(lat, lon);
+    }
+    if (ok && s_server.hasArg("aprs_path")) {
+        ok = APRS_SERVICE_SetPath(s_server.arg("aprs_path").c_str());
+    }
+    if (ok && s_server.hasArg("aprs_comment")) {
+        ok = APRS_SERVICE_SetComment(s_server.arg("aprs_comment").c_str());
+    }
+    if (ok && s_server.hasArg("aprs_beacon")) {
+        ok = APRS_SERVICE_SendBeaconNow();
+    }
+
+    if (!ok) {
+        ESP_LOGE(TAG, "APRS config save via web failed (invalid params)");
+    }
+    sendAprsSavedJson(ok);
+    return ESP_OK;
+}
+
+// JSON feed for the stations-heard table: full APRS info per station plus
+// service status, polled by the /aprs page every few seconds.
+static esp_err_t handleAprsStations(httpd_req_t *req)
+{
+    s_server.bind(req);
+    static AprsStationInfo stations[32];
+    const size_t count = APRS_SERVICE_GetStations(stations, 32);
+
+    std::string body;
+    body.reserve(1024);
+    body += "{\"net\":";
+    body += APRS_SERVICE_IsNetConnected() ? "true" : "false";
+    body += ",\"gps\":";
+    body += APRS_SERVICE_GpsHasFix() ? "true" : "false";
+    body += ",\"rx\":" + std::to_string(APRS_SERVICE_GetRxCount());
+    body += ",\"tx\":" + std::to_string(APRS_SERVICE_GetTxCount());
+    body += ",\"stations\":[";
+    char num[32];
+    for (size_t i = 0; i < count; ++i) {
+        const AprsStationInfo &s = stations[i];
+        if (i > 0) {
+            body += ",";
+        }
+        body += "{\"name\":\"" + jsonEscape(s.name) + "\"";
+        snprintf(num, sizeof(num), ",\"lat\":%.5f,\"lon\":%.5f",
+                 static_cast<double>(s.lat), static_cast<double>(s.lon));
+        body += num;
+        if (!isnan(s.altitude_m)) {
+            snprintf(num, sizeof(num), ",\"alt\":%.0f", static_cast<double>(s.altitude_m));
+            body += num;
+        }
+        if (!isnan(s.distance_km)) {
+            snprintf(num, sizeof(num), ",\"dist\":%.1f,\"brg\":%u",
+                     static_cast<double>(s.distance_km), static_cast<unsigned>(s.bearing_deg));
+            body += num;
+        }
+        if (!isnan(s.speed_kmh)) {
+            snprintf(num, sizeof(num), ",\"spd\":%.1f", static_cast<double>(s.speed_kmh));
+            body += num;
+        }
+        if (!isnan(s.derived_speed_kmh)) {
+            snprintf(num, sizeof(num), ",\"dspd\":%.1f", static_cast<double>(s.derived_speed_kmh));
+            body += num;
+        }
+        if (s.course_deg > 0) {
+            snprintf(num, sizeof(num), ",\"crs\":%u", static_cast<unsigned>(s.course_deg));
+            body += num;
+        }
+        body += ",\"rf\":";
+        body += s.via_rf ? "true" : "false";
+        body += ",\"age\":" + std::to_string(s.age_s);
+        body += ",\"pkts\":" + std::to_string(s.pkt_count);
+        body += ",\"cmt\":\"" + jsonEscape(s.comment) + "\"";
+        body += ",\"sym\":\"" + jsonEscape(s.symbol) + "\"}";
+    }
+    body += "]}";
+    s_server.send(200, "application/json; charset=utf-8", body);
     return ESP_OK;
 }
 
@@ -2216,7 +2400,7 @@ static void ensureServerRunning()
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
-    cfg.max_uri_handlers = 24;
+    cfg.max_uri_handlers = 32;
     // Templated audio config page builds via std::string concatenation can
     // exceed the default 4 KB worker stack.
     cfg.stack_size = 8192;
@@ -2245,6 +2429,9 @@ static void ensureServerRunning()
         { "/save_nrl",             HTTP_POST, handleSaveNrl },
         { "/media",                HTTP_GET,  handleMediaPage },
         { "/save_media",           HTTP_POST, handleSaveMedia },
+        { "/aprs",                 HTTP_GET,  handleAprsPage },
+        { "/save_aprs",            HTTP_POST, handleSaveAprs },
+        { "/aprs/stations",        HTTP_GET,  handleAprsStations },
         { "/update",               HTTP_GET,  handleUpdatePage },
         { "/update",               HTTP_POST, handleUpdate },
         { "/ota/status",           HTTP_GET,  handleOtaStatus },

@@ -19,6 +19,7 @@
 #include "driver/external_radio.h"
 #include "driver/sci_serial.h"
 #include "driver/status_io.h"
+#include "services/aprs_service.h"
 #include "services/espnow_link.h"
 
 #include <esp_log.h>
@@ -339,6 +340,9 @@ static void pollSciUplink(void)
         if (read == 0u) {
             break;
         }
+        // Tee for the APRS service: a GPS on this port emits NMEA sentences
+        // the beacon builder consumes; the transparent uplink still gets them.
+        APRS_SERVICE_FeedSciBytes(s_sci_payload_buffer + s_sci_payload_count, read);
         s_sci_payload_count += read;
         s_last_sci_rx_ms = now;
         if (s_sci_payload_count == sizeof(s_sci_payload_buffer)) {
