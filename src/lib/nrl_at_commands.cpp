@@ -1456,6 +1456,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     //   AT+APRS_NET=ON|OFF        APRS-IS uplink/downlink
     //   AT+APRS_TX=ON|OFF         AFSK beacon out through the radio
     //   AT+APRS_RX=ON|OFF         demodulate radio audio
+    //   AT+APRS_AUTO=ON|OFF       speed/movement-adaptive beacon interval
     //   AT+APRS_SERVER=host:port  APRS-IS server
     //   AT+APRS_SSID=0..15        SSID appended to the radio callsign
     //   AT+APRS_SYMBOL=/I         symbol table+code (TCP/IP by default)
@@ -1470,13 +1471,14 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         if (is_query) {
             AprsConfig cfg;
             APRS_SERVICE_GetConfig(&cfg);
-            char status[96];
-            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s gps=%s rx=%lu tx=%lu",
+            char status[112];
+            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s auto=%s gps=%s rx=%lu tx=%lu",
                      cfg.enabled ? "ON" : "OFF",
                      cfg.net_enabled ? "ON" : "OFF",
                      APRS_SERVICE_IsNetConnected() ? "(conn)" : "",
                      cfg.rf_tx_enabled ? "ON" : "OFF",
                      cfg.rf_rx_enabled ? "ON" : "OFF",
+                     cfg.auto_interval ? "ON" : "OFF",
                      APRS_SERVICE_GpsHasFix() ? "FIX" : "NO",
                      static_cast<unsigned long>(APRS_SERVICE_GetRxCount()),
                      static_cast<unsigned long>(APRS_SERVICE_GetTxCount()));
@@ -1495,11 +1497,13 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
 
     if (stringEqualsIgnoreCase(command.command, "APRS_NET") ||
         stringEqualsIgnoreCase(command.command, "APRS_TX") ||
-        stringEqualsIgnoreCase(command.command, "APRS_RX")) {
+        stringEqualsIgnoreCase(command.command, "APRS_RX") ||
+        stringEqualsIgnoreCase(command.command, "APRS_AUTO")) {
         AprsConfig cfg;
         APRS_SERVICE_GetConfig(&cfg);
         const bool is_net = stringEqualsIgnoreCase(command.command, "APRS_NET");
         const bool is_tx = stringEqualsIgnoreCase(command.command, "APRS_TX");
+        const bool is_auto = stringEqualsIgnoreCase(command.command, "APRS_AUTO");
         if (!is_query) {
             bool enabled = false;
             bool ok = parseBoolValue(command.value, &enabled);
@@ -1508,6 +1512,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
                     ok = APRS_SERVICE_SetNetEnabled(enabled);
                 } else if (is_tx) {
                     ok = APRS_SERVICE_SetRfTxEnabled(enabled);
+                } else if (is_auto) {
+                    ok = APRS_SERVICE_SetAutoInterval(enabled);
                 } else {
                     ok = APRS_SERVICE_SetRfRxEnabled(enabled);
                 }
@@ -1518,7 +1524,9 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             }
             APRS_SERVICE_GetConfig(&cfg);
         }
-        const bool state = is_net ? cfg.net_enabled : (is_tx ? cfg.rf_tx_enabled : cfg.rf_rx_enabled);
+        const bool state = is_net ? cfg.net_enabled
+                                  : (is_tx ? cfg.rf_tx_enabled
+                                           : (is_auto ? cfg.auto_interval : cfg.rf_rx_enabled));
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                            command.command, state ? "ON" : "OFF");
         return;

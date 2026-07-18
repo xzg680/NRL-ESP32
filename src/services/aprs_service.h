@@ -37,6 +37,7 @@ typedef struct {
     char symbol_table;    // e.g. '/'
     char symbol_code;     // e.g. 'I' for the /I TCP/IP symbol
     uint16_t beacon_interval_s;
+    bool auto_interval;   // SmartBeaconing-style: shorten the period while the GPS moves
     int32_t default_lat_e6; // microdegrees, used when GPS has no fix
     int32_t default_lon_e6;
     uint16_t server_port;
@@ -78,6 +79,10 @@ bool APRS_SERVICE_SetServer(const char *host, uint16_t port);
 bool APRS_SERVICE_SetSsid(uint8_t ssid);                    // 0..15
 bool APRS_SERVICE_SetSymbol(char table, char code);
 bool APRS_SERVICE_SetBeaconInterval(uint16_t seconds);      // 10..3600
+// Auto interval: with a fresh GPS fix the beacon period scales down with
+// speed (floor 30 s at 60+ km/h) and a >300 m move beacons early; the
+// configured interval stays the stationary/no-GPS ceiling.
+bool APRS_SERVICE_SetAutoInterval(bool enabled);
 bool APRS_SERVICE_SetDefaultPosition(double lat, double lon);
 // WGS-84 coordinates in the APRS/NMEA style used for config input:
 // "ddmm.mmmm[N|S]" for latitude, "dddmm.mmmm[E|W]" for longitude (hemisphere

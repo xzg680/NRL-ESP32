@@ -41,6 +41,15 @@ constexpr const char *kDefaultAprsServer = "asia.aprs2.net";
 
 constexpr uint16_t kMinBeaconIntervalS = 10u;
 constexpr uint16_t kMaxBeaconIntervalS = 3600u;
+// Auto-interval (SmartBeaconing-style) pacing. With a fresh GPS fix the
+// effective period scales inversely with speed -- 60+ km/h beacons at the
+// 30 s floor, slower proportionally longer -- and a >kAutoMoveKm jump from
+// the last-beaconed position sends one early. The configured
+// beacon_interval_s always remains the stationary/no-GPS ceiling.
+constexpr uint16_t kAutoMinIntervalS = 30u;
+constexpr double kAutoFastSpeedKmh = 60.0; // at/above: beacon at the floor rate
+constexpr double kAutoSlowSpeedKmh = 3.0;  // below: treated as stationary
+constexpr double kAutoMoveKm = 0.3;        // early beacon after moving this far
 // WGS-84 default: 3153.3100N, 11848.8460E.
 constexpr int32_t kDefaultLatE6 = 31888500;
 constexpr int32_t kDefaultLonE6 = 118814100;
@@ -51,7 +60,9 @@ constexpr size_t kRxRingSamples = 16384u;     // ~1 s of 16 kHz mic tap
 constexpr size_t kTxChunkSamples = 160u;      // 20 ms at MODEM_TX_SAMPLE_RATE
 constexpr int16_t kTxAmplitude = 180;         // per 8-bit sine step (~0.7 FS)
 
-// Persisted blob (NVS). Field additions bump kPersistVersion.
+// Persisted blob (NVS). New fields append at the END: loadConfig accepts a
+// shorter (older) blob and the missing tail stays zero-initialised, so
+// existing configs survive upgrades without a version bump.
 struct PersistBlob {
     uint32_t magic;
     uint8_t version;
@@ -69,6 +80,7 @@ struct PersistBlob {
     char server_host[65];
     char path[17];
     char comment[41];
+    uint8_t auto_interval; // appended field: absent in pre-0.6.7 blobs
 } __attribute__((packed));
 
 struct StationRec {
@@ -147,7 +159,12 @@ uint32_t s_last_packet_seq = 0;
 
 // TX pacing
 bool s_tx_pumping = false;
-uint32_t s_next_beacon_ms = 0;
+uint32_t s_last_beacon_ms = 0; // 0 = beacon at the next enabled task tick
+// Position when the last beacon left with a live fix, for the auto-interval
+// movement trigger. Task-private (aprsTask writes and reads).
+double s_last_beacon_lat = 0.0;
+double s_last_beacon_lon = 0.0;
+bool s_last_beacon_pos_valid = false;
 
 inline uint32_t nowMs()
 {
@@ -180,6 +197,7 @@ void defaultConfig(AprsConfig &cfg)
     cfg.symbol_table = '/';
     cfg.symbol_code = 'I'; // APRS TCP/IP symbol (/I)
     cfg.beacon_interval_s = 60;
+    cfg.auto_interval = false;
     cfg.default_lat_e6 = kDefaultLatE6;
     cfg.default_lon_e6 = kDefaultLonE6;
     cfg.server_port = 14580;
@@ -201,6 +219,7 @@ void persistConfig()
     blob.symbol_table = s_cfg.symbol_table;
     blob.symbol_code = s_cfg.symbol_code;
     blob.beacon_interval_s = s_cfg.beacon_interval_s;
+    blob.auto_interval = s_cfg.auto_interval ? 1 : 0;
     blob.default_lat_e6 = s_cfg.default_lat_e6;
     blob.default_lon_e6 = s_cfg.default_lon_e6;
     blob.server_port = s_cfg.server_port;
@@ -229,7 +248,9 @@ void loadConfig()
     }
     const esp_err_t err = nvs_get_blob(nvs, kNvsKey, &blob, &size);
     nvs_close(nvs);
-    if (err != ESP_OK || size != sizeof(blob) ||
+    // Accept older, shorter blobs: appended tail fields keep their zero init.
+    if (err != ESP_OK || size < offsetof(PersistBlob, auto_interval) ||
+        size > sizeof(blob) ||
         blob.magic != kPersistMagic || blob.version != kPersistVersion) {
         return;
     }
@@ -251,6 +272,7 @@ void loadConfig()
         s_cfg.beacon_interval_s > kMaxBeaconIntervalS) {
         s_cfg.beacon_interval_s = 60;
     }
+    s_cfg.auto_interval = blob.auto_interval != 0;
     const bool migrate_zero_position =
         blob.default_lat_e6 == 0 && blob.default_lon_e6 == 0;
     s_cfg.default_lat_e6 = migrate_zero_position ? kDefaultLatE6 : blob.default_lat_e6;
@@ -989,6 +1011,7 @@ void aprsTask(void *)
         const bool enabled = s_cfg.enabled;
         const bool net = s_cfg.net_enabled;
         const uint16_t interval_s = s_cfg.beacon_interval_s;
+        const bool auto_interval = s_cfg.auto_interval;
         unlockCfg();
 
         if (!enabled) {
@@ -1017,9 +1040,39 @@ void aprsTask(void *)
         }
 
         const uint32_t now = nowMs();
-        if (s_next_beacon_ms == 0 || (int32_t)(now - s_next_beacon_ms) >= 0) {
+        uint32_t effective_ms = (uint32_t)interval_s * 1000u;
+        bool moved_far = false;
+        if (auto_interval) {
+            double lat = 0.0, lon = 0.0;
+            if (ownPosition(&lat, &lon, nullptr)) { // true only on a fresh fix
+                const double speed = (double)s_gps_speed_kmh;
+                if (speed >= kAutoSlowSpeedKmh) {
+                    double scaled_s = (double)kAutoMinIntervalS * kAutoFastSpeedKmh / speed;
+                    if (scaled_s < (double)kAutoMinIntervalS) {
+                        scaled_s = (double)kAutoMinIntervalS;
+                    }
+                    const uint32_t scaled_ms = (uint32_t)(scaled_s * 1000.0);
+                    if (scaled_ms < effective_ms) {
+                        effective_ms = scaled_ms;
+                    }
+                }
+                if (s_last_beacon_pos_valid &&
+                    s_parser.distance(s_last_beacon_lon, s_last_beacon_lat, lon, lat) >=
+                        kAutoMoveKm) {
+                    moved_far = true;
+                }
+            }
+        }
+        const uint32_t elapsed_ms = now - s_last_beacon_ms;
+        const bool due = s_last_beacon_ms == 0 || elapsed_ms >= effective_ms;
+        // A large position jump beacons early, but never more often than the
+        // auto floor -- a fast mover is already pacing at that rate.
+        const bool early = moved_far && elapsed_ms >= (uint32_t)kAutoMinIntervalS * 1000u;
+        if (due || early) {
             sendBeacon();
-            s_next_beacon_ms = now + (uint32_t)interval_s * 1000u;
+            s_last_beacon_ms = (now != 0u) ? now : 1u;
+            s_last_beacon_pos_valid =
+                ownPosition(&s_last_beacon_lat, &s_last_beacon_lon, nullptr);
         }
 
         Ax25TransmitCheck();
@@ -1088,7 +1141,7 @@ extern "C" bool APRS_SERVICE_SetEnabled(bool enabled)
     persistConfig();
     unlockCfg();
     applyRouteState();
-    s_next_beacon_ms = 0; // beacon immediately on (re)enable
+    s_last_beacon_ms = 0; // beacon immediately on (re)enable
     return true;
 }
 
@@ -1183,6 +1236,18 @@ extern "C" bool APRS_SERVICE_SetBeaconInterval(uint16_t seconds)
     }
     lockCfg();
     s_cfg.beacon_interval_s = seconds;
+    persistConfig();
+    unlockCfg();
+    return true;
+}
+
+extern "C" bool APRS_SERVICE_SetAutoInterval(bool enabled)
+{
+    if (s_cfg_mutex == nullptr) {
+        return false;
+    }
+    lockCfg();
+    s_cfg.auto_interval = enabled;
     persistConfig();
     unlockCfg();
     return true;
@@ -1325,7 +1390,7 @@ extern "C" bool APRS_SERVICE_SendBeaconNow(void)
     if (s_task == nullptr || !s_cfg.enabled) {
         return false;
     }
-    s_next_beacon_ms = 0;
+    s_last_beacon_ms = 0;
     return true;
 }
 
