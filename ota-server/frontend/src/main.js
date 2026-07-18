@@ -87,6 +87,8 @@ const featureMatrix = [
   { zh: "Wi-Fi 配置门户 / SoftAP 配网", en: "Wi-Fi configuration portal / SoftAP provisioning", all: "yes" },
   { zh: "远程 AT 配置与设备 OTA 升级", en: "Remote AT configuration and device OTA", all: "yes" },
   { zh: "APRS-IS 网络与无线电 AFSK 收发", en: "APRS-IS networking and radio AFSK TX/RX", all: "yes" },
+  { zh: "MDC1200 信令编码与解码", en: "MDC1200 signaling encode/decode", all: "yes" },
+  { zh: "DTMF 信令编码与解码", en: "DTMF signaling encode/decode", all: "yes" },
   { zh: "网页 USB 首次全量刷机（Chrome / Edge）", en: "Browser USB full flashing (Chrome / Edge)", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
   { zh: "BLE 蓝牙配网", en: "BLE provisioning", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
   { zh: "ES7210 专用麦克风 ADC", en: "Dedicated ES7210 microphone ADC", gezipai: "yes", bh4tdv: "no", s31_korvo: "no", s31_function_coreboard: "no" },
