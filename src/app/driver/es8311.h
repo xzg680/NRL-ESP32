@@ -23,6 +23,14 @@ bool ES8311_IsReady(void);
 bool ES8311_SetAudioMode(AUDIO_Mode_t mode);
 bool ES8311_SetReceiveMode(void);
 
+// Temporarily hand the shared I2S/DAC path to native-rate media playback.
+// ES8311 has a mono DAC, so HifiWrite accepts stereo PCM16 and downmixes it
+// to mono while retaining the two-slot I2S wire format used by every board.
+bool ES8311_HifiAcquire(uint32_t sample_rate_hz, uint8_t bits_per_sample, uint8_t channels);
+bool ES8311_HifiWrite(const void *pcm, size_t bytes);
+bool ES8311_HifiRelease(void);
+bool ES8311_HifiActive(void);
+
 // Push the full per-codec audio configuration (volumes, DRC, ADC config, EQ
 // coefficients) into the ES8311 registers. Mirrors the persisted config in
 // ExternalRadioConfig.

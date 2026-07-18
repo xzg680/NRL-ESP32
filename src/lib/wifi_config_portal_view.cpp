@@ -79,7 +79,6 @@ static std::string htmlEscape(const char *text)
 // JSON string escaping for values embedded in an inline <script> block:
 // besides the usual JSON escapes, '<' is escaped so a stored URL/name can
 // never smuggle a "</script>" into the page.
-#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 static std::string jsonScriptEscape(const char *text)
 {
     std::string out;
@@ -105,7 +104,30 @@ static std::string jsonScriptEscape(const char *text)
     }
     return out;
 }
-#endif
+
+static const char kMusicBrowserSections[] = R"HTML(
+<section class="panel" id="music-player-panel">
+  <div class="section-head"><h2 data-i18n="musicLibrary">Music Playback</h2><span class="hint mono" id="music-player-status"></span></div>
+  <div class="music-controls">
+    <button class="secondary btn-small" type="button" onclick="musicLibraryAction('prev')" data-i18n="musicPrev">Previous</button>
+    <button class="secondary btn-small" type="button" onclick="musicLibraryAction('stop')" data-i18n="musicStop">Stop</button>
+    <button class="secondary btn-small" type="button" onclick="musicLibraryAction('next')" data-i18n="musicNext">Next</button>
+    <button class="secondary btn-small" type="button" id="music-repeat-button" onclick="musicLibraryAction('repeat')" data-i18n="musicRepeatList">Repeat list</button>
+  </div>
+  <div class="music-browser-head">
+    <button class="secondary btn-small" type="button" id="music-up-button" onclick="musicLibraryAction('up')" data-i18n="musicUp">Up</button>
+    <span class="mono music-browser-path" id="music-browser-path">/</span>
+    <button class="secondary btn-small" type="button" onclick="musicLibraryAction('refresh')" data-i18n="musicRefresh">Rescan</button>
+  </div>
+  <div id="music-library-list" class="music-library-list"><span class="hint" data-i18n="musicLoading">Loading...</span></div>
+  <div class="music-pagination" id="music-pagination" hidden>
+    <button class="secondary btn-small" type="button" onclick="musicLibraryPage(-1)" data-i18n="musicPagePrev">Previous page</button>
+    <span class="hint" id="music-page-status"></span>
+    <button class="secondary btn-small" type="button" onclick="musicLibraryPage(1)" data-i18n="musicPageNext">Next page</button>
+  </div>
+  <p class="hint" data-i18n="musicSourcesHint">Mounted SMB, TF/SD and USB sources appear here automatically. Tap a folder to browse and a track to play.</p>
+</section>
+)HTML";
 
 // Replace every occurrence of `token` in `html` with `value`. Arduino's
 // String::replace had identical semantics; we re-implement it on std::string
@@ -480,32 +502,58 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
     char smb_status[128] = {};
     STORAGE_SmbDescribe(smb_status, sizeof(smb_status));
     replaceToken(html, "{{SMB_STATUS}}", htmlEscape(smb_status));
+    replaceToken(html, "{{MUSIC_BROWSER}}", kMusicBrowserSections);
     return html;
 #else
-    std::string html =
-        "<section class=\"panel\">"
-        "<div class=\"section-head\"><h2 data-i18n=\"voiceLink\">Voice Link</h2></div>"
-        "<div class=\"grid\">"
-        "<form class=\"item-form\" method=\"post\" action=\"/save_media\"><label data-i18n=\"pttMode\">PTT Mode</label>"
-        "<select name=\"ptt_mode\" onchange=\"submitSwitch(this)\">"
-        "<option value=\"0\"{{PTT_MODE_NRL_SELECTED}} data-i18n=\"pttModeNrl\">NRL network PTT</option>"
-        "<option value=\"1\"{{PTT_MODE_ESPNOW_SELECTED}} data-i18n=\"pttModeEspnow\">ESP-NOW PTT</option>"
-        "</select></form>"
-        "</div></section>"
-        "<section class=\"panel\"><div class=\"section-head\"><h2 data-i18n=\"espnowLabel\">ESP-NOW Intercom</h2></div>"
-        "<div class=\"grid\"><form class=\"item-form\" method=\"post\" action=\"/save_media\">"
-        "<label data-i18n=\"espnowLabel\">ESP-NOW Intercom</label><input type=\"hidden\" name=\"espnow_present\" value=\"1\">"
-        "<label class=\"hint\"><input type=\"checkbox\" name=\"espnow_enabled\" value=\"1\" onchange=\"submitSwitch(this)\" {{ESPNOW_CHECKED}}>"
-        "<span data-i18n=\"espnowText\">Off-grid voice link between nearby devices</span></label></form>"
-        "<form class=\"item-form\" method=\"post\" action=\"/save_media\">"
-        "<label data-i18n=\"espnowRxLabel\">ESP-NOW Receive</label><input type=\"hidden\" name=\"espnow_rx_present\" value=\"1\">"
-        "<label class=\"hint\"><input type=\"checkbox\" name=\"espnow_rx\" value=\"1\" onchange=\"submitSwitch(this)\" {{ESPNOW_RX_CHECKED}}>"
-        "<span data-i18n=\"espnowRxText\">Hear intercom voice even while TX stays off</span></label></form>"
-        "<form class=\"item-form\" method=\"post\" action=\"/save_media\"><label data-i18n=\"espnowCodec\">ESP-NOW Voice Codec (TX)</label>"
-        "<select name=\"espnow_codec\" onchange=\"submitSwitch(this)\">"
-        "<option value=\"0\"{{ESPNOW_CODEC_G711_SELECTED}} data-i18n=\"codecG711\">G.711 8 kHz (compatible)</option>"
-        "<option value=\"1\"{{ESPNOW_CODEC_OPUS_SELECTED}} data-i18n=\"codecOpus\">Opus 16 kHz wideband</option>"
-        "</select></form></div></section>";
+    std::string html = R"HTML(
+        <section class="panel">
+          <div class="section-head"><h2 data-i18n="musicTarget">Playback Target</h2><span class="hint" data-i18n="musicTargetHint">One shared setting for everything the player outputs: music, nanny beacon, and net radio.</span></div>
+          <div class="grid">
+            <form class="item-form" method="post" action="/save_media"><label data-i18n="musicTarget">Playback Target</label><select name="music_target" onchange="submitSwitch(this)"><option value="0"{{TARGET_LOCAL_SELECTED}} data-i18n="targetLocal">Local speaker</option><option value="1"{{TARGET_NET_SELECTED}} data-i18n="targetNet">NRL network</option><option value="2"{{TARGET_BOTH_SELECTED}} data-i18n="targetBoth">Local + network</option></select></form>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><h2 data-i18n="voiceLink">Voice Link</h2></div>
+          <div class="grid"><form class="item-form" method="post" action="/save_media"><label data-i18n="pttMode">PTT Mode</label><select name="ptt_mode" onchange="submitSwitch(this)"><option value="0"{{PTT_MODE_NRL_SELECTED}} data-i18n="pttModeNrl">NRL network PTT</option><option value="1"{{PTT_MODE_ESPNOW_SELECTED}} data-i18n="pttModeEspnow">ESP-NOW PTT</option></select></form></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><h2 data-i18n="espnowLabel">ESP-NOW Intercom</h2></div>
+          <div class="grid">
+            <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowLabel">ESP-NOW Intercom</label><input type="hidden" name="espnow_present" value="1"><label class="hint"><input type="checkbox" name="espnow_enabled" value="1" onchange="submitSwitch(this)" {{ESPNOW_CHECKED}}><span data-i18n="espnowText">Off-grid voice link between nearby devices</span></label></form>
+            <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowRxLabel">ESP-NOW Receive</label><input type="hidden" name="espnow_rx_present" value="1"><label class="hint"><input type="checkbox" name="espnow_rx" value="1" onchange="submitSwitch(this)" {{ESPNOW_RX_CHECKED}}><span data-i18n="espnowRxText">Hear intercom voice even while TX stays off</span></label></form>
+            <form class="item-form" method="post" action="/save_media"><label data-i18n="espnowCodec">ESP-NOW Voice Codec (TX)</label><select name="espnow_codec" onchange="submitSwitch(this)"><option value="0"{{ESPNOW_CODEC_G711_SELECTED}} data-i18n="codecG711">G.711 8 kHz (compatible)</option><option value="1"{{ESPNOW_CODEC_OPUS_SELECTED}} data-i18n="codecOpus">Opus 16 kHz wideband</option></select></form>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><h2 data-i18n="netRadio">Net Radio</h2><span class="hint mono">{{RADIO_STATUS}}</span></div>
+          <div class="grid">
+            <form class="item-form span-2" method="post" action="/save_media">
+              <div class="subgrid"><div class="span-2"><label data-i18n="radioUrl">Stream URL (http:// or https://)</label><input name="radio_url" value="{{RADIO_URL}}" placeholder="http://..."></div></div>
+              <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="btn-small" type="button" onclick="submitFormAction(this, 'radio_play')" data-i18n="radioPlay">Play</button><button class="secondary btn-small" type="button" onclick="submitFormAction(this, 'radio_stop')" data-i18n="radioStop">Stop</button></div>
+            </form>
+            <div class="span-2"><div class="group-label" data-i18n="radioFavs">Favorite stations</div><div id="radio-fav-list" class="fav-list"></div></div>
+            <form class="item-form span-2" method="post" action="/save_media" id="radio-fav-form">
+              <div class="subgrid"><div><label data-i18n="radioFavName">Station name</label><input name="fav_name" value="" maxlength="47"></div><div><label data-i18n="radioFavUrl">Stream URL (http:// or https://)</label><input name="fav_url" value="" maxlength="199" placeholder="http://..."></div></div>
+              <div class="actions"><button class="btn-small" type="button" onclick="addRadioFav(this)" data-i18n="radioFavAdd">Add favorite</button></div>
+            </form>
+            <script>window.RADIO_FAVS={{RADIO_FAVS_JSON}};window.RADIO_FAV_CUR={{RADIO_FAV_CUR}};</script>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><h2 data-i18n="smbShare">Network Share (SMB)</h2><span class="hint mono">{{SMB_STATUS}}</span></div>
+          <div class="grid">
+            <form class="item-form span-2" method="post" action="/save_media">
+              <div class="subgrid"><div><label data-i18n="smbServer">Server (NAS / PC)</label><input name="smb_server" value="{{SMB_SERVER}}" placeholder="192.168.1.10"></div><div><label data-i18n="smbShareName">Share name</label><input name="smb_share" value="{{SMB_SHARE}}" placeholder="music"></div><div><label data-i18n="smbUser">Username (empty = guest)</label><input name="smb_user" value="{{SMB_USER}}"></div><div><label data-i18n="smbPassword">Password</label><input name="smb_password" type="password" value="{{SMB_PASSWORD}}"></div></div>
+              <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="secondary btn-small" type="button" onclick="submitFormAction(this, 'smb_clear')" data-i18n="smbClear">Clear</button></div>
+            </form>
+          </div>
+        </section>
+        {{MUSIC_BROWSER}}
+    )HTML";
+    const int target = MUSIC_GetTarget();
+    replaceToken(html, "{{TARGET_LOCAL_SELECTED}}", target == MUSIC_TARGET_LOCAL ? " selected" : "");
+    replaceToken(html, "{{TARGET_NET_SELECTED}}", target == MUSIC_TARGET_NET ? " selected" : "");
+    replaceToken(html, "{{TARGET_BOTH_SELECTED}}", target == MUSIC_TARGET_BOTH ? " selected" : "");
     const uint8_t codec = NRLAudioBridge_GetVoiceCodec();
     replaceToken(html, "{{CODEC_G711_SELECTED}}", codec == 0u ? " selected" : "");
     replaceToken(html, "{{CODEC_OPUS_SELECTED}}", codec == 1u ? " selected" : "");
@@ -517,6 +565,43 @@ std::string WifiConfigPortalView_BuildMediaSections(void)
     const uint8_t ptt_mode = ESPNOW_LINK_GetPttMode();
     replaceToken(html, "{{PTT_MODE_NRL_SELECTED}}", ptt_mode == 0u ? " selected" : "");
     replaceToken(html, "{{PTT_MODE_ESPNOW_SELECTED}}", ptt_mode == 1u ? " selected" : "");
+
+    char radio_url[256] = {};
+    MUSIC_GetRadioUrl(radio_url, sizeof(radio_url));
+    replaceToken(html, "{{RADIO_URL}}", htmlEscape(radio_url));
+    const char *playing_path = MUSIC_CurrentPath();
+    const bool radio_playing = MUSIC_IsPlaying() && strncmp(playing_path, "http", 4) == 0;
+    replaceToken(html, "{{RADIO_STATUS}}",
+                 radio_playing ? (std::string("&#9654; ") + htmlEscape(playing_path)) : std::string(""));
+
+    std::string favs_json = "[";
+    const size_t fav_count = RADIO_FAV_Count();
+    for (size_t i = 0; i < fav_count; ++i) {
+        char fav_name[RADIO_FAV_NAME_SIZE] = {};
+        char fav_url[RADIO_FAV_URL_SIZE] = {};
+        if (!RADIO_FAV_Get(i, fav_name, sizeof(fav_name), fav_url, sizeof(fav_url))) break;
+        if (i > 0u) favs_json += ",";
+        favs_json += "{\"name\":\"" + jsonScriptEscape(fav_name) +
+                     "\",\"url\":\"" + jsonScriptEscape(fav_url) + "\"}";
+    }
+    favs_json += "]";
+    replaceToken(html, "{{RADIO_FAVS_JSON}}", favs_json);
+    replaceToken(html, "{{RADIO_FAV_CUR}}", fromI32(RADIO_FAV_CurrentIndex()));
+
+    char smb_server[64] = {};
+    char smb_share[64] = {};
+    char smb_user[32] = {};
+    char smb_pass[64] = {};
+    (void)STORAGE_SmbGetConfig(smb_server, sizeof(smb_server), smb_share, sizeof(smb_share),
+                               smb_user, sizeof(smb_user), smb_pass, sizeof(smb_pass));
+    replaceToken(html, "{{SMB_SERVER}}", htmlEscape(smb_server));
+    replaceToken(html, "{{SMB_SHARE}}", htmlEscape(smb_share));
+    replaceToken(html, "{{SMB_USER}}", htmlEscape(smb_user));
+    replaceToken(html, "{{SMB_PASSWORD}}", htmlEscape(smb_pass));
+    char smb_status[128] = {};
+    STORAGE_SmbDescribe(smb_status, sizeof(smb_status));
+    replaceToken(html, "{{SMB_STATUS}}", htmlEscape(smb_status));
+    replaceToken(html, "{{MUSIC_BROWSER}}", kMusicBrowserSections);
     return html;
 #endif
 }

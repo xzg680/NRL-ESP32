@@ -18,6 +18,7 @@
 #include "../services/display_notice.h"
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
+#include "../services/music_playlist.h"
 #include "../services/nanny.h"
 #include "../services/radio_favorites.h"
 #include "../services/storage_service.h"
@@ -2248,6 +2249,151 @@ static esp_err_t handleSaveMedia(httpd_req_t *req)
     return ESP_OK;
 }
 
+constexpr size_t kWebPlaylistPageSize = 64u;
+
+static const char *pathBasename(const char *path)
+{
+    if (path == nullptr) {
+        return "";
+    }
+    const char *slash = strrchr(path, '/');
+    return (slash != nullptr) ? slash + 1 : path;
+}
+
+static void sendPlaylistJson(const bool ok, size_t offset, const bool include_entries)
+{
+    const bool scanning = PLAYLIST_IsScanning();
+    const size_t track_count = PLAYLIST_Count();
+    const size_t dir_count = PLAYLIST_DirCount();
+    const size_t total = dir_count + track_count;
+    if (offset >= total && total > 0u) {
+        offset = ((total - 1u) / kWebPlaylistPageSize) * kWebPlaylistPageSize;
+    }
+    const size_t end = (offset + kWebPlaylistPageSize < total)
+                           ? offset + kWebPlaylistPageSize
+                           : total;
+    const char *playing_path = MUSIC_CurrentPath();
+    const bool playing = MUSIC_IsPlaying();
+
+    std::string body;
+    body.reserve(include_entries ? 16384u : 768u);
+    body += "{\"ok\":";
+    body += ok ? "true" : "false";
+    body += ",\"scanning\":";
+    body += scanning ? "true" : "false";
+    body += ",\"scan_ok\":";
+    body += PLAYLIST_LastScanOk() ? "true" : "false";
+    body += ",\"root\":";
+    body += PLAYLIST_AtRoot() ? "true" : "false";
+    body += ",\"dir\":\"" + jsonEscape(PLAYLIST_CurrentDir()) + "\"";
+    body += ",\"playing\":";
+    body += playing ? "true" : "false";
+    body += ",\"playing_path\":\"" + jsonEscape(playing_path) + "\"";
+    body += ",\"repeat\":" + std::to_string(static_cast<int>(PLAYLIST_GetRepeatMode()));
+    body += ",\"offset\":" + std::to_string(offset);
+    body += ",\"page_size\":" + std::to_string(kWebPlaylistPageSize);
+    body += ",\"total\":" + std::to_string(total);
+    body += ",\"favorite_supported\":";
+    body += STORAGE_SdMounted() ? "true" : "false";
+
+    if (include_entries) {
+        body += ",\"dirs\":[";
+        const size_t dir_begin = offset < dir_count ? offset : dir_count;
+        const size_t dir_end = end < dir_count ? end : dir_count;
+        for (size_t i = dir_begin; i < dir_end; ++i) {
+            const char *name = PLAYLIST_GetDirName(i);
+            if (i > dir_begin) {
+                body += ",";
+            }
+            body += "{\"index\":" + std::to_string(i) +
+                    ",\"name\":\"" + jsonEscape(name != nullptr ? name : "(dir)") + "\"}";
+        }
+        body += "],\"tracks\":[";
+        bool first = true;
+        const size_t track_begin = offset > dir_count ? offset - dir_count : 0u;
+        const size_t track_end = end > dir_count
+                                     ? ((end - dir_count < track_count)
+                                            ? end - dir_count : track_count)
+                                     : 0u;
+        for (size_t i = track_begin; i < track_end; ++i) {
+            const char *path = PLAYLIST_GetPath(i);
+            if (path == nullptr) {
+                continue;
+            }
+            if (!first) {
+                body += ",";
+            }
+            first = false;
+            body += "{\"index\":" + std::to_string(i) +
+                    ",\"name\":\"" + jsonEscape(pathBasename(path)) +
+                    "\",\"favorite\":" + (PLAYLIST_IsFavorite(path) ? "true" : "false") +
+                    ",\"current\":" +
+                    ((playing && playing_path != nullptr && strcmp(path, playing_path) == 0)
+                         ? "true" : "false") + "}";
+        }
+        body += "]";
+    }
+    body += "}";
+    s_server.send(ok ? 200 : 400, "application/json; charset=utf-8", body);
+}
+
+static esp_err_t handlePlaylistControl(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+
+    const std::string action = s_server.arg("action");
+    unsigned long parsed_offset = 0UL;
+    if (s_server.hasArg("offset")) {
+        (void)parseUIntArg(s_server.arg("offset"), &parsed_offset);
+    }
+    size_t offset = static_cast<size_t>(parsed_offset);
+    bool ok = true;
+
+    const bool navigation_action = action == "enter" || action == "up" ||
+                                   action == "refresh";
+    if (PLAYLIST_IsScanning() && !navigation_action &&
+        action != "snapshot" && action != "status") {
+        ok = false;
+    } else if (action == "enter" || action == "play" || action == "favorite") {
+        unsigned long index = 0UL;
+        ok = parseUIntArg(s_server.arg("index"), &index);
+        if (ok && action == "enter") {
+            ok = PLAYLIST_EnterDirAsync(static_cast<size_t>(index));
+            offset = 0u;
+        } else if (ok && action == "play") {
+            ok = PLAYLIST_PlayIndex(static_cast<size_t>(index));
+        } else if (ok) {
+            const char *path = PLAYLIST_GetPath(static_cast<size_t>(index));
+            ok = path != nullptr && PLAYLIST_ToggleFavorite(path);
+        }
+    } else if (action == "up") {
+        ok = PLAYLIST_UpAsync();
+        offset = 0u;
+    } else if (action == "refresh") {
+        ok = PLAYLIST_ScanAsync();
+        offset = 0u;
+    } else if (action == "prev") {
+        ok = PLAYLIST_Prev();
+    } else if (action == "next") {
+        ok = PLAYLIST_Next();
+    } else if (action == "stop") {
+        MUSIC_Stop();
+    } else if (action == "repeat") {
+        (void)PLAYLIST_ToggleRepeatMode();
+    } else if (action != "snapshot" && action != "status") {
+        ok = false;
+    }
+
+    if (!ok) {
+        ESP_LOGW(TAG, "web playlist action failed: %s", action.c_str());
+    }
+    sendPlaylistJson(ok, offset, action != "status");
+    return ESP_OK;
+}
+
 static esp_err_t handleUpdatePage(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -2434,9 +2580,10 @@ static void sendChunkedAsset(httpd_req_t *req, const char *content_type,
 {
     httpd_resp_set_status(req, "200 OK");
     httpd_resp_set_type(req, content_type);
-    // Long cache lifetime is safe because every reference is versioned via the
-    // ?v={{VERSION}} query string in the HTML template.
-    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=2592000, immutable");
+    // Development builds are often flashed repeatedly without changing the
+    // firmware version. Revalidate assets so a normal page refresh cannot keep
+    // an older portal.js that does not match the newly flashed HTML.
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     constexpr size_t kChunkSize = 1024;
     size_t remaining = length;
     const char *cursor = body;
@@ -2532,6 +2679,7 @@ static void ensureServerRunning()
         { "/save_nrl",             HTTP_POST, handleSaveNrl },
         { "/media",                HTTP_GET,  handleMediaPage },
         { "/save_media",           HTTP_POST, handleSaveMedia },
+        { "/media/playlist",       HTTP_POST, handlePlaylistControl },
         { "/aprs",                 HTTP_GET,  handleAprsPage },
         { "/save_aprs",            HTTP_POST, handleSaveAprs },
         { "/aprs/stations",        HTTP_GET,  handleAprsStations },

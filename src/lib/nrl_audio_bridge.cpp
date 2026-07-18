@@ -783,6 +783,7 @@ static void startDownlinkPlayback(void)
     if (!ES8311_SetReceiveMode()) {
         ESP_LOGI(TAG,"[NRL] failed to keep ES8311 in receive/speaker mode");
         STATUS_IO_SetPttActive(false);
+        AudioFocus_NotifyVoiceEnd();
         return;
     }
 #endif
@@ -854,6 +855,7 @@ static void stopDownlinkPlayback(void)
 #endif
 
     s_downlink_playback_active = false;
+    AudioFocus_NotifyVoiceEnd();
     s_voice_stream_logged = false;
     s_voice_decode_logged = false;
     s_voice_decode_peak_max = 0;
@@ -1127,6 +1129,9 @@ static void pollSerialAtConsole(void)
 static void bridgeTask(void *)
 {
     bool previous_sql = STATUS_IO_IsSqlActive();
+    if (previous_sql && ESPNOW_LINK_GetPttMode() == 0u) {
+        AudioFocus_NotifyVoiceStart();
+    }
     while (true) {
         if (!ensureNetworkAndUdp()) {
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1271,10 +1276,14 @@ static void bridgeTask(void *)
 
         STATUS_IO_Poll();
         const bool current_sql = STATUS_IO_IsSqlActive();
+        if (!previous_sql && current_sql && ESPNOW_LINK_GetPttMode() == 0u) {
+            AudioFocus_NotifyVoiceStart();
+        }
         if (previous_sql && !current_sql && ESPNOW_LINK_GetPttMode() == 0u) {
             // The captured voice gate just closed: queue the signaling burst
             // ungated so it follows the final NRL voice packet.
             SIGNALING_OnLocalPttReleased();
+            AudioFocus_NotifyVoiceEnd();
         }
         previous_sql = current_sql;
 

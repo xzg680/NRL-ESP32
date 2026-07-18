@@ -39,7 +39,9 @@
 #include "../../services/aprs_service.h"
 #include "../../services/espnow_link.h"
 #include "../../services/display_notice.h"
+#include "../../services/music_player.h"
 #include "../../services/ota_service.h"
+#include "../../services/radio_favorites.h"
 #include "../../services/signaling_service.h"
 #include "../../lib/nrl_version.h"
 #include "external_radio.h"
@@ -196,7 +198,7 @@ NrlOtaStatus *s_ota_ui_status = nullptr;
 
 // Cached on-screen text, so labels are only rewritten when a value changes.
 char s_shown_callsign[16] = {};
-char s_shown_ssid[16] = {};
+char s_shown_ssid[160] = {};
 char s_shown_time[16] = {};
 char s_shown_wifi[28] = {};
 char s_shown_vol[16] = {};
@@ -205,6 +207,10 @@ char s_shown_ip[96] = {};
 char s_shown_cpu[12] = {};
 char s_shown_ota[160] = {}; // sized for a scrolling APRS monitor line
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
+bool s_shown_media = false;
+char s_cached_radio_path[256] = {};
+char s_cached_radio_name[RADIO_FAV_NAME_SIZE] = {};
+uint32_t s_radio_name_refresh_ms = 0u;
 
 void refreshVolume();
 void buildUi();
@@ -642,6 +648,7 @@ void resetCenterWidgets()
     s_shown_time[0] = '\0';
     s_shown_ota[0] = '\0';
     s_shown_state = -1;
+    s_shown_media = false;
 }
 
 void resetHomeWidgets()
@@ -1074,6 +1081,9 @@ void buildHomeContent()
     lv_label_set_text(s_lbl_callsign, "----");
 
     s_lbl_ssid = makeLabel(content, &lv_font_montserrat_20, kColorSub);
+    lv_obj_set_width(s_lbl_ssid, kWidth - 16);
+    lv_obj_set_style_text_align(s_lbl_ssid, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_ssid, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_align(s_lbl_ssid, LV_ALIGN_TOP_MID, 0, 86);
     lv_label_set_text(s_lbl_ssid, "SSID -");
 
@@ -1166,11 +1176,56 @@ void refreshCaller()
         ESPNOW_LINK_GetLastPeer(espnow_peer, sizeof(espnow_peer));
     }
 
+    char media_name[160] = {};
+    const char *playing_path = MUSIC_CurrentPath();
+    const bool media_playing = MUSIC_IsPlaying() && playing_path != nullptr;
+    const bool radio_playing = media_playing &&
+                               (strncmp(playing_path, "http://", 7) == 0 ||
+                                strncmp(playing_path, "https://", 8) == 0);
+    // Voice/PTT and ESP-NOW remain above music in the display priority, just
+    // as they are in the audio path. When idle, show the configured favorite
+    // name; a URL played directly from AT/Web has no friendly metadata yet.
+    const bool show_radio = radio_playing && !rx && !tx && !espnow_rx && !espnow_tx;
+    const bool show_music = media_playing && !radio_playing &&
+                            !rx && !tx && !espnow_rx && !espnow_tx;
+    if (show_radio) {
+        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+        if (strcmp(s_cached_radio_path, playing_path) != 0 ||
+            s_radio_name_refresh_ms == 0u ||
+            (now_ms - s_radio_name_refresh_ms) >= 1000u) {
+            snprintf(s_cached_radio_path, sizeof(s_cached_radio_path), "%s", playing_path);
+            s_cached_radio_name[0] = '\0';
+            const int favorite = RADIO_FAV_IndexOfUrl(playing_path);
+            if (favorite >= 0) {
+                (void)RADIO_FAV_Get(static_cast<size_t>(favorite), s_cached_radio_name,
+                                    sizeof(s_cached_radio_name), nullptr, 0u);
+            }
+            if (s_cached_radio_name[0] == '\0') {
+                snprintf(s_cached_radio_name, sizeof(s_cached_radio_name), "网络电台");
+            }
+            s_radio_name_refresh_ms = now_ms;
+        }
+        snprintf(media_name, sizeof(media_name), "%s", s_cached_radio_name);
+    } else if (show_music) {
+        const MediaTrackInfo *track = MUSIC_GetTrackInfo();
+        if (track != nullptr && track->title[0] != '\0') {
+            snprintf(media_name, sizeof(media_name), "%s", track->title);
+        } else {
+            const char *basename = strrchr(playing_path, '/');
+            basename = (basename != nullptr) ? basename + 1 : playing_path;
+            snprintf(media_name, sizeof(media_name), "%s", basename);
+            char *extension = strrchr(media_name, '.');
+            if (extension != nullptr && extension != media_name) {
+                *extension = '\0';
+            }
+        }
+    }
+
     // While a voice stream is actually being received, the main area shows the
     // remote caller. Otherwise it shows this device's own callsign/SSID, read
     // straight from the local config -- heartbeats never feed this.
     char call_text[16];
-    char ssid_text[16];
+    char ssid_text[160];
     if (rx && voice_call[0] != '\0') {
         snprintf(call_text, sizeof(call_text), "%s", voice_call);
         snprintf(ssid_text, sizeof(ssid_text), "SSID %u", voice_ssid);
@@ -1186,6 +1241,12 @@ void refreshCaller()
             snprintf(ssid_text, sizeof(ssid_text), "SSID -");
         }
         snprintf(call_text, sizeof(call_text), "%s", espnow_peer);
+    } else if (show_radio) {
+        snprintf(call_text, sizeof(call_text), "RADIO");
+        snprintf(ssid_text, sizeof(ssid_text), "%s", media_name);
+    } else if (show_music) {
+        snprintf(call_text, sizeof(call_text), "MUSIC");
+        snprintf(ssid_text, sizeof(ssid_text), "%s", media_name);
     } else {
         const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
         if (cfg != nullptr && cfg->callsign[0] != '\0') {
@@ -1200,6 +1261,15 @@ void refreshCaller()
 
     setLabel(s_lbl_callsign, s_shown_callsign, sizeof(s_shown_callsign), call_text);
     setLabel(s_lbl_ssid, s_shown_ssid, sizeof(s_shown_ssid), ssid_text);
+    const bool show_media = show_radio || show_music;
+    if (show_media != s_shown_media) {
+        s_shown_media = show_media;
+        // The 16 px UI font falls back to the bundled GB2312 glyphs, allowing
+        // Chinese favorite names without adding another large Gezipai font.
+        lv_obj_set_style_text_font(s_lbl_ssid,
+                                   show_media ? &s_font_aprs_16 : &lv_font_montserrat_20,
+                                   0);
+    }
 
     // Status caption above the callsign. Transmitting while also receiving is
     // shown as full duplex; otherwise TX wins over RX wins over standby.
@@ -1216,6 +1286,8 @@ void refreshCaller()
         state = 3;  // transmitting
     } else if (rx) {
         state = 2;  // receiving
+    } else if (show_media) {
+        state = 11;  // network radio or music file
     } else if (ESPNOW_LINK_IsEnabled()) {
         // Standby captions carry the PTT target (NRL / ESP-NOW) and that
         // link's own TX codec. Both are folded into the state value so
@@ -1231,6 +1303,10 @@ void refreshCaller()
         uint32_t caption_color;
         uint32_t call_color;
         switch (state) {
+            case 11:
+                caption = "NOW PLAYING"; caption_color = kColorGood;
+                call_color = kColorGood;
+                break;
             case 7:
                 caption = "ESP-NOW RX";  caption_color = kColorDuplex;
                 call_color = kColorCallLive;
@@ -1532,12 +1608,27 @@ void refreshOtaNotice()
         snprintf(text, sizeof(text), "NEW FW %.20s VOL+/-", status->latest_version);
         color = kColorGood;
     } else if (APRS_SERVICE_IsEnabled()) {
-        // Lowest priority: live APRS monitor -- the latest packet heard
-        // (RF or APRS-IS) scrolls across this line.
-        char packet[sizeof(text)] = {};
-        if (APRS_SERVICE_GetLastPacket(packet, sizeof(packet)) != 0u && packet[0] != '\0') {
-            snprintf(text, sizeof(text), "APRS %.*s",
-                     static_cast<int>(sizeof(text) - 6u), packet);
+        // Lowest priority: show a human-readable summary of the newest APRS
+        // station. Do not expose raw TNC2 paths, coordinates or protocol
+        // fields in the small scrolling ticker.
+        AprsStationInfo station = {};
+        if (APRS_SERVICE_GetStations(&station, 1u) == 1u) {
+            char distance[16] = "--km";
+            if (!isnan(station.distance_km)) {
+                snprintf(distance, sizeof(distance), "%.1fkm",
+                         static_cast<double>(station.distance_km));
+            }
+            char speed[20] = {};
+            if (!isnan(station.speed_kmh)) {
+                snprintf(speed, sizeof(speed), " %.0fkm/h",
+                         static_cast<double>(station.speed_kmh));
+            } else if (!isnan(station.derived_speed_kmh)) {
+                snprintf(speed, sizeof(speed), " ~%.0fkm/h",
+                         static_cast<double>(station.derived_speed_kmh));
+            }
+            snprintf(text, sizeof(text), "APRS %s %s%s%s%s",
+                     station.name, distance, speed,
+                     station.comment[0] != '\0' ? " " : "", station.comment);
             color = kColorAccent;
         }
     }

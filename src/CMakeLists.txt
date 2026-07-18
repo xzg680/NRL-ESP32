@@ -108,10 +108,12 @@ endif()
 # Korvo's BSP is linked from the top-level CMakeLists after project(), where the
 # custom board selection is reliably available. Declaring it here would make
 # ESP-IDF's early requirement scan pull the display BSP into every S31 build.
-# USB flash drive + SMB network share (storage_service backends) -- the
-# component dependencies themselves are target-gated in idf_component.yml.
+# SMB network playback is available on every board.
+list(APPEND app_priv_requires sahlberg__libsmb2 vfs)
+
+# USB flash drive and the S31-only assistant/display dependencies.
 if(IDF_TARGET STREQUAL "esp32s31")
-    list(APPEND app_priv_requires usb espressif__usb_host_msc espressif__led_strip fatfs sahlberg__libsmb2 vfs
+    list(APPEND app_priv_requires usb espressif__usb_host_msc espressif__led_strip fatfs
                                   espressif__esp_websocket_client espressif__cjson)
 endif()
 

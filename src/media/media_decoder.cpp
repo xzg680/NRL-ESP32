@@ -47,6 +47,11 @@ constexpr size_t kInitialOutBufferBytes = 32 * 1024;
 // iterations (each source read is still split to ~1.2 KB inside smb_vfs).
 constexpr size_t kRingBytes = 1 * 1024 * 1024;
 constexpr size_t kRingFillChunk = 32 * 1024;
+// Direct HTTP radio is paced by the remote server. Accumulate one compressed
+// input chunk before decoding so short Wi-Fi/TCP stalls do not immediately
+// drain the tiny high-rate I2S DMA queue into audible gaps/noise. At 64 kbps
+// this is about four seconds; at 320 kbps it is under one second.
+constexpr size_t kHttpPrebufferBytes = 32 * 1024;
 
 constexpr size_t kHlsMaxSegments = 8;
 constexpr size_t kHlsPlaylistBytes = 16 * 1024;
@@ -107,6 +112,7 @@ struct MediaDecoder {
     volatile bool ring_stop;
     volatile bool ring_running;
     bool ring_wait_full;         // block for a full read (file semantics)
+    size_t ring_prebuffer_bytes; // initial compressed bytes required for HTTP radio
 };
 
 namespace {
@@ -119,6 +125,23 @@ static size_t read_source(MediaDecoder *d, uint8_t *dst, const size_t size)
 {
     if (d->ring == nullptr) {
         return source_read_direct(d, dst, size);
+    }
+    if (d->ring_prebuffer_bytes > 0u) {
+        // Only direct HTTP radio uses this initial gate. The filler owns all
+        // socket reads while the decoder waits, allowing a useful jitter
+        // reserve to form in PSRAM before I2S playback begins.
+        while (!d->ring_eof && d->ring_running) {
+            const size_t head = d->ring_head;
+            const size_t tail = d->ring_tail;
+            const size_t used = (head + kRingBytes - tail) % kRingBytes;
+            if (used >= d->ring_prebuffer_bytes) {
+                ESP_LOGI(TAG, "readahead: HTTP radio buffered %u bytes",
+                         static_cast<unsigned>(used));
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        d->ring_prebuffer_bytes = 0u;
     }
     size_t got = 0;
     while (got < size) {
@@ -686,7 +709,8 @@ static void ring_start(MediaDecoder *d)
     d->ring_eof = false;
     d->ring_stop = false;
     d->ring_running = true;
-    d->ring_wait_full = (d->file != nullptr);
+    d->ring_wait_full = (d->file != nullptr || d->http != nullptr);
+    d->ring_prebuffer_bytes = (d->http != nullptr) ? kHttpPrebufferBytes : 0u;
     // PSRAM stack: this task only does source reads (SMB over the network / SD via
     // SDMMC / HTTP) -- none of which touch the internal SPI flash, and flash
     // auto-suspend keeps the cache alive anyway -- so its stack is safe in PSRAM.
@@ -860,9 +884,9 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
         return nullptr;
     }
 
-    // File and HLS sources read through the read-ahead ring so SMB / segment
-    // round-trip latency doesn't reach the decode loop as audio stutter.
-    if (d->file != nullptr || d->hls != nullptr) {
+    // File, HLS and direct HTTP sources read through the PSRAM ring so storage
+    // or network latency does not reach the I2S writer as audio stutter.
+    if (d->file != nullptr || d->hls != nullptr || d->http != nullptr) {
         ring_start(d);
     }
 

@@ -11,16 +11,24 @@
 extern "C" {
 #endif
 
-typedef void (*AudioFocusVoiceStartCb_t)(void);
+typedef void (*AudioFocusVoiceCb_t)(void);
 
 // Register (or clear with NULL) the callback fired when network voice
 // playback starts. Single listener is enough for the interrupt policy.
-void AudioFocus_RegisterVoiceStart(AudioFocusVoiceStartCb_t callback);
+void AudioFocus_RegisterVoiceStart(AudioFocusVoiceCb_t callback);
+
+// Register (or clear with NULL) the callback fired after every overlapping
+// voice/signalling focus owner has released audio focus.
+void AudioFocus_RegisterVoiceEnd(AudioFocusVoiceCb_t callback);
 
 // Called by the NRL bridge right before downlink voice playback begins.
 // Must be cheap and non-blocking; the callback only flags the media task
 // to stop, it does not wait for it.
 void AudioFocus_NotifyVoiceStart(void);
+
+// Balances AudioFocus_NotifyVoiceStart(). Nested focus owners are counted, so
+// the end callback fires only when the final owner releases focus.
+void AudioFocus_NotifyVoiceEnd(void);
 
 #ifdef __cplusplus
 }

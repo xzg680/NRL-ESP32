@@ -8,7 +8,8 @@
 // (interrupt policy; ducking/mixing come later).
 //
 // Currently WAV/PCM 16-bit only; MP3/FLAC/APE decoders arrive as plugins.
-// On boards without the ES8389 hi-fi path MUSIC_PlayFile simply fails.
+// Local playback uses the board codec's native-rate Hi-Fi backend (ES8389 or
+// ES8311); network uplink does not acquire a local codec.
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -48,7 +49,10 @@ int MUSIC_GetOutput(void);
 bool MUSIC_SetRadioUrl(const char *url);
 void MUSIC_GetRadioUrl(char *out, size_t out_size);
 
-// Register the voice-interrupt hook. Safe to call on every board.
+// Register voice-focus hooks. NRL/ESP-NOW/APRS audio pauses media immediately;
+// after all focus owners end, playback resumes following 30 seconds of idle.
+// File playback retains its decoder position; live radio reconnects.
+// Safe to call on every board.
 void MUSIC_Init(void);
 
 // Start playing `path` (e.g. "/sdcard/music/song.wav"). Stops any current

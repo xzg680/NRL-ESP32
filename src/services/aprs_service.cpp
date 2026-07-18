@@ -826,6 +826,9 @@ void txPump()
     static uint32_t tx_pushed_samples = 0;
 
     if (!ModemIsTransmitting()) {
+        if (s_tx_pumping) {
+            AudioFocus_NotifyVoiceEnd();
+        }
         s_tx_pumping = false;
         return;
     }

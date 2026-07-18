@@ -226,6 +226,25 @@ const translations = {
         smbUser: 'Username (empty = guest)',
         smbPassword: 'Password',
         smbClear: 'Clear',
+        musicLibrary: 'Music Playback',
+        musicPrev: 'Previous',
+        musicStop: 'Stop',
+        musicNext: 'Next',
+        musicRepeatList: 'Repeat list',
+        musicRepeatOne: 'Repeat one',
+        musicUp: 'Up',
+        musicRefresh: 'Rescan',
+        musicLoading: 'Loading...',
+        musicPagePrev: 'Previous page',
+        musicPageNext: 'Next page',
+        musicSourcesHint: 'Mounted SMB, TF/SD and USB sources appear here automatically. Tap a folder to browse and a track to play.',
+        musicNoSources: 'No storage source is mounted.',
+        musicNoEntries: 'No supported tracks or subfolders in this directory.',
+        musicScanning: 'Scanning directory... Large SMB folders may take a while.',
+        musicScanFailed: 'Directory scan timed out or failed. Tap Rescan to retry.',
+        musicStopped: 'Stopped',
+        musicActionFailed: 'Playback action failed',
+        musicFavoriteNeedsSd: 'Favorites require a mounted TF/SD card',
         musicOutput: 'Music Output Device',
         outputSpk: 'Onboard speaker',
         outputBt: 'Bluetooth headset (A2DP)',
@@ -473,6 +492,25 @@ const translations = {
         smbUser: '用户名 (留空为来宾)',
         smbPassword: '密码',
         smbClear: '清除',
+        musicLibrary: '音乐播放管理',
+        musicPrev: '上一首',
+        musicStop: '停止',
+        musicNext: '下一首',
+        musicRepeatList: '列表循环',
+        musicRepeatOne: '单曲循环',
+        musicUp: '返回上级',
+        musicRefresh: '重新扫描',
+        musicLoading: '正在载入...',
+        musicPagePrev: '上一页',
+        musicPageNext: '下一页',
+        musicSourcesHint: '已挂载的 SMB、TF/SD 和 USB 会自动显示；点击文件夹进入，点击歌曲播放。',
+        musicNoSources: '当前没有已挂载的存储来源。',
+        musicNoEntries: '当前目录没有支持的歌曲或子目录。',
+        musicScanning: '正在扫描目录，大型 SMB 目录可能需要一些时间…',
+        musicScanFailed: '目录扫描超时或失败，请点击“重新扫描”重试。',
+        musicStopped: '已停止',
+        musicActionFailed: '播放操作失败',
+        musicFavoriteNeedsSd: '收藏功能需要插入 TF/SD 卡',
         musicOutput: '音乐输出设备',
         outputSpk: '板载扬声器',
         outputBt: '蓝牙耳机 (A2DP)',
@@ -704,6 +742,186 @@ const translations = {
       });
     }
 
+    let musicLibraryOffset = 0;
+    let musicLibraryPageSize = 64;
+    let musicLibraryTotal = 0;
+    let musicLibraryBusy = false;
+    let musicScanPollTimer = null;
+
+    function scheduleMusicScanPoll() {
+      if (musicScanPollTimer !== null) return;
+      musicScanPollTimer = setTimeout(() => {
+        musicScanPollTimer = null;
+        if (document.getElementById('music-library-list')) {
+          musicLibraryPost('snapshot', null, true);
+        }
+      }, 1000);
+    }
+
+    function musicLibraryPost(action, index, quiet) {
+      if (musicLibraryBusy && action === 'status') return Promise.resolve(null);
+      const body = new URLSearchParams();
+      body.append('action', action);
+      body.append('offset', String(musicLibraryOffset));
+      if (index !== undefined && index !== null) body.append('index', String(index));
+      if (!quiet) musicLibraryBusy = true;
+      return fetch('/media/playlist', {
+        method: 'POST',
+        body,
+        cache: 'no-store',
+        credentials: 'same-origin',
+        referrerPolicy: 'no-referrer',
+      }).then((r) => r.json().then((data) => Object.assign({ ok: r.ok }, data)))
+        .catch(() => ({ ok: false }))
+        .then((reply) => {
+          if (reply && reply.scanning) {
+            musicLibraryBusy = true;
+            scheduleMusicScanPoll();
+          } else {
+            musicLibraryBusy = false;
+          }
+          if (reply) renderMusicLibrary(reply, action !== 'status');
+          return reply;
+        });
+    }
+
+    function musicPathBasename(path) {
+      if (!path) return '';
+      const slash = path.lastIndexOf('/');
+      return slash >= 0 ? path.slice(slash + 1) : path;
+    }
+
+    function updateMusicPlayerStatus(data) {
+      const status = document.getElementById('music-player-status');
+      if (status) {
+        status.textContent = data.playing
+          ? '\u25b6 ' + musicPathBasename(data.playing_path)
+          : t('musicStopped');
+      }
+      const repeat = document.getElementById('music-repeat-button');
+      if (repeat) {
+        const key = Number(data.repeat) === 1 ? 'musicRepeatOne' : 'musicRepeatList';
+        repeat.setAttribute('data-i18n', key);
+        repeat.textContent = t(key);
+      }
+      const up = document.getElementById('music-up-button');
+      if (up) up.disabled = !!data.root;
+    }
+
+    function renderMusicLibrary(data, includeEntries) {
+      updateMusicPlayerStatus(data || {});
+      if (!data || data.ok === false) {
+        const status = document.getElementById('music-player-status');
+        if (status) status.textContent = t('musicActionFailed');
+        return;
+      }
+      const path = document.getElementById('music-browser-path');
+      if (path) path.textContent = data.root ? '/' : (data.dir || '/');
+      const list = document.getElementById('music-library-list');
+      const scanning = !!data.scanning;
+      if (scanning && (!Array.isArray(data.dirs) || !Array.isArray(data.tracks))) {
+        if (list) {
+          list.innerHTML = '';
+          const loading = document.createElement('span');
+          loading.className = 'hint';
+          loading.textContent = t('musicScanning');
+          list.appendChild(loading);
+        }
+        const pagination = document.getElementById('music-pagination');
+        if (pagination) pagination.hidden = true;
+        scheduleMusicScanPoll();
+        return;
+      }
+      if (!scanning && data.scan_ok === false) {
+        if (list) {
+          list.innerHTML = '';
+          const failed = document.createElement('span');
+          failed.className = 'hint';
+          failed.textContent = t('musicScanFailed');
+          list.appendChild(failed);
+        }
+        return;
+      }
+      if (!includeEntries || !Array.isArray(data.dirs) || !Array.isArray(data.tracks)) return;
+
+      musicLibraryOffset = Number(data.offset) || 0;
+      musicLibraryPageSize = Number(data.page_size) || 64;
+      musicLibraryTotal = Number(data.total) || 0;
+      if (!list) return;
+      list.innerHTML = '';
+      data.dirs.forEach((dir) => {
+        const row = document.createElement('div');
+        row.className = 'music-entry music-dir';
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'music-entry-main secondary';
+        open.textContent = '\ud83d\udcc1 ' + (dir.name || '(dir)');
+        open.addEventListener('click', () => musicLibraryAction('enter', dir.index));
+        row.appendChild(open);
+        list.appendChild(row);
+      });
+      data.tracks.forEach((track) => {
+        const row = document.createElement('div');
+        row.className = 'music-entry' + (track.current ? ' current' : '');
+        const play = document.createElement('button');
+        play.type = 'button';
+        play.className = 'music-entry-main secondary';
+        play.textContent = (track.current ? '\u25b6 ' : '\u266b ') + track.name;
+        play.addEventListener('click', () => musicLibraryAction('play', track.index));
+        row.appendChild(play);
+        if (data.favorite_supported) {
+          const fav = document.createElement('button');
+          fav.type = 'button';
+          fav.className = 'music-favorite secondary';
+          fav.textContent = track.favorite ? '\u2605' : '\u2606';
+          fav.title = track.favorite ? t('radioFavDelete') : t('radioFavAdd');
+          fav.addEventListener('click', () => musicLibraryAction('favorite', track.index));
+          row.appendChild(fav);
+        }
+        list.appendChild(row);
+      });
+      if (!data.dirs.length && !data.tracks.length && !scanning) {
+        const empty = document.createElement('span');
+        empty.className = 'hint';
+        empty.textContent = data.root ? t('musicNoSources') : t('musicNoEntries');
+        list.appendChild(empty);
+      }
+      if (scanning) {
+        const loading = document.createElement('span');
+        loading.className = 'hint';
+        loading.textContent = t('musicScanning') + ' (' + musicLibraryTotal + ')';
+        list.appendChild(loading);
+        scheduleMusicScanPoll();
+      }
+
+      const pagination = document.getElementById('music-pagination');
+      if (pagination) {
+        pagination.hidden = musicLibraryTotal <= musicLibraryPageSize;
+        const buttons = pagination.querySelectorAll('button');
+        if (buttons[0]) buttons[0].disabled = musicLibraryOffset === 0;
+        if (buttons[1]) buttons[1].disabled = musicLibraryOffset + musicLibraryPageSize >= musicLibraryTotal;
+      }
+      const pageStatus = document.getElementById('music-page-status');
+      if (pageStatus && musicLibraryTotal > 0) {
+        const last = Math.min(musicLibraryOffset + musicLibraryPageSize, musicLibraryTotal);
+        pageStatus.textContent = (musicLibraryOffset + 1) + '-' + last + ' / ' + musicLibraryTotal;
+      }
+    }
+
+    function musicLibraryAction(action, index) {
+      const navigation = action === 'enter' || action === 'up' || action === 'refresh';
+      if (musicLibraryBusy && !navigation) return;
+      if (action === 'enter' || action === 'up' || action === 'refresh') musicLibraryOffset = 0;
+      musicLibraryPost(action, index, false);
+    }
+
+    function musicLibraryPage(direction) {
+      const next = musicLibraryOffset + direction * musicLibraryPageSize;
+      musicLibraryOffset = Math.max(0, Math.min(next,
+        Math.max(0, musicLibraryTotal - musicLibraryPageSize)));
+      musicLibraryPost('snapshot', null, false);
+    }
+
     function flashButtonFeedback(button, ok) {
       if (!button) return;
       const orig = button.textContent;
@@ -831,6 +1049,10 @@ const translations = {
       if (window.RADIO_FAVS) {
         renderRadioFavs(window.RADIO_FAVS, window.RADIO_FAV_CUR);
         applyLanguage(currentLang()); // translate the freshly rendered rows
+      }
+      if (document.getElementById('music-player-panel')) {
+        musicLibraryPost('snapshot', null, false);
+        setInterval(() => musicLibraryPost('status', null, true), 3000);
       }
       const expert = document.getElementById('audio-expert-mode');
       if (expert) {

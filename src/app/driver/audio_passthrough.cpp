@@ -64,6 +64,8 @@ static i2s_chan_handle_t s_i2s_tx = nullptr;
 static i2s_chan_handle_t s_i2s_rx = nullptr;
 static bool s_i2s_tx_enabled = false;
 static bool s_i2s_rx_enabled = false;
+static uint32_t s_i2s_output_rate_hz = kSampleRate;
+static uint8_t s_i2s_output_bits = 16u;
 static TaskHandle_t s_passthrough_task = nullptr;
 static volatile bool s_passthrough_running = false;
 static AUDIO_Mode_t s_audio_mode = AUDIO_MODE_RECEIVE;
@@ -278,6 +280,8 @@ static bool i2s_setup(void) {
     s_i2s_rx_enabled = true;
 
     s_i2s_ready = true;
+    s_i2s_output_rate_hz = kSampleRate;
+    s_i2s_output_bits = 16u;
     i2s_clear_dma();
     ESP_LOGI(TAG, "i2s std clocks: rate=%dHz bits=%d stereo mclk=%dHz",
              kSampleRate, 16, kMclkRate);
@@ -690,6 +694,95 @@ extern "C" bool AUDIO_GetI2SHandles(i2s_chan_handle_t *tx_handle, i2s_chan_handl
     }
     if (rx_handle != nullptr) {
         *rx_handle = s_i2s_rx;
+    }
+    return true;
+}
+
+extern "C" bool AUDIO_ReconfigureOutput(const uint32_t sample_rate_hz,
+                                         const uint8_t bits_per_sample) {
+    if (!s_i2s_ready || s_i2s_tx == nullptr || s_passthrough_task != nullptr ||
+        sample_rate_hz < 8000u || sample_rate_hz > 96000u ||
+        bits_per_sample != 16u) {
+        return false;
+    }
+
+    const uint32_t old_rate = s_i2s_output_rate_hz;
+    const uint8_t old_bits = s_i2s_output_bits;
+    const bool was_enabled = i2s_channel_is_enabled(s_i2s_tx);
+    if (was_enabled && i2s_channel_disable(s_i2s_tx) != ESP_OK) {
+        ESP_LOGE(TAG, "media: disable I2S TX failed");
+        return false;
+    }
+    s_i2s_tx_enabled = false;
+
+    i2s_std_slot_config_t slot_cfg =
+        I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                            I2S_SLOT_MODE_STEREO);
+    slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT;
+    slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate_hz);
+    clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+
+    esp_err_t err = i2s_channel_reconfig_std_slot(s_i2s_tx, &slot_cfg);
+    if (err == ESP_OK) {
+        err = i2s_channel_reconfig_std_clock(s_i2s_tx, &clk_cfg);
+    }
+    if (err == ESP_OK) {
+        err = i2s_channel_enable(s_i2s_tx);
+    }
+    if (err == ESP_OK) {
+        s_i2s_tx_enabled = true;
+        s_i2s_output_rate_hz = sample_rate_hz;
+        s_i2s_output_bits = bits_per_sample;
+        i2s_clear_dma();
+        ESP_LOGI(TAG, "media: I2S TX %luHz/%ubit/stereo, MCLK=%luHz",
+                 static_cast<unsigned long>(sample_rate_hz),
+                 static_cast<unsigned>(bits_per_sample),
+                 static_cast<unsigned long>(sample_rate_hz * 256u));
+        return true;
+    }
+
+    ESP_LOGE(TAG, "media: I2S TX reconfigure failed: %s; restoring %luHz/%ubit",
+             esp_err_to_name(err),
+             static_cast<unsigned long>(old_rate),
+             static_cast<unsigned>(old_bits));
+
+    // Best-effort rollback. The public API currently accepts 16-bit only, so
+    // both the requested and previous slot layouts are identical.
+    i2s_std_clk_config_t rollback_clk = I2S_STD_CLK_DEFAULT_CONFIG(old_rate);
+    rollback_clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    (void)i2s_channel_reconfig_std_slot(s_i2s_tx, &slot_cfg);
+    (void)i2s_channel_reconfig_std_clock(s_i2s_tx, &rollback_clk);
+    if (i2s_channel_enable(s_i2s_tx) == ESP_OK) {
+        s_i2s_tx_enabled = true;
+    }
+    return false;
+}
+
+extern "C" bool AUDIO_WriteOutput(const void *pcm, const size_t bytes) {
+    if (!s_i2s_ready || s_i2s_tx == nullptr || !s_i2s_tx_enabled ||
+        pcm == nullptr || bytes == 0u) {
+        return false;
+    }
+
+    size_t written_total = 0u;
+    while (written_total < bytes) {
+        size_t written = 0u;
+        const esp_err_t err = i2s_channel_write(
+            s_i2s_tx,
+            static_cast<const uint8_t *>(pcm) + written_total,
+            bytes - written_total,
+            &written,
+            pdMS_TO_TICKS(100));
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "media: I2S write failed: %s", esp_err_to_name(err));
+            return false;
+        }
+        if (written == 0u) {
+            vTaskDelay(1);
+            continue;
+        }
+        written_total += written;
     }
     return true;
 }

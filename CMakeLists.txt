@@ -119,19 +119,20 @@ if(IDF_TARGET STREQUAL "esp32s31")
         endif()
     endif()
 
-    # libsmb2 is legacy C89-style code (old-style definitions, implicit
-    # declarations) that fails under the default gnu23 + warnings-as-errors;
-    # compile that component alone as gnu17 with non-fatal warnings.
-    idf_component_get_property(smb2_lib sahlberg__libsmb2 COMPONENT_LIB)
-    if(smb2_lib)
-        target_compile_options(${smb2_lib} PRIVATE -std=gnu17 -Wno-error
-                               -include "${CMAKE_CURRENT_LIST_DIR}/cmake/libsmb2_preinclude.h"
-                               -Wno-implicit-function-declaration
-                               -Wno-array-parameter
-                               -Wno-missing-field-initializers
-                               -Wno-unused-variable
-                               -Wno-implicit-fallthrough)
-    endif()
+endif()
+
+# libsmb2 is legacy C89-style code (old-style definitions, implicit
+# declarations) that fails under the default gnu23 + warnings-as-errors;
+# compile that component alone as gnu17 with non-fatal warnings on every board.
+idf_component_get_property(smb2_lib sahlberg__libsmb2 COMPONENT_LIB)
+if(smb2_lib)
+    target_compile_options(${smb2_lib} PRIVATE -std=gnu17 -Wno-error
+                           -include "${CMAKE_CURRENT_LIST_DIR}/cmake/libsmb2_preinclude.h"
+                           -Wno-implicit-function-declaration
+                           -Wno-array-parameter
+                           -Wno-missing-field-initializers
+                           -Wno-unused-variable
+                           -Wno-implicit-fallthrough)
 endif()
 
 if(TARGET ${CMAKE_PROJECT_NAME}.elf)
