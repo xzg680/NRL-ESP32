@@ -170,7 +170,10 @@ enum class MenuPage : uint8_t {
     Ota,
     About,
     Aprs,
+    AprsSettings,
+    AprsList,
     Signaling,
+    Ctcss,
     Mdc,
     Dtmf,
 };
@@ -736,6 +739,24 @@ void setMenuMessage(const char *text, uint32_t duration_ms = 3000u)
     s_menu_message_until_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL) + duration_ms;
 }
 
+void menuStatusFooter(lv_obj_t *scr, const char *default_text)
+{
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    if (s_menu_message[0] != '\0' && static_cast<int32_t>(s_menu_message_until_ms - now) > 0) {
+        menuFooter(scr, s_menu_message, kColorApWarn);
+    } else {
+        menuFooter(scr, default_text);
+    }
+}
+
+size_t menuWindowStart(const size_t item_count, const size_t visible_count)
+{
+    if (item_count <= visible_count || s_menu_index < visible_count) return 0u;
+    size_t start = s_menu_index - visible_count + 1u;
+    if (start + visible_count > item_count) start = item_count - visible_count;
+    return start;
+}
+
 void buildMainMenu()
 {
     lv_obj_t *scr = prepareContent();
@@ -753,21 +774,19 @@ void buildMainMenu()
         ptt,
         nrl_codec,
         now_codec,
-        "MDC / DTMF",
+        "SIGNALING",
         "CHECK UPDATE",
-        "APRS LIST",
+        "APRS",
         "ABOUT",
     };
-    for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); ++i) {
-        menuRow(scr, 1 + static_cast<int>(i) * 21, items[i], s_menu_index == i);
+    constexpr size_t kItemCount = sizeof(items) / sizeof(items[0]);
+    constexpr size_t kVisibleRows = 6u;
+    const size_t start = menuWindowStart(kItemCount, kVisibleRows);
+    const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
+    for (size_t i = start; i < end; ++i) {
+        menuRow(scr, 1 + static_cast<int>(i - start) * 24, items[i], s_menu_index == i);
     }
-    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
-    if (s_menu_message[0] != '\0' && static_cast<int32_t>(s_menu_message_until_ms - now) > 0) {
-        menuFooter(scr, s_menu_message, kColorApWarn);
-    } else {
-        s_menu_message[0] = '\0';
-        menuFooter(scr, "VOL+/- SELECT   PTT OK");
-    }
+    menuStatusFooter(scr, "VOL+/- SELECT   PTT OK");
 }
 
 void buildAboutMenu()
@@ -867,12 +886,71 @@ void buildOtaMenu()
     }
 }
 
-// Dedicated APRS page: BACK row plus the most recent stations heard, one
-// compact line per station (callsign, distance, speed, age).
 void buildAprsMenu()
 {
     lv_obj_t *scr = prepareContent();
-    menuRow(scr, 1, "< BACK / APRS", true);
+    const char *items[] = {
+        "< BACK / APRS",
+        "APRS SETTINGS",
+        "STATION LIST",
+        "SEND BEACON NOW",
+    };
+    for (size_t i = 0; i < 4u; ++i) {
+        menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
+    }
+
+    AprsConfig cfg{};
+    APRS_SERVICE_GetConfig(&cfg);
+    char status[64];
+    snprintf(status, sizeof(status), "%s  IS:%s  RX:%lu TX:%lu",
+             cfg.enabled ? "ON" : "OFF",
+             APRS_SERVICE_IsNetConnected() ? "UP" : "DOWN",
+             static_cast<unsigned long>(APRS_SERVICE_GetRxCount()),
+             static_cast<unsigned long>(APRS_SERVICE_GetTxCount()));
+    menuStatusFooter(scr, status);
+}
+
+void buildAprsSettingsMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    AprsConfig cfg{};
+    APRS_SERVICE_GetConfig(&cfg);
+    constexpr size_t kItemCount = 8u;
+    constexpr size_t kVisibleRows = 5u;
+    const size_t start = menuWindowStart(kItemCount, kVisibleRows);
+    const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
+    const char *names[] = {"MASTER", "APRS-IS", "RF TX", "RF RX", "AUTO PERIOD"};
+    const bool values[] = {cfg.enabled, cfg.net_enabled, cfg.rf_tx_enabled,
+                           cfg.rf_rx_enabled, cfg.auto_interval};
+    for (size_t item = start; item < end; ++item) {
+        char line[40];
+        if (item == 0u) {
+            snprintf(line, sizeof(line), "< BACK / APRS SET");
+        } else if (item <= 5u) {
+            snprintf(line, sizeof(line), "%s: %s", names[item - 1u],
+                     values[item - 1u] ? "ON" : "OFF");
+        } else if (item == 6u) {
+            snprintf(line, sizeof(line), "PERIOD: %us",
+                     static_cast<unsigned>(cfg.beacon_interval_s));
+        } else {
+            snprintf(line, sizeof(line), "SSID: %u", static_cast<unsigned>(cfg.ssid));
+        }
+        menuRow(scr, 1 + static_cast<int>(item - start) * 28, line,
+                s_menu_index == item);
+    }
+    char footer[40];
+    snprintf(footer, sizeof(footer), "ITEM %u/%u  PTT TOGGLE/NEXT",
+             static_cast<unsigned>(s_menu_index + 1u),
+             static_cast<unsigned>(kItemCount));
+    menuStatusFooter(scr, footer);
+}
+
+// Dedicated APRS station page: BACK row plus the most recent stations heard,
+// one compact line per station (callsign, distance, speed, age).
+void buildAprsListMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    menuRow(scr, 1, "< BACK / STATIONS", true);
 
     AprsStationInfo stations[5];
     const size_t count = APRS_SERVICE_GetStations(stations, 5);
@@ -925,9 +1003,24 @@ bool signalingRouteEnabled(const SignalingConfig &cfg, bool mdc, size_t index)
 void buildSignalingMenu()
 {
     lv_obj_t *scr = prepareContent();
-    const char *items[] = {"< BACK / SIGNAL", "MDC1200 SETTINGS", "DTMF SETTINGS"};
-    for (size_t i = 0; i < 3u; ++i) menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
-    menuFooter(scr, "VOL+/- SELECT   PTT OK");
+    const char *items[] = {"< BACK / SIGNAL", "MDC1200 SETTINGS", "DTMF SETTINGS",
+                           "CTCSS RX SETTINGS"};
+    for (size_t i = 0; i < 4u; ++i) menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
+    menuStatusFooter(scr, "VOL+/- SELECT   PTT OK");
+}
+
+void buildCtcssMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    menuRow(scr, 1, "< BACK / CTCSS", s_menu_index == 0u);
+    char line[40];
+    snprintf(line, sizeof(line), "MIC RX: %s", cfg.ctcss_rx_mic ? "ON" : "OFF");
+    menuRow(scr, 35, line, s_menu_index == 1u);
+    snprintf(line, sizeof(line), "NRL RX: %s", cfg.ctcss_rx_nrl ? "ON" : "OFF");
+    menuRow(scr, 69, line, s_menu_index == 2u);
+    menuStatusFooter(scr, "PTT TOGGLE");
 }
 
 void buildProtocolMenu(bool mdc)
@@ -942,7 +1035,14 @@ void buildProtocolMenu(bool mdc)
         snprintf(line, sizeof(line), "%s: %s", names[i], signalingRouteEnabled(cfg, mdc, i) ? "ON" : "OFF");
         menuRow(scr, 29 + static_cast<int>(i) * 28, line, s_menu_index == i + 1u);
     }
-    menuFooter(scr, "PTT TOGGLE");
+    char footer[48];
+    if (mdc) {
+        snprintf(footer, sizeof(footer), "ID:%04X  PTT TOGGLE",
+                 static_cast<unsigned>(cfg.mdc_unit_id));
+    } else {
+        snprintf(footer, sizeof(footer), "ID:%.16s  PTT TOGGLE", cfg.dtmf_digits);
+    }
+    menuStatusFooter(scr, footer);
 }
 
 void buildMenuUi()
@@ -950,7 +1050,10 @@ void buildMenuUi()
     if (s_menu_page == MenuPage::About) buildAboutMenu();
     else if (s_menu_page == MenuPage::Ota) buildOtaMenu();
     else if (s_menu_page == MenuPage::Aprs) buildAprsMenu();
+    else if (s_menu_page == MenuPage::AprsSettings) buildAprsSettingsMenu();
+    else if (s_menu_page == MenuPage::AprsList) buildAprsListMenu();
     else if (s_menu_page == MenuPage::Signaling) buildSignalingMenu();
+    else if (s_menu_page == MenuPage::Ctcss) buildCtcssMenu();
     else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
     else if (s_menu_page == MenuPage::Dtmf) buildProtocolMenu(false);
     else buildMainMenu();
@@ -1641,8 +1744,11 @@ size_t menuItemCount()
 {
     if (s_menu_page == MenuPage::Main) return 8u;
     if (s_menu_page == MenuPage::About) return 1u;
-    if (s_menu_page == MenuPage::Aprs) return 1u;
-    if (s_menu_page == MenuPage::Signaling) return 3u;
+    if (s_menu_page == MenuPage::Aprs) return 4u;
+    if (s_menu_page == MenuPage::AprsSettings) return 8u;
+    if (s_menu_page == MenuPage::AprsList) return 1u;
+    if (s_menu_page == MenuPage::Signaling) return 4u;
+    if (s_menu_page == MenuPage::Ctcss) return 3u;
     if (s_menu_page == MenuPage::Mdc || s_menu_page == MenuPage::Dtmf) return 5u;
     const NrlOtaStatus *ota = otaUiSnapshot();
     return (ota != nullptr ? ota->release_count : 0u) + 1u; // Back row + releases
@@ -1733,10 +1839,108 @@ void confirmSignalingMenu()
     if (s_menu_index == 0u) {
         activateMainMenu();
     } else {
-        s_menu_page = s_menu_index == 1u ? MenuPage::Mdc : MenuPage::Dtmf;
+        s_menu_page = s_menu_index == 1u ? MenuPage::Mdc
+                    : s_menu_index == 2u ? MenuPage::Dtmf : MenuPage::Ctcss;
         s_menu_index = 0u;
         buildMenuUi();
     }
+}
+
+void confirmAprsMenu()
+{
+    if (s_menu_index == 0u) {
+        activateMainMenu();
+    } else if (s_menu_index == 1u) {
+        s_menu_page = MenuPage::AprsSettings;
+        s_menu_index = 0u;
+        buildMenuUi();
+    } else if (s_menu_index == 2u) {
+        s_menu_page = MenuPage::AprsList;
+        s_menu_index = 0u;
+        s_menu_aprs_refresh_ms = 0u;
+        s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
+        buildMenuUi();
+    } else {
+        const bool ok = APRS_SERVICE_SendBeaconNow();
+        setMenuMessage(ok ? "BEACON QUEUED" : "ENABLE APRS FIRST");
+        buildMenuUi();
+    }
+}
+
+void confirmAprsSettingsMenu()
+{
+    if (s_menu_index == 0u) {
+        s_menu_page = MenuPage::Aprs;
+        s_menu_index = 0u;
+        buildMenuUi();
+        return;
+    }
+
+    AprsConfig cfg{};
+    APRS_SERVICE_GetConfig(&cfg);
+    bool ok = false;
+    const char *message = "SAVE FAILED";
+    switch (s_menu_index) {
+        case 1:
+            ok = APRS_SERVICE_SetEnabled(!cfg.enabled);
+            message = !cfg.enabled ? "APRS ON" : "APRS OFF";
+            break;
+        case 2:
+            ok = APRS_SERVICE_SetNetEnabled(!cfg.net_enabled);
+            message = !cfg.net_enabled ? "APRS-IS ON" : "APRS-IS OFF";
+            break;
+        case 3:
+            ok = APRS_SERVICE_SetRfTxEnabled(!cfg.rf_tx_enabled);
+            message = !cfg.rf_tx_enabled ? "RF TX ON" : "RF TX OFF";
+            break;
+        case 4:
+            ok = APRS_SERVICE_SetRfRxEnabled(!cfg.rf_rx_enabled);
+            message = !cfg.rf_rx_enabled ? "RF RX ON" : "RF RX OFF";
+            break;
+        case 5:
+            ok = APRS_SERVICE_SetAutoInterval(!cfg.auto_interval);
+            message = !cfg.auto_interval ? "AUTO PERIOD ON" : "AUTO PERIOD OFF";
+            break;
+        case 6: {
+            static constexpr uint16_t periods[] = {30u, 60u, 120u, 300u, 600u, 1200u, 3600u};
+            uint16_t next = periods[0];
+            for (const uint16_t period : periods) {
+                if (period > cfg.beacon_interval_s) {
+                    next = period;
+                    break;
+                }
+            }
+            ok = APRS_SERVICE_SetBeaconInterval(next);
+            message = "PERIOD UPDATED";
+            break;
+        }
+        case 7:
+            ok = APRS_SERVICE_SetSsid(static_cast<uint8_t>((cfg.ssid + 1u) & 0x0Fu));
+            message = "SSID UPDATED";
+            break;
+        default:
+            break;
+    }
+    setMenuMessage(ok ? message : "SAVE FAILED");
+    buildMenuUi();
+}
+
+void confirmCtcssMenu()
+{
+    if (s_menu_index == 0u) {
+        s_menu_page = MenuPage::Signaling;
+        s_menu_index = 0u;
+        buildMenuUi();
+        return;
+    }
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    const SignalingRoute route = s_menu_index == 1u
+                                     ? SIGNAL_ROUTE_RX_MIC : SIGNAL_ROUTE_RX_NRL;
+    const bool enabled = s_menu_index == 1u ? !cfg.ctcss_rx_mic : !cfg.ctcss_rx_nrl;
+    const bool ok = SIGNALING_SetCtcssRoute(route, enabled);
+    setMenuMessage(ok ? (enabled ? "CTCSS RX ON" : "CTCSS RX OFF") : "SAVE FAILED");
+    buildMenuUi();
 }
 
 void confirmProtocolMenu(bool mdc)
@@ -1814,8 +2018,15 @@ void processMenuInput(uint32_t now)
         s_menu_confirm_pending = 0u;
         if (s_menu_page == MenuPage::Main) confirmMainMenu();
         else if (s_menu_page == MenuPage::About) activateMainMenu();
-        else if (s_menu_page == MenuPage::Aprs) activateMainMenu();
+        else if (s_menu_page == MenuPage::Aprs) confirmAprsMenu();
+        else if (s_menu_page == MenuPage::AprsSettings) confirmAprsSettingsMenu();
+        else if (s_menu_page == MenuPage::AprsList) {
+            s_menu_page = MenuPage::Aprs;
+            s_menu_index = 0u;
+            buildMenuUi();
+        }
         else if (s_menu_page == MenuPage::Signaling) confirmSignalingMenu();
+        else if (s_menu_page == MenuPage::Ctcss) confirmCtcssMenu();
         else if (s_menu_page == MenuPage::Mdc) confirmProtocolMenu(true);
         else if (s_menu_page == MenuPage::Dtmf) confirmProtocolMenu(false);
         else confirmOtaMenu();
@@ -1859,7 +2070,7 @@ void processMenuInput(uint32_t now)
 
     // Keep the APRS station page live: redraw when a packet lands and every
     // few seconds anyway so the age column ticks.
-    if (s_menu_page == MenuPage::Aprs) {
+    if (s_menu_page == MenuPage::AprsList) {
         const uint32_t revision = APRS_SERVICE_GetStationRevision();
         if (revision != s_menu_aprs_revision ||
             s_menu_aprs_refresh_ms == 0u || now - s_menu_aprs_refresh_ms >= 3000u) {

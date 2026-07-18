@@ -651,6 +651,8 @@ std::string WifiConfigPortalView_BuildSignalingSections(void)
     SignalingConfig cfg{};
     SIGNALING_GetConfig(&cfg);
     replaceToken(html, "{{SIGNALING_STATUS}}", "16 kHz PCM / PSRAM");
+    replaceToken(html, "{{CTCSS_RX_MIC_CHECKED}}", checkedAttr(cfg.ctcss_rx_mic));
+    replaceToken(html, "{{CTCSS_RX_NRL_CHECKED}}", checkedAttr(cfg.ctcss_rx_nrl));
     replaceToken(html, "{{MDC_RX_MIC_CHECKED}}", checkedAttr(cfg.mdc_rx_mic));
     replaceToken(html, "{{MDC_RX_NRL_CHECKED}}", checkedAttr(cfg.mdc_rx_nrl));
     replaceToken(html, "{{MDC_TX_NRL_CHECKED}}", checkedAttr(cfg.mdc_tx_nrl));

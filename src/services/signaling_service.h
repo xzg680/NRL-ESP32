@@ -12,6 +12,8 @@ enum SignalingRoute : uint8_t {
 };
 
 struct SignalingConfig {
+    bool ctcss_rx_mic;
+    bool ctcss_rx_nrl;
     bool mdc_rx_mic;
     bool mdc_rx_nrl;
     bool mdc_tx_nrl;
@@ -30,6 +32,7 @@ void SIGNALING_Init(void);
 void SIGNALING_GetConfig(SignalingConfig *out);
 bool SIGNALING_SetMdcRoute(SignalingRoute route, bool enabled);
 bool SIGNALING_SetDtmfRoute(SignalingRoute route, bool enabled);
+bool SIGNALING_SetCtcssRoute(SignalingRoute route, bool enabled);
 bool SIGNALING_SetMdcPacket(uint8_t opcode, uint8_t argument, uint16_t unit_id);
 bool SIGNALING_SetDtmfDigits(const char *digits);
 
@@ -38,6 +41,9 @@ bool SIGNALING_SetDtmfDigits(const char *digits);
 void SIGNALING_OnLocalPttReleased(void);
 void SIGNALING_OnNetworkVoiceEnded(void);
 
+// Raw 16 kHz MIC tap used only by CTCSS. Call before the optional 200 Hz
+// speech high-pass filter so sub-audible PL tones are not removed.
+void SIGNALING_FeedRawMic(const int16_t *samples, size_t sample_count);
+
 uint32_t SIGNALING_GetRevision(void);
 void SIGNALING_GetLastResult(char *out, size_t out_size);
-

@@ -1363,6 +1363,58 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    // CTCSS/PL receive detection. The master command controls both sources;
+    // the route commands below keep MIC and NRL independently selectable.
+    if (stringEqualsIgnoreCase(command.command, "CTCSS")) {
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        if (!is_query) {
+            bool enabled = false;
+            if (!parseBoolValue(command.value, &enabled) ||
+                !SIGNALING_SetCtcssRoute(SIGNAL_ROUTE_RX_MIC, enabled) ||
+                !SIGNALING_SetCtcssRoute(SIGNAL_ROUTE_RX_NRL, enabled)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload),
+                                   &result->payload_size, "ERR", "CTCSS");
+                return;
+            }
+            cfg.ctcss_rx_mic = enabled;
+            cfg.ctcss_rx_nrl = enabled;
+        }
+        char status[48];
+        snprintf(status, sizeof(status), "RXMIC=%s,RXNRL=%s",
+                 cfg.ctcss_rx_mic ? "ON" : "OFF",
+                 cfg.ctcss_rx_nrl ? "ON" : "OFF");
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "CTCSS", status);
+        return;
+    }
+
+    struct CtcssAtRoute {
+        const char *command;
+        SignalingRoute route;
+    };
+    static const CtcssAtRoute ctcss_routes[] = {
+        {"CTCSS_RX_MIC", SIGNAL_ROUTE_RX_MIC},
+        {"CTCSS_RX_NRL", SIGNAL_ROUTE_RX_NRL},
+    };
+    for (const CtcssAtRoute &entry : ctcss_routes) {
+        if (!stringEqualsIgnoreCase(command.command, entry.command)) continue;
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        bool enabled = entry.route == SIGNAL_ROUTE_RX_MIC
+                           ? cfg.ctcss_rx_mic : cfg.ctcss_rx_nrl;
+        if (!is_query && (!parseBoolValue(command.value, &enabled) ||
+                          !SIGNALING_SetCtcssRoute(entry.route, enabled))) {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "ERR", entry.command);
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, entry.command,
+                           enabled ? "ON" : "OFF");
+        return;
+    }
+
     // MDC1200/DTMF signaling. Route switches are independent; MDC/DTMF
     // payloads are pre-generated into PSRAM when their IDs change.
     if (stringEqualsIgnoreCase(command.command, "MDC") ||

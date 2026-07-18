@@ -1211,8 +1211,8 @@ static esp_err_t handleAprsPage(httpd_req_t *req)
 static esp_err_t handleSignalingPage(httpd_req_t *req)
 {
     s_server.bind(req);
-    sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " MDC / DTMF").c_str(),
-                   "MDC1200 / DTMF",
+    sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " Signaling").c_str(),
+                   "MDC1200 / DTMF / CTCSS",
                    "signalingHeadline",
                    "Configure signaling decode sources and voice-tail transmit destinations.",
                    "signalingIntro",
@@ -1235,7 +1235,9 @@ static void sendSignalingSavedJson(const bool ok)
         if (!first) body += ",";
         body += "\"" + std::string(name) + "\":\"" + jsonEscape(value) + "\"";
     };
-    append("mdc_rx_mic", cfg.mdc_rx_mic ? "1" : "0", true);
+    append("ctcss_rx_mic", cfg.ctcss_rx_mic ? "1" : "0", true);
+    append("ctcss_rx_nrl", cfg.ctcss_rx_nrl ? "1" : "0");
+    append("mdc_rx_mic", cfg.mdc_rx_mic ? "1" : "0");
     append("mdc_rx_nrl", cfg.mdc_rx_nrl ? "1" : "0");
     append("mdc_tx_nrl", cfg.mdc_tx_nrl ? "1" : "0");
     append("mdc_tx_speaker", cfg.mdc_tx_speaker ? "1" : "0");
@@ -1258,6 +1260,14 @@ static esp_err_t handleSaveSignaling(httpd_req_t *req)
         return ESP_OK;
     }
     bool ok = true;
+    if (s_server.hasArg("ctcss_rx_mic_present")) {
+        ok = SIGNALING_SetCtcssRoute(SIGNAL_ROUTE_RX_MIC,
+                                     s_server.hasArg("ctcss_rx_mic"));
+    }
+    if (ok && s_server.hasArg("ctcss_rx_nrl_present")) {
+        ok = SIGNALING_SetCtcssRoute(SIGNAL_ROUTE_RX_NRL,
+                                     s_server.hasArg("ctcss_rx_nrl"));
+    }
     struct RouteField { const char *present; const char *name; bool mdc; SignalingRoute route; };
     static const RouteField routes[] = {
         {"mdc_rx_mic_present", "mdc_rx_mic", true, SIGNAL_ROUTE_RX_MIC},
@@ -1289,7 +1299,7 @@ static esp_err_t handleSaveSignaling(httpd_req_t *req)
     if (ok && s_server.hasArg("dtmf_digits")) {
         ok = SIGNALING_SetDtmfDigits(s_server.arg("dtmf_digits").c_str());
     }
-    if (!ok) ESP_LOGE(TAG, "MDC/DTMF config save via web failed");
+    if (!ok) ESP_LOGE(TAG, "signaling config save via web failed");
     sendSignalingSavedJson(ok);
     return ESP_OK;
 }

@@ -2,6 +2,7 @@
 
 #include "audio/audio_router.h"
 #include "driver/board_pins.h"
+#include "services/signaling_service.h"
 
 #include <driver/i2s_common.h>
 #include <driver/i2s_std.h>
@@ -617,6 +618,7 @@ static void audio_passthrough_task(void *) {
         }
 
         audio_log_mic_frame_stats(frame);
+        SIGNALING_FeedRawMic(frame, kFrameSamples);
         if (software_filter_enabled) {
             mic_hpf_apply(frame, kFrameSamples);
         }
@@ -655,6 +657,7 @@ static void audio_passthrough_task(void *) {
         }
 
         audio_log_mic_frame_stats(frame);
+        SIGNALING_FeedRawMic(frame, kFrameSamples);
         mic_hpf_apply(frame, kFrameSamples);
 
         AudioRouter_PushFrame(AUDIO_SRC_MIC, 16000u, frame, kFrameSamples);

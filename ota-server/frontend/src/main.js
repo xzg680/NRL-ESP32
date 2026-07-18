@@ -21,12 +21,12 @@ const boards = [
     zh: {
       name: "格子派 gezipai",
       tagline: "ESP32-S3 彩色显示终端",
-      features: ["ES7210 麦克风 ADC + ES8311 DAC 音频链路", "240×240 ST7789 彩色屏与 LVGL 图形界面", "音量+/音量-/PTT 三按键、电池电压检测", "三色状态灯、SCI 串口透明传输", "BLE 配网、Wi-Fi 配置门户、远程 AT 与 OTA 升级"],
+      features: ["ES7210 麦克风 ADC + ES8311 DAC 音频链路", "240×240 ST7789 彩色屏与 LVGL 图形界面", "屏幕菜单管理 MDC1200、DTMF、CTCSS/PL 与 APRS", "音量+/音量-/PTT 三按键、电池电压检测", "三色状态灯、SCI 串口透明传输", "BLE 配网、Wi-Fi 配置门户、远程 AT 与 OTA 升级"],
     },
     en: {
       name: "Gezipai",
       tagline: "ESP32-S3 color display terminal",
-      features: ["ES7210 microphone ADC and ES8311 DAC audio path", "240×240 ST7789 color display with LVGL UI", "Volume up/down/PTT buttons and battery-voltage sensing", "Three-color status LED and SCI serial passthrough", "BLE provisioning, Wi-Fi portal, remote AT, and OTA updates"],
+      features: ["ES7210 microphone ADC and ES8311 DAC audio path", "240×240 ST7789 color display with LVGL UI", "On-screen MDC1200, DTMF, CTCSS/PL, and APRS controls", "Volume up/down/PTT buttons and battery-voltage sensing", "Three-color status LED and SCI serial passthrough", "BLE provisioning, Wi-Fi portal, remote AT, and OTA updates"],
     },
   },
   {
@@ -89,6 +89,8 @@ const featureMatrix = [
   { zh: "APRS-IS 网络与无线电 AFSK 收发", en: "APRS-IS networking and radio AFSK TX/RX", all: "yes" },
   { zh: "MDC1200 信令编码与解码", en: "MDC1200 signaling encode/decode", all: "yes" },
   { zh: "DTMF 信令编码与解码", en: "DTMF signaling encode/decode", all: "yes" },
+  { zh: "CTCSS/PL 亚音频率识别", en: "CTCSS/PL tone-frequency detection", all: "yes" },
+  { zh: "屏幕信令与 APRS 设置菜单", en: "On-screen signaling and APRS settings", gezipai: "yes", bh4tdv: "no", s31_korvo: "partial", s31_function_coreboard: "no" },
   { zh: "网页 USB 首次全量刷机（Chrome / Edge）", en: "Browser USB full flashing (Chrome / Edge)", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
   { zh: "BLE 蓝牙配网", en: "BLE provisioning", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
   { zh: "ES7210 专用麦克风 ADC", en: "Dedicated ES7210 microphone ADC", gezipai: "yes", bh4tdv: "no", s31_korvo: "no", s31_function_coreboard: "no" },

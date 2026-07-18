@@ -1,6 +1,7 @@
 #include "services/signaling_service.h"
 
 #include "audio/audio_router.h"
+#include "lib/ctcss_decoder.h"
 #include "lib/dtmf_codec.h"
 #include "services/display_notice.h"
 
@@ -31,6 +32,7 @@ constexpr size_t kPcmChunk = 160u; // 10 ms
 constexpr size_t kOpusFrameSamples = 320u;
 constexpr size_t kDtmfToneSamples = 1600u;
 constexpr size_t kDtmfGapSamples = 800u;
+constexpr uint32_t kDecodeNoticeDurationMs = 8000u;
 constexpr double kPi = 3.14159265358979323846;
 
 enum class DecodeSource : uint8_t { Mic, Nrl };
@@ -40,6 +42,7 @@ struct DecoderContext {
     DecodeSource source;
     mdc_decoder_t *mdc;
     DtmfDecoder dtmf;
+    CtcssDecoder ctcss;
     char dtmf_result[17];
     uint32_t last_dtmf_ms;
 };
@@ -51,8 +54,8 @@ struct PcmCache {
 
 portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 SignalingConfig s_config = {};
-DecoderContext s_mic = {DecodeSource::Mic, nullptr, {}, {}, 0u};
-DecoderContext s_nrl = {DecodeSource::Nrl, nullptr, {}, {}, 0u};
+DecoderContext s_mic = {DecodeSource::Mic, nullptr, {}, {}, {}, 0u};
+DecoderContext s_nrl = {DecodeSource::Nrl, nullptr, {}, {}, {}, 0u};
 mdc_encoder_t *s_encoder = nullptr;
 QueueHandle_t s_tail_queue = nullptr;
 TaskHandle_t s_task = nullptr;
@@ -64,6 +67,7 @@ char s_last_result[96] = {};
 uint32_t s_revision = 0u;
 uint32_t s_last_mdc_ms[2] = {};
 uint32_t s_last_mdc_signature[2] = {};
+volatile bool s_ctcss_mic_enabled = false;
 
 const char *sourceName(DecodeSource source) { return source == DecodeSource::Mic ? "MIC" : "NRL"; }
 
@@ -84,6 +88,8 @@ bool saveConfig()
     auto put8 = [&](const char *key, uint8_t value) {
         if (err == ESP_OK) err = nvs_set_u8(handle, key, value);
     };
+    put8("ctcss_rx_mic", cfg.ctcss_rx_mic);
+    put8("ctcss_rx_nrl", cfg.ctcss_rx_nrl);
     put8("mdc_rx_mic", cfg.mdc_rx_mic);
     put8("mdc_rx_nrl", cfg.mdc_rx_nrl);
     put8("mdc_tx_nrl", cfg.mdc_tx_nrl);
@@ -114,6 +120,8 @@ void loadConfig()
     auto getBool = [&](const char *key, bool *target) {
         if (nvs_get_u8(handle, key, &value) == ESP_OK) *target = value != 0u;
     };
+    getBool("ctcss_rx_mic", &s_config.ctcss_rx_mic);
+    getBool("ctcss_rx_nrl", &s_config.ctcss_rx_nrl);
     getBool("mdc_rx_mic", &s_config.mdc_rx_mic);
     getBool("mdc_rx_nrl", &s_config.mdc_rx_nrl);
     getBool("mdc_tx_nrl", &s_config.mdc_tx_nrl);
@@ -135,8 +143,10 @@ void applyRoutes()
 {
     SignalingConfig cfg{};
     copyConfig(&cfg);
+    s_ctcss_mic_enabled = cfg.ctcss_rx_mic;
     AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_SIGNALING, cfg.mdc_rx_mic || cfg.dtmf_rx_mic);
-    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_SIGNALING, cfg.mdc_rx_nrl || cfg.dtmf_rx_nrl);
+    AudioRouter_SetRoute(AUDIO_SRC_NRL_DOWNLINK, AUDIO_SINK_SIGNALING,
+                         cfg.mdc_rx_nrl || cfg.dtmf_rx_nrl || cfg.ctcss_rx_nrl);
     AudioRouter_SetRoute(AUDIO_SRC_MDC_NRL, AUDIO_SINK_NRL_UPLINK, cfg.mdc_tx_nrl);
     AudioRouter_SetRoute(AUDIO_SRC_MDC_SPEAKER, AUDIO_SINK_SPEAKER, cfg.mdc_tx_speaker);
     AudioRouter_SetRoute(AUDIO_SRC_DTMF_NRL, AUDIO_SINK_NRL_UPLINK, cfg.dtmf_tx_nrl);
@@ -149,7 +159,9 @@ void publishResult(const char *text)
     snprintf(s_last_result, sizeof(s_last_result), "%s", text);
     ++s_revision;
     portEXIT_CRITICAL(&s_lock);
-    DISPLAY_NOTICE_Post(text, DISPLAY_NOTICE_INFO, 5000u);
+    // Keep the latest decode visible long enough to read; a newer result still
+    // replaces it immediately through the shared notice snapshot.
+    DISPLAY_NOTICE_Post(text, DISPLAY_NOTICE_INFO, kDecodeNoticeDurationMs);
     ESP_LOGI(TAG, "%s", text);
 }
 
@@ -189,6 +201,15 @@ void dtmfDecoded(char digit, void *context)
     publishResult(text);
 }
 
+void ctcssDecoded(const float frequency_hz, void *context)
+{
+    auto *decoder = static_cast<DecoderContext *>(context);
+    char text[96];
+    snprintf(text, sizeof(text), "CTCSS %s: %.1f Hz",
+             sourceName(decoder->source), static_cast<double>(frequency_hz));
+    publishResult(text);
+}
+
 void signalingSink(uint8_t source_id, const int16_t *samples, size_t count, void *)
 {
     DecoderContext *decoder = source_id == AUDIO_SRC_MIC ? &s_mic : &s_nrl;
@@ -196,10 +217,12 @@ void signalingSink(uint8_t source_id, const int16_t *samples, size_t count, void
     copyConfig(&cfg);
     const bool mdc_enabled = decoder->source == DecodeSource::Mic ? cfg.mdc_rx_mic : cfg.mdc_rx_nrl;
     const bool dtmf_enabled = decoder->source == DecodeSource::Mic ? cfg.dtmf_rx_mic : cfg.dtmf_rx_nrl;
+    const bool ctcss_enabled = decoder->source == DecodeSource::Mic ? false : cfg.ctcss_rx_nrl;
     if (mdc_enabled && decoder->mdc != nullptr) {
         mdc_decoder_process_samples(decoder->mdc, const_cast<mdc_sample_t *>(samples), static_cast<int>(count));
     }
     if (dtmf_enabled) decoder->dtmf.feed(samples, count, dtmfDecoded, decoder);
+    if (ctcss_enabled) decoder->ctcss.feed(samples, count, ctcssDecoded, decoder);
 }
 
 void pushPaced(uint8_t source, const int16_t *samples, size_t count)
@@ -379,6 +402,17 @@ bool setRouteValue(bool mdc, SignalingRoute route, bool enabled)
     return saveConfig();
 }
 
+bool setCtcssRouteValue(const SignalingRoute route, const bool enabled)
+{
+    if (route != SIGNAL_ROUTE_RX_MIC && route != SIGNAL_ROUTE_RX_NRL) return false;
+    portENTER_CRITICAL(&s_lock);
+    if (route == SIGNAL_ROUTE_RX_MIC) s_config.ctcss_rx_mic = enabled;
+    else s_config.ctcss_rx_nrl = enabled;
+    portEXIT_CRITICAL(&s_lock);
+    applyRoutes();
+    return saveConfig();
+}
+
 } // namespace
 
 void SIGNALING_Init(void)
@@ -404,13 +438,16 @@ void SIGNALING_Init(void)
             ESP_LOGE(TAG, "failed to create signaling task with PSRAM stack");
         }
     }
-    ESP_LOGI(TAG, "ready mdc=%d/%d dtmf=%d/%d", s_mic.mdc != nullptr, s_encoder != nullptr,
-             s_config.dtmf_rx_mic, s_config.dtmf_rx_nrl);
+    ESP_LOGI(TAG, "ready mdc=%d/%d dtmf=%d/%d ctcss=%d/%d",
+             s_mic.mdc != nullptr, s_encoder != nullptr,
+             s_config.dtmf_rx_mic, s_config.dtmf_rx_nrl,
+             s_config.ctcss_rx_mic, s_config.ctcss_rx_nrl);
 }
 
 void SIGNALING_GetConfig(SignalingConfig *out) { if (out != nullptr) copyConfig(out); }
 bool SIGNALING_SetMdcRoute(SignalingRoute route, bool enabled) { return setRouteValue(true, route, enabled); }
 bool SIGNALING_SetDtmfRoute(SignalingRoute route, bool enabled) { return setRouteValue(false, route, enabled); }
+bool SIGNALING_SetCtcssRoute(SignalingRoute route, bool enabled) { return setCtcssRouteValue(route, enabled); }
 
 bool SIGNALING_SetMdcPacket(uint8_t opcode, uint8_t argument, uint16_t unit_id)
 {
@@ -459,6 +496,12 @@ void SIGNALING_OnNetworkVoiceEnded(void)
     if (s_tail_queue == nullptr) return;
     const TailDestination destination = TailDestination::Speaker;
     (void)xQueueSend(s_tail_queue, &destination, 0u);
+}
+
+void SIGNALING_FeedRawMic(const int16_t *samples, const size_t sample_count)
+{
+    if (!s_ctcss_mic_enabled || samples == nullptr || sample_count == 0u) return;
+    s_mic.ctcss.feed(samples, sample_count, ctcssDecoded, &s_mic);
 }
 
 uint32_t SIGNALING_GetRevision(void)

@@ -50,6 +50,7 @@ set(app_sources
     lib/nrl_captive_dns.cpp
     lib/nrl_g711.cpp
     lib/dtmf_codec.cpp
+    lib/ctcss_decoder.cpp
     lib/nrl_usb_console.cpp
     lib/nrl_wifi.cpp
     lib/wifi_config_portal.cpp

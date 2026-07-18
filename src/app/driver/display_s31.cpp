@@ -98,6 +98,7 @@ enum class Page : uint8_t {
     Nanny,
     Smb,
     EspNow,
+    Ctcss,
     Mdc,
     Dtmf,
     Video,
@@ -158,6 +159,7 @@ enum class Action : intptr_t {
     OtaNewer,
     InstallOta,
     Aprs,
+    Ctcss,
     Mdc,
     Dtmf,
     SaveMdc,
@@ -174,6 +176,8 @@ enum class AudioControl : intptr_t {
     EspNowRx,
     EspNowOpus,
     OpusCodec,
+    CtcssRxMic,
+    CtcssRxNrl,
     MdcRxMic,
     MdcRxNrl,
     MdcTxNrl,
@@ -1563,6 +1567,7 @@ void buildConfig()
     button(scr, 474, 220, 140, 120, "ESP-NOW", Action::EspNow);
     button(scr, 624, 220, 150, 120, "About", Action::About);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
+    button(scr, 264, 372, 180, 76, "CTCSS", Action::Ctcss);
 
     // Language selector: switching persists and rebuilds this page in place.
     fieldLabel(scr, 470, 388, "Language");
@@ -2092,6 +2097,29 @@ void buildEspNow()
                       "Off-grid intercom with nearby devices. When on, the home screen "
                       "gains a dedicated ESP-NOW PTT below the network PTT.");
 
+    button(scr, 24, 372, 230, 76, "Back", Action::Config);
+}
+
+void buildCtcss()
+{
+    clearScreen();
+    s_page = Page::Ctcss;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 78, 750, 274);
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+
+    switchControl(box, 0, 4, "CTCSS MIC RX", cfg.ctcss_rx_mic, AudioControl::CtcssRxMic);
+    switchControl(box, 370, 4, "CTCSS NRL RX", cfg.ctcss_rx_nrl, AudioControl::CtcssRxNrl);
+    fieldLabel(box, 0, 78, "Detected standard PL tone");
+    char result[96] = {};
+    SIGNALING_GetLastResult(result, sizeof(result));
+    s_lbl_form_status = label(box, &lv_font_montserrat_20, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 0, 112);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_label_set_text(s_lbl_form_status,
+                      strncmp(result, "CTCSS ", 6u) == 0 ? result : "No CTCSS tone detected yet.");
     button(scr, 24, 372, 230, 76, "Back", Action::Config);
 }
 
@@ -4059,6 +4087,7 @@ void action(lv_event_t *event)
         case Action::Smb: buildSmb(); break;
         case Action::Apps: buildApps(); break;
         case Action::EspNow: buildEspNow(); break;
+        case Action::Ctcss: buildCtcss(); break;
         case Action::Mdc: buildMdc(); break;
         case Action::Dtmf: buildDtmf(); break;
         case Action::SaveMdc: saveMdcForm(); break;
@@ -4219,6 +4248,21 @@ void audioSwitchEvent(lv_event_t *event)
                 formStatus("Opus enable failed (out of memory); staying on G.711.", kColorBad);
             }
             return;
+        case AudioControl::CtcssRxMic:
+        case AudioControl::CtcssRxNrl: {
+            const SignalingRoute route = id == AudioControl::CtcssRxMic
+                                             ? SIGNAL_ROUTE_RX_MIC : SIGNAL_ROUTE_RX_NRL;
+            const bool ok = SIGNALING_SetCtcssRoute(route, checked);
+            if (!ok) {
+                if (checked) lv_obj_remove_state(obj, LV_STATE_CHECKED);
+                else lv_obj_add_state(obj, LV_STATE_CHECKED);
+            }
+            formStatus(ok ? (checked ? "CTCSS detection enabled."
+                                       : "CTCSS detection disabled.")
+                          : "CTCSS setting save failed.",
+                       ok ? kColorGood : kColorBad);
+            return;
+        }
         case AudioControl::MdcRxMic:
         case AudioControl::MdcRxNrl:
         case AudioControl::MdcTxNrl:
@@ -4815,7 +4859,7 @@ void refresh()
                                s_page == Page::Audio || s_page == Page::Apps ||
                                s_page == Page::Nanny || s_page == Page::Smb ||
                                s_page == Page::Radio || s_page == Page::EspNow ||
-                               s_page == Page::Mdc || s_page == Page::Dtmf ||
+                               s_page == Page::Ctcss || s_page == Page::Mdc || s_page == Page::Dtmf ||
                                s_page == Page::Ai || s_page == Page::About;
         const bool keyboard_open =
             s_keyboard != nullptr && !lv_obj_has_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
@@ -4878,6 +4922,7 @@ void rebuildCurrentPage()
         case Page::Smb: buildSmb(); break;
         case Page::Apps: buildApps(); break;
         case Page::EspNow: buildEspNow(); break;
+        case Page::Ctcss: buildCtcss(); break;
         case Page::Mdc: buildMdc(); break;
         case Page::Dtmf: buildDtmf(); break;
         case Page::Video: buildVideo(); break;

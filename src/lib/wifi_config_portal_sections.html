@@ -256,10 +256,17 @@
 <!-- @endtemplate -->
 
 <!-- @template SIGNALING_TAB -->
-<a class="{{SIGNALING_ACTIVE}}" href="/signaling" data-i18n="signalingConfig">MDC/DTMF</a>
+<a class="{{SIGNALING_ACTIVE}}" href="/signaling" data-i18n="signalingConfig">Signaling</a>
 <!-- @endtemplate -->
 
 <!-- @template SIGNALING_SECTIONS -->
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="ctcssRoutes">CTCSS / PL Receive</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="ctcss_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="ctcss_rx_mic" value="1" onchange="submitSwitch(this)" {{CTCSS_RX_MIC_CHECKED}}><span data-i18n="ctcssDecodeMicText">Detect the standard CTCSS frequency from microphone/radio audio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeNrl">Decode from NRL</label><input type="hidden" name="ctcss_rx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="ctcss_rx_nrl" value="1" onchange="submitSwitch(this)" {{CTCSS_RX_NRL_CHECKED}}><span data-i18n="ctcssDecodeNrlText">Detect the standard CTCSS frequency from NRL downlink audio</span></label></form>
+  </div>
+</section>
 <section class="panel">
   <div class="section-head"><h2 data-i18n="mdcRoutes">MDC1200 Routes</h2><span class="hint mono">{{SIGNALING_STATUS}}</span></div>
   <div class="grid">
