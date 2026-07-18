@@ -20,9 +20,12 @@
 #include "services/nanny.h"
 #include "services/ota_service.h"
 #include "services/storage_service.h"
+#include "services/signaling_service.h"
 #include "driver/sci_serial.h"
+#include "app/main_loop_profile.h"
 
 #include <esp_log.h>
+#include <esp_partition.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
@@ -35,6 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static const char *TAG = "NRL";
 
@@ -148,9 +152,15 @@ static bool appendKeyValueLine(uint8_t *payload,
                                const char *key,
                                const char *value)
 {
-    char line[320];
-    snprintf(line, sizeof(line), "AT+%s=%s", key, value);
-    return appendReplyLine(payload, capacity, used, line);
+    static const char kPrefix[] = "AT+";
+    static const char kEquals[] = "=";
+    static const char kCrLf[] = "\r\n";
+    if (key == nullptr || value == nullptr) return false;
+    return appendReplyBytes(payload, capacity, used, kPrefix, sizeof(kPrefix) - 1u) &&
+           appendReplyBytes(payload, capacity, used, key, strlen(key)) &&
+           appendReplyBytes(payload, capacity, used, kEquals, sizeof(kEquals) - 1u) &&
+           appendReplyBytes(payload, capacity, used, value, strlen(value)) &&
+           appendReplyBytes(payload, capacity, used, kCrLf, sizeof(kCrLf) - 1u);
 }
 
 static bool appendUnsignedLine(uint8_t *payload,
@@ -284,28 +294,32 @@ static bool decodeAtCommand(const uint8_t *payload, const size_t payload_size, A
         return false;
     }
 
-    char buffer[288];
-    size_t copy_size = payload_size - 1u;
-    if (copy_size >= sizeof(buffer)) {
-        copy_size = sizeof(buffer) - 1u;
-    }
-    memcpy(buffer, payload + 1u, copy_size);
-    buffer[copy_size] = '\0';
+    const uint8_t *text = payload + 1u;
+    const size_t text_size = payload_size - 1u;
+    const auto *separator = static_cast<const uint8_t *>(memchr(text, '=', text_size));
+    if (separator == nullptr) return false;
 
-    char *separator = strchr(buffer, '=');
-    if (separator == nullptr) {
-        return false;
-    }
-
-    *separator = '\0';
-    snprintf(out_cmd->command, sizeof(out_cmd->command), "%.*s",
-             static_cast<int>(sizeof(out_cmd->command) - 1u), buffer);
-    snprintf(out_cmd->value, sizeof(out_cmd->value), "%.*s",
-             static_cast<int>(sizeof(out_cmd->value) - 1u), separator + 1);
+    const size_t command_size = static_cast<size_t>(separator - text);
+    const size_t value_size = text_size - command_size - 1u;
+    const size_t command_copy = command_size < sizeof(out_cmd->command) - 1u
+        ? command_size : sizeof(out_cmd->command) - 1u;
+    const size_t value_copy = value_size < sizeof(out_cmd->value) - 1u
+        ? value_size : sizeof(out_cmd->value) - 1u;
+    memcpy(out_cmd->command, text, command_copy);
+    out_cmd->command[command_copy] = '\0';
+    memcpy(out_cmd->value, separator + 1u, value_copy);
+    out_cmd->value[value_copy] = '\0';
 
     trimText(out_cmd->command);
     trimText(out_cmd->value);
-    if (strncmp(out_cmd->command, "AT+", 3u) == 0) {
+    // Some serial terminals can leave a previously typed "AT" in front of a
+    // pasted command ("ATAT+TOP=1"). Collapse repeated leading AT prefixes
+    // before stripping the normal AT+ prefix.
+    while (strncasecmp(out_cmd->command, "ATAT+", 5u) == 0) {
+        memmove(out_cmd->command, out_cmd->command + 2u,
+                strlen(out_cmd->command + 2u) + 1u);
+    }
+    if (strncasecmp(out_cmd->command, "AT+", 3u) == 0) {
         memmove(out_cmd->command, out_cmd->command + 3u, strlen(out_cmd->command + 3u) + 1u);
     }
     return out_cmd->command[0] != '\0';
@@ -323,6 +337,16 @@ static bool parseUnsignedValue(const char *text, unsigned long *out_value)
         return false;
     }
 
+    *out_value = value;
+    return true;
+}
+
+static bool parseHexValue(const char *text, unsigned long *out_value)
+{
+    if (text == nullptr || out_value == nullptr || text[0] == '\0') return false;
+    char *end = nullptr;
+    const unsigned long value = strtoul(text, &end, 16);
+    if (end == text || (end != nullptr && *end != '\0')) return false;
     *out_value = value;
     return true;
 }
@@ -1339,6 +1363,94 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    // MDC1200/DTMF signaling. Route switches are independent; MDC/DTMF
+    // payloads are pre-generated into PSRAM when their IDs change.
+    if (stringEqualsIgnoreCase(command.command, "MDC") ||
+        stringEqualsIgnoreCase(command.command, "DTMF")) {
+        const bool mdc = stringEqualsIgnoreCase(command.command, "MDC");
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        if (is_query) {
+            char status[128];
+            if (mdc) {
+                snprintf(status, sizeof(status), "ID=%04X,OP=%02X,ARG=%02X,RXMIC=%s,RXNRL=%s,TXNRL=%s,TXSPK=%s",
+                         cfg.mdc_unit_id, cfg.mdc_opcode, cfg.mdc_argument,
+                         cfg.mdc_rx_mic ? "ON" : "OFF", cfg.mdc_rx_nrl ? "ON" : "OFF",
+                         cfg.mdc_tx_nrl ? "ON" : "OFF", cfg.mdc_tx_speaker ? "ON" : "OFF");
+            } else {
+                snprintf(status, sizeof(status), "ID=%s,RXMIC=%s,RXNRL=%s,TXNRL=%s,TXSPK=%s",
+                         cfg.dtmf_digits, cfg.dtmf_rx_mic ? "ON" : "OFF",
+                         cfg.dtmf_rx_nrl ? "ON" : "OFF", cfg.dtmf_tx_nrl ? "ON" : "OFF",
+                         cfg.dtmf_tx_speaker ? "ON" : "OFF");
+            }
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               mdc ? "MDC" : "DTMF", status);
+            return;
+        }
+        bool ok = false;
+        if (mdc) {
+            char value[sizeof(command.value)];
+            snprintf(value, sizeof(value), "%s", command.value);
+            char *arg_text = strchr(value, ',');
+            char *id_text = arg_text != nullptr ? strchr(arg_text + 1, ',') : nullptr;
+            if (arg_text != nullptr && id_text != nullptr) {
+                *arg_text++ = '\0';
+                *id_text++ = '\0';
+                unsigned long op = 0, arg = 0, unit_id = 0;
+                ok = parseHexValue(value, &op) && op <= 0xFFUL &&
+                     parseHexValue(arg_text, &arg) && arg <= 0xFFUL &&
+                     parseHexValue(id_text, &unit_id) && unit_id <= 0xFFFFUL &&
+                     SIGNALING_SetMdcPacket(static_cast<uint8_t>(op), static_cast<uint8_t>(arg),
+                                            static_cast<uint16_t>(unit_id));
+            }
+        } else {
+            ok = SIGNALING_SetDtmfDigits(command.value);
+        }
+        if (!ok) appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", mdc ? "MDC" : "DTMF");
+        else appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, mdc ? "MDC" : "DTMF", command.value);
+        return;
+    }
+
+    struct SignalingAtRoute {
+        const char *command;
+        bool mdc;
+        SignalingRoute route;
+    };
+    static const SignalingAtRoute signaling_routes[] = {
+        {"MDC_RX_MIC", true, SIGNAL_ROUTE_RX_MIC}, {"MDC_RX_NRL", true, SIGNAL_ROUTE_RX_NRL},
+        {"MDC_TX_NRL", true, SIGNAL_ROUTE_TX_NRL}, {"MDC_TX_SPK", true, SIGNAL_ROUTE_TX_SPEAKER},
+        {"DTMF_RX_MIC", false, SIGNAL_ROUTE_RX_MIC}, {"DTMF_RX_NRL", false, SIGNAL_ROUTE_RX_NRL},
+        {"DTMF_TX_NRL", false, SIGNAL_ROUTE_TX_NRL}, {"DTMF_TX_SPK", false, SIGNAL_ROUTE_TX_SPEAKER},
+    };
+    for (const SignalingAtRoute &entry : signaling_routes) {
+        if (!stringEqualsIgnoreCase(command.command, entry.command)) continue;
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        bool enabled = false;
+        if (entry.mdc) {
+            if (entry.route == SIGNAL_ROUTE_RX_MIC) enabled = cfg.mdc_rx_mic;
+            else if (entry.route == SIGNAL_ROUTE_RX_NRL) enabled = cfg.mdc_rx_nrl;
+            else if (entry.route == SIGNAL_ROUTE_TX_NRL) enabled = cfg.mdc_tx_nrl;
+            else enabled = cfg.mdc_tx_speaker;
+        } else {
+            if (entry.route == SIGNAL_ROUTE_RX_MIC) enabled = cfg.dtmf_rx_mic;
+            else if (entry.route == SIGNAL_ROUTE_RX_NRL) enabled = cfg.dtmf_rx_nrl;
+            else if (entry.route == SIGNAL_ROUTE_TX_NRL) enabled = cfg.dtmf_tx_nrl;
+            else enabled = cfg.dtmf_tx_speaker;
+        }
+        if (!is_query) {
+            if (!parseBoolValue(command.value, &enabled) ||
+                !(entry.mdc ? SIGNALING_SetMdcRoute(entry.route, enabled)
+                            : SIGNALING_SetDtmfRoute(entry.route, enabled))) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", entry.command);
+                return;
+            }
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           entry.command, enabled ? "ON" : "OFF");
+        return;
+    }
+
     // APRS transceiver family:
     //   AT+APRS=ON|OFF|?          master switch / status summary
     //   AT+APRS_NET=ON|OFF        APRS-IS uplink/downlink
@@ -1814,66 +1926,143 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         const long fb_mbps = Display_FramebufferBenchMBps();
         snprintf(line, sizeof(line), "framebuffer memset %ld MB/s", fb_mbps);
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "MEM", line);
+        // Flash-through-cache read: what CJK glyph lookups actually pay during
+        // rendering. 256 KB sequential mmap read defeats the cache, so this
+        // times the cache-miss fill path, which the RAM benches above never see.
+        uint8_t *dst = static_cast<uint8_t *>(heap_caps_malloc(kBench, MALLOC_CAP_SPIRAM));
+        const esp_partition_t *app_part = esp_partition_find_first(
+            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, nullptr);
+        if (dst != nullptr && app_part != nullptr) {
+            const void *mapped = nullptr;
+            esp_partition_mmap_handle_t map_handle = 0;
+            if (esp_partition_mmap(app_part, 0, kBench, ESP_PARTITION_MMAP_DATA,
+                                   &mapped, &map_handle) == ESP_OK) {
+                const int64_t t0 = esp_timer_get_time();
+                for (int i = 0; i < 4; ++i) {
+                    memcpy(dst, mapped, kBench);
+                }
+                const int64_t us = esp_timer_get_time() - t0;
+                esp_partition_munmap(map_handle);
+                snprintf(line, sizeof(line), "flash read %lld MB/s",
+                         static_cast<long long>(4LL * kBench * 1000000LL / us / 1048576LL));
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "MEM", line);
+            }
+        }
+        if (dst != nullptr) {
+            heap_caps_free(dst);
+        }
         return;
     }
 
-    // Per-task CPU usage over a 500 ms window, top consumers first:
-    // AT+TOP=1. Debug tool for hunting UI-latency / CPU-contention issues.
+    // On-demand breakdown of the work executed by nrl_main_loop. Profiling is
+    // normally off, so its timestamp calls cannot affect regular CPU usage.
+    // Start it, wait several seconds, then query the averages and maxima:
+    //   AT+LOOP=1
+    //   AT+LOOP=?
+    //   AT+LOOP=0
+    if (stringEqualsIgnoreCase(command.command, "LOOP")) {
+        if (!is_query) {
+            bool enabled = false;
+            if (!parseBoolValue(command.value, &enabled)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload),
+                                   &result->payload_size, "ERR", "LOOP");
+                return;
+            }
+            MAIN_LOOP_PROFILE_SetEnabled(enabled);
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "LOOP", enabled ? "STARTED" : "STOPPED");
+            return;
+        }
+
+        static constexpr const char *kStageNames[MAIN_LOOP_STAGE_COUNT] = {
+            "status", "wifi_portal", "ble", "bt", "serial", "display",
+        };
+        MainLoopProfileSnapshot snapshot{};
+        MAIN_LOOP_PROFILE_Get(&snapshot);
+        char line[80];
+        snprintf(line, sizeof(line), "%s loops=%lu",
+                 snapshot.enabled ? "RUNNING" : "STOPPED",
+                 static_cast<unsigned long>(snapshot.loops));
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "LOOP", line);
+        for (size_t i = 0; i < MAIN_LOOP_STAGE_COUNT; ++i) {
+            const uint64_t average_us = snapshot.loops != 0u
+                ? snapshot.total_us[i] / snapshot.loops : 0u;
+            snprintf(line, sizeof(line), "%-11s avg=%llu us max=%lu us",
+                     kStageNames[i], static_cast<unsigned long long>(average_us),
+                     static_cast<unsigned long>(snapshot.max_us[i]));
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "LOOP", line);
+        }
+        return;
+    }
+
+    // Per-task CPU usage, top consumers first. The first request reports the
+    // cumulative average since boot; later requests report the interval since
+    // the previous request. This is intentionally non-blocking: TOP is handled
+    // by nrl_main_loop, so sleeping here would hide that task's own CPU usage.
     if (stringEqualsIgnoreCase(command.command, "TOP")) {
 #if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
         constexpr UBaseType_t kMaxTasks = 40;
-        // Static: two snapshots are ~4 KB, too big for this task's stack.
-        static TaskStatus_t s_snap_a[kMaxTasks];
-        static TaskStatus_t s_snap_b[kMaxTasks];
-        const UBaseType_t n_a = uxTaskGetSystemState(s_snap_a, kMaxTasks, nullptr);
-        const int64_t t0 = esp_timer_get_time();
-        vTaskDelay(pdMS_TO_TICKS(500));
-        const UBaseType_t n_b = uxTaskGetSystemState(s_snap_b, kMaxTasks, nullptr);
-        const uint32_t window_us = static_cast<uint32_t>(esp_timer_get_time() - t0);
-
         struct Row {
             const TaskStatus_t *task;
             uint32_t delta;
         };
-        Row rows[kMaxTasks];
+        // Keep snapshots and sort rows out of the 6 KB nrl_main_loop stack.
+        static TaskStatus_t s_previous[kMaxTasks];
+        static TaskStatus_t s_current[kMaxTasks];
+        static Row s_rows[kMaxTasks];
+        static UBaseType_t s_previous_n = 0u;
+        static uint32_t s_previous_us = 0u;
+        const uint32_t now_us = static_cast<uint32_t>(esp_timer_get_time());
+        const UBaseType_t current_n = uxTaskGetSystemState(s_current, kMaxTasks, nullptr);
+        const uint32_t window_us = s_previous_us == 0u ? now_us : now_us - s_previous_us;
+
         UBaseType_t rows_n = 0;
-        for (UBaseType_t i = 0; i < n_b; ++i) {
+        for (UBaseType_t i = 0; i < current_n; ++i) {
             uint32_t before = 0;
-            for (UBaseType_t j = 0; j < n_a; ++j) {
-                if (s_snap_a[j].xHandle == s_snap_b[i].xHandle) {
-                    before = s_snap_a[j].ulRunTimeCounter;
+            bool found = s_previous_n == 0u;
+            for (UBaseType_t j = 0; j < s_previous_n; ++j) {
+                if (s_previous[j].xHandle == s_current[i].xHandle) {
+                    before = s_previous[j].ulRunTimeCounter;
+                    found = true;
                     break;
                 }
             }
-            rows[rows_n].task = &s_snap_b[i];
-            rows[rows_n].delta = s_snap_b[i].ulRunTimeCounter - before;
+            // A task created after the previous sample has no valid interval
+            // baseline; start reporting it on the next request.
+            s_rows[rows_n].task = &s_current[i];
+            s_rows[rows_n].delta = found ? s_current[i].ulRunTimeCounter - before : 0u;
             ++rows_n;
         }
         for (UBaseType_t i = 1; i < rows_n; ++i) { // insertion sort, desc
-            const Row key = rows[i];
+            const Row key = s_rows[i];
             UBaseType_t j = i;
-            while (j > 0 && rows[j - 1].delta < key.delta) {
-                rows[j] = rows[j - 1];
+            while (j > 0 && s_rows[j - 1].delta < key.delta) {
+                s_rows[j] = s_rows[j - 1];
                 --j;
             }
-            rows[j] = key;
+            s_rows[j] = key;
         }
         const UBaseType_t show = (rows_n < 12u) ? rows_n : 12u;
         for (UBaseType_t i = 0; i < show; ++i) {
             // Percent of ONE core over the window, one decimal.
             const unsigned pct10 = (window_us != 0u)
-                ? static_cast<unsigned>(static_cast<uint64_t>(rows[i].delta) * 1000u / window_us)
+                ? static_cast<unsigned>(static_cast<uint64_t>(s_rows[i].delta) * 1000u / window_us)
                 : 0u;
             char core_ch = '*';
 #if defined(CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID) && CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID
-            if (rows[i].task->xCoreID == 0) core_ch = '0';
-            else if (rows[i].task->xCoreID == 1) core_ch = '1';
+            if (s_rows[i].task->xCoreID == 0) core_ch = '0';
+            else if (s_rows[i].task->xCoreID == 1) core_ch = '1';
 #endif
             char line[64];
             snprintf(line, sizeof(line), "%-16s c%c %u.%u%%",
-                     rows[i].task->pcTaskName, core_ch, pct10 / 10u, pct10 % 10u);
+                     s_rows[i].task->pcTaskName, core_ch, pct10 / 10u, pct10 % 10u);
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "TOP", line);
         }
+        memcpy(s_previous, s_current, current_n * sizeof(s_current[0]));
+        s_previous_n = current_n;
+        s_previous_us = now_us;
         return;
 #else
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "TOP");

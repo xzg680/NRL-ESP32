@@ -13,6 +13,7 @@
 #include "../services/music_player.h"
 #include "../services/nanny.h"
 #include "../services/radio_favorites.h"
+#include "../services/signaling_service.h"
 #include "../services/storage_service.h"
 #include "nrl_audio_bridge.h"
 
@@ -558,6 +559,31 @@ std::string WifiConfigPortalView_BuildAprsSections(void)
     return html;
 }
 
+std::string WifiConfigPortalView_BuildSignalingSections(void)
+{
+    std::string html = std::string(kWifiConfigPortalSignalingSectionsTemplate);
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    replaceToken(html, "{{SIGNALING_STATUS}}", "16 kHz PCM / PSRAM");
+    replaceToken(html, "{{MDC_RX_MIC_CHECKED}}", checkedAttr(cfg.mdc_rx_mic));
+    replaceToken(html, "{{MDC_RX_NRL_CHECKED}}", checkedAttr(cfg.mdc_rx_nrl));
+    replaceToken(html, "{{MDC_TX_NRL_CHECKED}}", checkedAttr(cfg.mdc_tx_nrl));
+    replaceToken(html, "{{MDC_TX_SPEAKER_CHECKED}}", checkedAttr(cfg.mdc_tx_speaker));
+    replaceToken(html, "{{DTMF_RX_MIC_CHECKED}}", checkedAttr(cfg.dtmf_rx_mic));
+    replaceToken(html, "{{DTMF_RX_NRL_CHECKED}}", checkedAttr(cfg.dtmf_rx_nrl));
+    replaceToken(html, "{{DTMF_TX_NRL_CHECKED}}", checkedAttr(cfg.dtmf_tx_nrl));
+    replaceToken(html, "{{DTMF_TX_SPEAKER_CHECKED}}", checkedAttr(cfg.dtmf_tx_speaker));
+    char value[8];
+    snprintf(value, sizeof(value), "%02X", cfg.mdc_opcode);
+    replaceToken(html, "{{MDC_OPCODE}}", value);
+    snprintf(value, sizeof(value), "%02X", cfg.mdc_argument);
+    replaceToken(html, "{{MDC_ARGUMENT}}", value);
+    snprintf(value, sizeof(value), "%04X", cfg.mdc_unit_id);
+    replaceToken(html, "{{MDC_UNIT_ID}}", value);
+    replaceToken(html, "{{DTMF_DIGITS}}", htmlEscape(cfg.dtmf_digits));
+    return html;
+}
+
 std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *config,
                                                  const WifiConfigPortalPageState &state,
                                                  const std::string &form_sections)
@@ -580,6 +606,11 @@ std::string WifiConfigPortalView_BuildConfigPage(const ExternalRadioConfig *conf
         std::string aprs_tab = std::string(kWifiConfigPortalAprsTabTemplate);
         replaceToken(aprs_tab, "{{APRS_ACTIVE}}", state.aprs_active ? "active" : "");
         replaceToken(html, "{{APRS_TAB}}", aprs_tab);
+    }
+    {
+        std::string signaling_tab = std::string(kWifiConfigPortalSignalingTabTemplate);
+        replaceToken(signaling_tab, "{{SIGNALING_ACTIVE}}", state.signaling_active ? "active" : "");
+        replaceToken(html, "{{SIGNALING_TAB}}", signaling_tab);
     }
     replaceToken(html, "{{AP_IP}}", ipToString(nrlWifiApIp()));
     replaceToken(html, "{{STA_IP}}", staIpOrNotConnected(nrlNetworkIp()));

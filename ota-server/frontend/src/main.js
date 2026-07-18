@@ -772,6 +772,7 @@ const app = createApp({
       notes,
       firmware,
       publishMessage,
+      apiURL,
       t,
       setLanguage,
       boardName,

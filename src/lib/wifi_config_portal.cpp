@@ -14,6 +14,7 @@
 #include "../app/driver/display.h"
 #include "../services/ai_assistant.h"
 #include "../services/aprs_service.h"
+#include "../services/signaling_service.h"
 #include "../services/display_notice.h"
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
@@ -1073,7 +1074,8 @@ static void sendConfigPage(const char *title,
                            const bool audio_active,
                            const std::string &footer,
                            const bool media_active = false,
-                           const bool aprs_active = false)
+                           const bool aprs_active = false,
+                           const bool signaling_active = false)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     const WifiConfigPortalPageState state = {
@@ -1088,6 +1090,7 @@ static void sendConfigPage(const char *title,
         .audio_active = audio_active,
         .media_active = media_active,
         .aprs_active = aprs_active,
+        .signaling_active = signaling_active,
         .footer = footer,
     };
     sendChunkedHtml(200, WifiConfigPortalView_BuildConfigPage(config, state, form_sections));
@@ -1175,6 +1178,16 @@ static esp_err_t handleMediaPage(httpd_req_t *req)
 
 static bool parseUIntArg(const std::string &text, unsigned long *out_value);
 
+static bool parseHexArg(const std::string &text, unsigned long *out_value)
+{
+    if (out_value == nullptr || text.empty()) return false;
+    char *end = nullptr;
+    const unsigned long value = strtoul(text.c_str(), &end, 16);
+    if (end == text.c_str() || (end != nullptr && *end != '\0')) return false;
+    *out_value = value;
+    return true;
+}
+
 static esp_err_t handleAprsPage(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -1191,6 +1204,92 @@ static esp_err_t handleAprsPage(httpd_req_t *req)
                    "",
                    false,
                    true);
+    return ESP_OK;
+}
+
+static esp_err_t handleSignalingPage(httpd_req_t *req)
+{
+    s_server.bind(req);
+    sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " MDC / DTMF").c_str(),
+                   "MDC1200 / DTMF",
+                   "signalingHeadline",
+                   "Configure signaling decode sources and voice-tail transmit destinations.",
+                   "signalingIntro",
+                   "/save_signaling",
+                   WifiConfigPortalView_BuildSignalingSections(),
+                   false, false, false, "", false, false, true);
+    return ESP_OK;
+}
+
+static void sendSignalingSavedJson(const bool ok)
+{
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    char op[3], arg[3], unit_id[5];
+    snprintf(op, sizeof(op), "%02X", cfg.mdc_opcode);
+    snprintf(arg, sizeof(arg), "%02X", cfg.mdc_argument);
+    snprintf(unit_id, sizeof(unit_id), "%04X", cfg.mdc_unit_id);
+    std::string body = std::string("{\"ok\":") + (ok ? "true" : "false") + ",\"fields\":{";
+    auto append = [&body](const char *name, const char *value, bool first = false) {
+        if (!first) body += ",";
+        body += "\"" + std::string(name) + "\":\"" + jsonEscape(value) + "\"";
+    };
+    append("mdc_rx_mic", cfg.mdc_rx_mic ? "1" : "0", true);
+    append("mdc_rx_nrl", cfg.mdc_rx_nrl ? "1" : "0");
+    append("mdc_tx_nrl", cfg.mdc_tx_nrl ? "1" : "0");
+    append("mdc_tx_speaker", cfg.mdc_tx_speaker ? "1" : "0");
+    append("dtmf_rx_mic", cfg.dtmf_rx_mic ? "1" : "0");
+    append("dtmf_rx_nrl", cfg.dtmf_rx_nrl ? "1" : "0");
+    append("dtmf_tx_nrl", cfg.dtmf_tx_nrl ? "1" : "0");
+    append("dtmf_tx_speaker", cfg.dtmf_tx_speaker ? "1" : "0");
+    append("mdc_opcode", op);
+    append("mdc_argument", arg);
+    append("mdc_unit_id", unit_id);
+    append("dtmf_digits", cfg.dtmf_digits);
+    body += "}}";
+    s_server.send(200, "application/json; charset=utf-8", body);
+}
+
+static esp_err_t handleSaveSignaling(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    bool ok = true;
+    struct RouteField { const char *present; const char *name; bool mdc; SignalingRoute route; };
+    static const RouteField routes[] = {
+        {"mdc_rx_mic_present", "mdc_rx_mic", true, SIGNAL_ROUTE_RX_MIC},
+        {"mdc_rx_nrl_present", "mdc_rx_nrl", true, SIGNAL_ROUTE_RX_NRL},
+        {"mdc_tx_nrl_present", "mdc_tx_nrl", true, SIGNAL_ROUTE_TX_NRL},
+        {"mdc_tx_speaker_present", "mdc_tx_speaker", true, SIGNAL_ROUTE_TX_SPEAKER},
+        {"dtmf_rx_mic_present", "dtmf_rx_mic", false, SIGNAL_ROUTE_RX_MIC},
+        {"dtmf_rx_nrl_present", "dtmf_rx_nrl", false, SIGNAL_ROUTE_RX_NRL},
+        {"dtmf_tx_nrl_present", "dtmf_tx_nrl", false, SIGNAL_ROUTE_TX_NRL},
+        {"dtmf_tx_speaker_present", "dtmf_tx_speaker", false, SIGNAL_ROUTE_TX_SPEAKER},
+    };
+    for (const RouteField &field : routes) {
+        if (!ok || !s_server.hasArg(field.present)) continue;
+        const bool enabled = s_server.hasArg(field.name);
+        ok = field.mdc ? SIGNALING_SetMdcRoute(field.route, enabled)
+                       : SIGNALING_SetDtmfRoute(field.route, enabled);
+    }
+    if (ok && (s_server.hasArg("mdc_opcode") || s_server.hasArg("mdc_argument") ||
+               s_server.hasArg("mdc_unit_id"))) {
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        unsigned long op = cfg.mdc_opcode, arg = cfg.mdc_argument, unit_id = cfg.mdc_unit_id;
+        if (s_server.hasArg("mdc_opcode")) ok = parseHexArg(s_server.arg("mdc_opcode"), &op) && op <= 0xFFUL;
+        if (ok && s_server.hasArg("mdc_argument")) ok = parseHexArg(s_server.arg("mdc_argument"), &arg) && arg <= 0xFFUL;
+        if (ok && s_server.hasArg("mdc_unit_id")) ok = parseHexArg(s_server.arg("mdc_unit_id"), &unit_id) && unit_id <= 0xFFFFUL;
+        if (ok) ok = SIGNALING_SetMdcPacket(static_cast<uint8_t>(op), static_cast<uint8_t>(arg),
+                                             static_cast<uint16_t>(unit_id));
+    }
+    if (ok && s_server.hasArg("dtmf_digits")) {
+        ok = SIGNALING_SetDtmfDigits(s_server.arg("dtmf_digits").c_str());
+    }
+    if (!ok) ESP_LOGE(TAG, "MDC/DTMF config save via web failed");
+    sendSignalingSavedJson(ok);
     return ESP_OK;
 }
 
@@ -2432,6 +2531,8 @@ static void ensureServerRunning()
         { "/aprs",                 HTTP_GET,  handleAprsPage },
         { "/save_aprs",            HTTP_POST, handleSaveAprs },
         { "/aprs/stations",        HTTP_GET,  handleAprsStations },
+        { "/signaling",            HTTP_GET,  handleSignalingPage },
+        { "/save_signaling",       HTTP_POST, handleSaveSignaling },
         { "/update",               HTTP_GET,  handleUpdatePage },
         { "/update",               HTTP_POST, handleUpdate },
         { "/ota/status",           HTTP_GET,  handleOtaStatus },

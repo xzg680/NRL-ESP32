@@ -41,6 +41,14 @@ namespace {
 
 constexpr unsigned long kSlowBlinkMs = 500UL;
 constexpr unsigned long kHeartbeatMissedBlinkMs = 6500UL;
+// Both nrl_main_loop (20 ms cadence) and nrl_audio_bridge (10 ms cadence) call
+// STATUS_IO_Poll(); suppress duplicates instead of sampling the same ADC
+// ladder twice. 15 ms (not 10) so the outcome is phase-independent: with a
+// 10 ms gate, boot phase decided WHICH task paid the ~650 us scan every cycle
+// (observed as status avg 62 us vs 645 us across boots in AT+LOOP). At 15 ms
+// the effective scan rate settles at one per ~20 ms for every phase -- half
+// the ADC cost, still several times faster than the button debounce timing.
+constexpr unsigned long kStatusPollMinIntervalMs = 15UL;
 
 inline unsigned long nrl_millis_now() { return (unsigned long)(esp_timer_get_time() / 1000ULL); }
 
@@ -89,9 +97,12 @@ bool s_net_audio_active = false;
 unsigned long s_last_heartbeat_rx_ms = 0UL;
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
 bool s_ws2812_ready = false;
+uint32_t s_ws2812_rgb = UINT32_MAX;
 #elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 led_strip_handle_t s_ws2812 = nullptr;
+uint32_t s_ws2812_rgb = UINT32_MAX;
 #endif
+unsigned long s_last_status_poll_ms = 0UL;
 
 // PTT transmit state also serves soft PTT, so it remains available even when
 // a board deliberately has no physical controls.
@@ -150,6 +161,7 @@ adc_cali_handle_t s_button_adc_cali = nullptr;
 #endif
 bool s_button_adc_ready = false;
 bool s_button_adc_cali_ready = false;
+int s_button_adc_value = -1;
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
 // The S31 has no IDF-supported adc_cali scheme (curve/line fitting are both
@@ -169,10 +181,10 @@ static bool adcInRange(const int value, const int low, const int high)
     return value >= low && value <= high;
 }
 
-static int readAdcButtonLevel(const int pin)
+static int sampleAdcButtonValue()
 {
     if (!s_button_adc_ready || s_button_adc == nullptr) {
-        return 1;
+        return -1;
     }
     int raw_sum = 0;
     int samples = 0;
@@ -184,7 +196,7 @@ static int readAdcButtonLevel(const int pin)
         }
     }
     if (samples == 0) {
-        return 1;
+        return -1;
     }
     int value = raw_sum / samples;
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
@@ -202,6 +214,15 @@ static int readAdcButtonLevel(const int pin)
         }
     }
 #endif
+    return value;
+}
+
+static int readAdcButtonLevel(const int pin)
+{
+    const int value = s_button_adc_value;
+    if (value < 0) {
+        return 1;
+    }
     bool pressed = false;
     switch (pin) {
         case NRL_PIN_BTN_VOL_UP:
@@ -664,8 +685,22 @@ extern "C" void STATUS_IO_Poll(void)
     }
 
     const unsigned long now = nrl_millis_now();
+    if (s_last_status_poll_ms != 0UL &&
+        (now - s_last_status_poll_ms) < kStatusPollMinIntervalMs) {
+        if (s_poll_mutex != nullptr) {
+            xSemaphoreGive(s_poll_mutex);
+        }
+        return;
+    }
+    s_last_status_poll_ms = now;
 
 #if !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
+#if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
+    // All three keys share one resistor ladder. Sample/calibrate it once and
+    // classify that one voltage for VOL+, VOL- and SET/PTT. The old path took
+    // four ADC samples separately for each key (12 conversions per poll).
+    s_button_adc_value = sampleAdcButtonValue();
+#endif
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
     pollGezipaiMenuButtons(now);
 #else
@@ -694,15 +729,24 @@ extern "C" void STATUS_IO_Poll(void)
         const uint8_t r = s_tx_active ? 60 : 0;
         const uint8_t g = s_net_audio_active ? 60 : 0;
         const uint8_t b = heartbeat_ok ? 30 : (blinkPhase(now, kSlowBlinkMs) ? 30 : 0);
-        bsp_led_set_rgb(BSP_LED_STATUS, r, g, b);
+        const uint32_t rgb = (static_cast<uint32_t>(r) << 16u) |
+                             (static_cast<uint32_t>(g) << 8u) | b;
+        if (rgb != s_ws2812_rgb && bsp_led_set_rgb(BSP_LED_STATUS, r, g, b) == ESP_OK) {
+            s_ws2812_rgb = rgb;
+        }
     }
 #elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
     if (s_ws2812 != nullptr) {
         const uint8_t r = s_tx_active ? 60 : 0;
         const uint8_t g = s_net_audio_active ? 60 : 0;
         const uint8_t b = heartbeat_ok ? 30 : (blinkPhase(now, kSlowBlinkMs) ? 30 : 0);
-        (void)led_strip_set_pixel(s_ws2812, 0, r, g, b);
-        (void)led_strip_refresh(s_ws2812);
+        const uint32_t rgb = (static_cast<uint32_t>(r) << 16u) |
+                             (static_cast<uint32_t>(g) << 8u) | b;
+        if (rgb != s_ws2812_rgb &&
+            led_strip_set_pixel(s_ws2812, 0, r, g, b) == ESP_OK &&
+            led_strip_refresh(s_ws2812) == ESP_OK) {
+            s_ws2812_rgb = rgb;
+        }
     }
 #endif
 

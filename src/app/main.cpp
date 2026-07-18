@@ -12,6 +12,7 @@
 #include "../lib/ble_config.h"
 #include "../services/ai_assistant.h"
 #include "../services/aprs_service.h"
+#include "../services/signaling_service.h"
 #include "../services/espnow_link.h"
 #include "../services/video_call.h"
 #include "../services/music_player.h"
@@ -33,11 +34,33 @@
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
+#include "main_loop_profile.h"
 
 namespace {
 
 constexpr unsigned long kPollIntervalMs = 20UL;
 const char *TAG = "APP";
+
+portMUX_TYPE s_loop_profile_lock = portMUX_INITIALIZER_UNLOCKED;
+volatile bool s_loop_profile_enabled = false;
+uint32_t s_loop_profile_loops = 0u;
+uint64_t s_loop_profile_total_us[MAIN_LOOP_STAGE_COUNT] = {};
+uint32_t s_loop_profile_max_us[MAIN_LOOP_STAGE_COUNT] = {};
+
+static void recordMainLoopProfile(const uint32_t elapsed_us[MAIN_LOOP_STAGE_COUNT])
+{
+    portENTER_CRITICAL(&s_loop_profile_lock);
+    if (s_loop_profile_enabled) {
+        ++s_loop_profile_loops;
+        for (size_t i = 0; i < MAIN_LOOP_STAGE_COUNT; ++i) {
+            s_loop_profile_total_us[i] += elapsed_us[i];
+            if (elapsed_us[i] > s_loop_profile_max_us[i]) {
+                s_loop_profile_max_us[i] = elapsed_us[i];
+            }
+        }
+    }
+    portEXIT_CRITICAL(&s_loop_profile_lock);
+}
 
 // Boot-time internal-DRAM ruler: logs free/largest-block after each init step
 // so a regression that starves the audio/AEC init (which needs contiguous
@@ -258,26 +281,117 @@ static void initApp()
     }
 #endif
 
+    // Signaling allocates MDC decoder state and starts its worker. Keep it
+    // after codec/AEC initialization so it cannot consume the contiguous
+    // internal RAM required to bring up speaker playback.
+    SIGNALING_Init();
+    logDramMark("signaling");
+
     ESP_LOGI(TAG, "[AT] serial console ready. Type \"AT\" for the command list, "
                   "e.g. AT+WIFI_SSID=MyNet then AT+WIFI_PASS=secret");
 }
 
 static void mainLoopTask(void *)
 {
-    while (true) {
-        STATUS_IO_Poll();
-        WifiConfigPortal_Poll();
-        BLEConfig_Poll();
-        NRL_BtHfp_Poll();
-        NRLAudioBridge_PollSerialConsole();
-#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
-        Display_Poll();
+    // The address pins down which heap region the boot-tail 6 KB stack
+    // allocation landed in (main SRAM vs the slow RTCRAM heap region); a
+    // stack in slow memory drags every poll made from this task.
+    int stack_probe = 0;
+    ESP_LOGI(TAG, "main loop stack ~%p internal_largest=%u rtc_free=%u",
+             static_cast<void *>(&stack_probe),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+#ifdef MALLOC_CAP_RTCRAM
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_RTCRAM))
+#else
+             0u
 #endif
+    );
+    (void)stack_probe;
+    while (true) {
+        if (!s_loop_profile_enabled) {
+            STATUS_IO_Poll();
+            WifiConfigPortal_Poll();
+            BLEConfig_Poll();
+            NRL_BtHfp_Poll();
+            NRLAudioBridge_PollSerialConsole();
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
+            Display_Poll();
+#endif
+        } else {
+            uint32_t elapsed_us[MAIN_LOOP_STAGE_COUNT] = {};
+            int64_t started_us = esp_timer_get_time();
+            STATUS_IO_Poll();
+            elapsed_us[MAIN_LOOP_STAGE_STATUS] =
+                static_cast<uint32_t>(esp_timer_get_time() - started_us);
+
+            started_us = esp_timer_get_time();
+            WifiConfigPortal_Poll();
+            elapsed_us[MAIN_LOOP_STAGE_WIFI_PORTAL] =
+                static_cast<uint32_t>(esp_timer_get_time() - started_us);
+
+            started_us = esp_timer_get_time();
+            BLEConfig_Poll();
+            elapsed_us[MAIN_LOOP_STAGE_BLE] =
+                static_cast<uint32_t>(esp_timer_get_time() - started_us);
+
+            started_us = esp_timer_get_time();
+            NRL_BtHfp_Poll();
+            elapsed_us[MAIN_LOOP_STAGE_BT] =
+                static_cast<uint32_t>(esp_timer_get_time() - started_us);
+
+            started_us = esp_timer_get_time();
+            NRLAudioBridge_PollSerialConsole();
+            elapsed_us[MAIN_LOOP_STAGE_SERIAL] =
+                static_cast<uint32_t>(esp_timer_get_time() - started_us);
+
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
+            started_us = esp_timer_get_time();
+            Display_Poll();
+            elapsed_us[MAIN_LOOP_STAGE_DISPLAY] =
+                static_cast<uint32_t>(esp_timer_get_time() - started_us);
+#endif
+            recordMainLoopProfile(elapsed_us);
+        }
         vTaskDelay(pdMS_TO_TICKS(kPollIntervalMs));
     }
 }
 
 } // namespace
+
+void MAIN_LOOP_PROFILE_SetEnabled(const bool enabled)
+{
+    portENTER_CRITICAL(&s_loop_profile_lock);
+    if (enabled) {
+        s_loop_profile_loops = 0u;
+        memset(s_loop_profile_total_us, 0, sizeof(s_loop_profile_total_us));
+        memset(s_loop_profile_max_us, 0, sizeof(s_loop_profile_max_us));
+    }
+    s_loop_profile_enabled = enabled;
+    portEXIT_CRITICAL(&s_loop_profile_lock);
+}
+
+void MAIN_LOOP_PROFILE_Get(MainLoopProfileSnapshot *snapshot)
+{
+    if (snapshot == nullptr) {
+        return;
+    }
+    portENTER_CRITICAL(&s_loop_profile_lock);
+    snapshot->enabled = s_loop_profile_enabled;
+    snapshot->loops = s_loop_profile_loops;
+    memcpy(snapshot->total_us, s_loop_profile_total_us, sizeof(snapshot->total_us));
+    memcpy(snapshot->max_us, s_loop_profile_max_us, sizeof(snapshot->max_us));
+    portEXIT_CRITICAL(&s_loop_profile_lock);
+}
+
+// Static in .bss: this task is created at the very tail of boot, when the
+// internal heap is down to its last fragments. A heap-allocated stack then
+// lands in whatever region still has a hole -- on one production S31 that was
+// the slow RTCRAM heap block (stack @0x2e007594), which made every poll this
+// task runs ~4x slower and cost ~10% of core0. A fixed .bss buffer keeps the
+// stack in main SRAM on every board, every boot.
+constexpr size_t kMainLoopStackBytes = 6144;
+static StackType_t s_main_loop_stack[kMainLoopStackBytes / sizeof(StackType_t)];
+static StaticTask_t s_main_loop_tcb;
 
 extern "C" void app_main(void)
 {
@@ -291,5 +405,6 @@ extern "C" void app_main(void)
     // is reserved for the audio pipeline (es8311 passthrough + aec_fetch).
     // Keeping polls off core 1 stops Display_Poll / WifiConfigPortal_Poll
     // from stealing audio-task CPU and bunching outbound voice packets.
-    xTaskCreatePinnedToCore(mainLoopTask, "nrl_main_loop", 6144, nullptr, 5, nullptr, 0);
+    xTaskCreateStaticPinnedToCore(mainLoopTask, "nrl_main_loop", kMainLoopStackBytes,
+                                  nullptr, 5, s_main_loop_stack, &s_main_loop_tcb, 0);
 }

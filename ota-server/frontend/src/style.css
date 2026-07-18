@@ -249,21 +249,21 @@ button.block {
   background: #f8fafc;
 }
 .board-card-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto;
   gap: 0.5rem;
-  flex-wrap: wrap;
+  width: 100%;
 }
 .board-card h3 {
   font-size: 1rem;
 }
 .board-card-head h3 {
-  flex: 1 0 auto;
+  min-width: 0;
   white-space: nowrap;
 }
 .board-card-head .chip {
-  margin-left: auto;
+  justify-self: end;
 }
 .chip {
   font-size: 0.72rem;

@@ -40,6 +40,7 @@
 #include "../../services/espnow_link.h"
 #include "../../services/display_notice.h"
 #include "../../services/ota_service.h"
+#include "../../services/signaling_service.h"
 #include "../../lib/nrl_version.h"
 #include "external_radio.h"
 #include "fonts/lv_font_cjk.h"
@@ -62,6 +63,8 @@
 #include <esp_heap_caps.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 static const char *TAG = "LCD";
 #include <esp_adc/adc_oneshot.h>
@@ -146,6 +149,7 @@ lv_obj_t *s_lbl_wifi = nullptr;
 lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_batt = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
+lv_obj_t *s_lbl_cpu = nullptr;
 lv_obj_t *s_lbl_hint = nullptr;
 lv_obj_t *s_lbl_ota = nullptr;
 lv_obj_t *s_content = nullptr;
@@ -164,6 +168,9 @@ enum class MenuPage : uint8_t {
     Ota,
     About,
     Aprs,
+    Signaling,
+    Mdc,
+    Dtmf,
 };
 
 // Written by STATUS_IO_Poll() and consumed only by Display_Poll(). Keeping
@@ -195,6 +202,7 @@ char s_shown_wifi[28] = {};
 char s_shown_vol[16] = {};
 char s_shown_batt[20] = {};
 char s_shown_ip[96] = {};
+char s_shown_cpu[12] = {};
 char s_shown_ota[160] = {}; // sized for a scrolling APRS monitor line
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
 
@@ -644,10 +652,12 @@ void resetHomeWidgets()
     s_lbl_vol = nullptr;
     s_lbl_batt = nullptr;
     s_lbl_ip = nullptr;
+    s_lbl_cpu = nullptr;
     s_shown_wifi[0] = '\0';
     s_shown_vol[0] = '\0';
     s_shown_batt[0] = '\0';
     s_shown_ip[0] = '\0';
+    s_shown_cpu[0] = '\0';
 }
 
 lv_obj_t *prepareScreen()
@@ -736,12 +746,13 @@ void buildMainMenu()
         ptt,
         nrl_codec,
         now_codec,
+        "MDC / DTMF",
         "CHECK UPDATE",
         "APRS LIST",
         "ABOUT",
     };
     for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); ++i) {
-        menuRow(scr, 1 + static_cast<int>(i) * 24, items[i], s_menu_index == i);
+        menuRow(scr, 1 + static_cast<int>(i) * 21, items[i], s_menu_index == i);
     }
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     if (s_menu_message[0] != '\0' && static_cast<int32_t>(s_menu_message_until_ms - now) > 0) {
@@ -890,11 +901,51 @@ void buildAprsMenu()
     menuFooter(scr, "PTT BACK");
 }
 
+bool signalingRouteEnabled(const SignalingConfig &cfg, bool mdc, size_t index)
+{
+    if (mdc) {
+        if (index == 0u) return cfg.mdc_rx_mic;
+        if (index == 1u) return cfg.mdc_rx_nrl;
+        if (index == 2u) return cfg.mdc_tx_nrl;
+        return cfg.mdc_tx_speaker;
+    }
+    if (index == 0u) return cfg.dtmf_rx_mic;
+    if (index == 1u) return cfg.dtmf_rx_nrl;
+    if (index == 2u) return cfg.dtmf_tx_nrl;
+    return cfg.dtmf_tx_speaker;
+}
+
+void buildSignalingMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    const char *items[] = {"< BACK / SIGNAL", "MDC1200 SETTINGS", "DTMF SETTINGS"};
+    for (size_t i = 0; i < 3u; ++i) menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
+    menuFooter(scr, "VOL+/- SELECT   PTT OK");
+}
+
+void buildProtocolMenu(bool mdc)
+{
+    lv_obj_t *scr = prepareContent();
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    menuRow(scr, 1, mdc ? "< BACK / MDC1200" : "< BACK / DTMF", s_menu_index == 0u);
+    static const char *names[] = {"MIC RX", "NRL RX", "NRL TX", "SPEAKER TX"};
+    for (size_t i = 0; i < 4u; ++i) {
+        char line[40];
+        snprintf(line, sizeof(line), "%s: %s", names[i], signalingRouteEnabled(cfg, mdc, i) ? "ON" : "OFF");
+        menuRow(scr, 29 + static_cast<int>(i) * 28, line, s_menu_index == i + 1u);
+    }
+    menuFooter(scr, "PTT TOGGLE");
+}
+
 void buildMenuUi()
 {
     if (s_menu_page == MenuPage::About) buildAboutMenu();
     else if (s_menu_page == MenuPage::Ota) buildOtaMenu();
     else if (s_menu_page == MenuPage::Aprs) buildAprsMenu();
+    else if (s_menu_page == MenuPage::Signaling) buildSignalingMenu();
+    else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
+    else if (s_menu_page == MenuPage::Dtmf) buildProtocolMenu(false);
     else buildMainMenu();
 }
 
@@ -1075,11 +1126,17 @@ void buildUi()
     // ---- Centre content ----
     buildHomeContent();
 
-    // ---- Bottom IP bar ----
+    // ---- Bottom IP bar: address on the left, per-core CPU load on the right ----
     lv_obj_t *bottom = makeBar(scr, kHeight - kBottomBarHeight, kBottomBarHeight);
     s_lbl_ip = makeLabel(bottom, &lv_font_montserrat_16, kColorIp);
-    lv_obj_center(s_lbl_ip);
+    lv_obj_set_width(s_lbl_ip, 156);
+    lv_label_set_long_mode(s_lbl_ip, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_lbl_ip, LV_ALIGN_LEFT_MID, 8, 0);
     lv_label_set_text(s_lbl_ip, "---");
+
+    s_lbl_cpu = makeLabel(bottom, &lv_font_montserrat_16, kColorSub);
+    lv_obj_align(s_lbl_cpu, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_label_set_text(s_lbl_cpu, "--/--");
 }
 
 //================================ Refresh ====================================
@@ -1337,6 +1394,54 @@ void refreshBattery()
     }
 }
 
+// Per-core CPU load ("c0/c1") from the FreeRTOS idle-task runtime counters,
+// sampled on the 500 ms refresh tick. A 3% hysteresis keeps the label from
+// redrawing on measurement jitter.
+void refreshCpu()
+{
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    if (s_lbl_cpu == nullptr) {
+        return;
+    }
+    static uint32_t s_last_idle[2] = {};
+    static uint32_t s_last_us = 0;
+    static int s_pct_shown[2] = {-100, -100};
+    const uint32_t now_us = static_cast<uint32_t>(esp_timer_get_time());
+    const uint32_t idle[2] = {
+        static_cast<uint32_t>(ulTaskGetIdleRunTimeCounterForCore(0)),
+        static_cast<uint32_t>(ulTaskGetIdleRunTimeCounterForCore(1)),
+    };
+    const uint32_t dt = now_us - s_last_us; // wrap-safe unsigned math
+    if (s_last_us != 0u && dt > 0u) {
+        int pct[2];
+        for (int core = 0; core < 2; ++core) {
+            const uint32_t di = idle[core] - s_last_idle[core];
+            const uint64_t idle_pct = static_cast<uint64_t>(di) * 100u / dt;
+            long load = 100 - static_cast<long>(idle_pct);
+            if (load < 0) load = 0;
+            if (load > 100) load = 100;
+            pct[core] = static_cast<int>(load);
+        }
+        const int d0 = pct[0] - s_pct_shown[0];
+        const int d1 = pct[1] - s_pct_shown[1];
+        if (d0 >= 3 || d0 <= -3 || d1 >= 3 || d1 <= -3) {
+            s_pct_shown[0] = pct[0];
+            s_pct_shown[1] = pct[1];
+            char text[16];
+            snprintf(text, sizeof(text), "%d/%d", pct[0], pct[1]);
+            if (setLabel(s_lbl_cpu, s_shown_cpu, sizeof(s_shown_cpu), text)) {
+                lv_obj_set_style_text_color(
+                    s_lbl_cpu,
+                    lv_color_hex((pct[0] > 85 || pct[1] > 85) ? kColorWeak : kColorSub), 0);
+            }
+        }
+    }
+    s_last_us = now_us;
+    s_last_idle[0] = idle[0];
+    s_last_idle[1] = idle[1];
+#endif
+}
+
 void refreshIp()
 {
     char ip_text[96];
@@ -1443,9 +1548,11 @@ void refreshOtaNotice()
 
 size_t menuItemCount()
 {
-    if (s_menu_page == MenuPage::Main) return 7u;
+    if (s_menu_page == MenuPage::Main) return 8u;
     if (s_menu_page == MenuPage::About) return 1u;
     if (s_menu_page == MenuPage::Aprs) return 1u;
+    if (s_menu_page == MenuPage::Signaling) return 3u;
+    if (s_menu_page == MenuPage::Mdc || s_menu_page == MenuPage::Dtmf) return 5u;
     const NrlOtaStatus *ota = otaUiSnapshot();
     return (ota != nullptr ? ota->release_count : 0u) + 1u; // Back row + releases
 }
@@ -1497,7 +1604,12 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
-        case 4: {
+        case 4:
+            s_menu_page = MenuPage::Signaling;
+            s_menu_index = 0u;
+            buildMenuUi();
+            break;
+        case 5: {
             const NrlOtaStatus *ota = otaUiSnapshot();
             s_menu_page = MenuPage::Ota;
             s_menu_index = 0u;
@@ -1508,14 +1620,14 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
-        case 5:
+        case 6:
             s_menu_page = MenuPage::Aprs;
             s_menu_index = 0u;
             s_menu_aprs_refresh_ms = 0u;
             s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
             buildMenuUi();
             break;
-        case 6:
+        case 7:
             s_menu_page = MenuPage::About;
             s_menu_index = 0u;
             buildMenuUi();
@@ -1523,6 +1635,36 @@ void confirmMainMenu()
         default:
             break;
     }
+}
+
+void confirmSignalingMenu()
+{
+    if (s_menu_index == 0u) {
+        activateMainMenu();
+    } else {
+        s_menu_page = s_menu_index == 1u ? MenuPage::Mdc : MenuPage::Dtmf;
+        s_menu_index = 0u;
+        buildMenuUi();
+    }
+}
+
+void confirmProtocolMenu(bool mdc)
+{
+    if (s_menu_index == 0u) {
+        s_menu_page = MenuPage::Signaling;
+        s_menu_index = 0u;
+        buildMenuUi();
+        return;
+    }
+    const size_t index = s_menu_index - 1u;
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    const bool enabled = !signalingRouteEnabled(cfg, mdc, index);
+    const SignalingRoute route = static_cast<SignalingRoute>(index);
+    const bool ok = mdc ? SIGNALING_SetMdcRoute(route, enabled)
+                        : SIGNALING_SetDtmfRoute(route, enabled);
+    setMenuMessage(ok ? (enabled ? "SIGNAL ROUTE ON" : "SIGNAL ROUTE OFF") : "SAVE FAILED");
+    buildMenuUi();
 }
 
 void confirmOtaMenu()
@@ -1582,6 +1724,9 @@ void processMenuInput(uint32_t now)
         if (s_menu_page == MenuPage::Main) confirmMainMenu();
         else if (s_menu_page == MenuPage::About) activateMainMenu();
         else if (s_menu_page == MenuPage::Aprs) activateMainMenu();
+        else if (s_menu_page == MenuPage::Signaling) confirmSignalingMenu();
+        else if (s_menu_page == MenuPage::Mdc) confirmProtocolMenu(true);
+        else if (s_menu_page == MenuPage::Dtmf) confirmProtocolMenu(false);
         else confirmOtaMenu();
     }
     if (!s_menu_active) return;
@@ -1717,6 +1862,7 @@ extern "C" void Display_Poll(void)
             s_last_refresh_ms = now;
             refreshWifi();
             refreshBattery();
+            refreshCpu();
         }
         lv_timer_handler();
         return;
@@ -1735,6 +1881,7 @@ extern "C" void Display_Poll(void)
         refreshClock();
         refreshWifi();
         refreshBattery();
+        refreshCpu();
     }
 
     lv_timer_handler();

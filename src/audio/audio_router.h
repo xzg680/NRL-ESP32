@@ -36,6 +36,10 @@ typedef enum {
     AUDIO_SRC_ESPNOW,       // ESP-NOW peer voice, G.711-decoded 8 kHz
     AUDIO_SRC_AI,           // xiaozhi AI TTS voice, Opus-decoded 16 kHz
     AUDIO_SRC_APRS,         // AFSK-modulated APRS beacon PCM, 8 kHz
+    AUDIO_SRC_MDC_NRL,      // MDC1200 tail burst appended to NRL uplink
+    AUDIO_SRC_MDC_SPEAKER,  // MDC1200 tail burst appended to speaker playback
+    AUDIO_SRC_DTMF_NRL,     // DTMF tail burst appended to NRL uplink
+    AUDIO_SRC_DTMF_SPEAKER, // DTMF tail burst appended to speaker playback
     AUDIO_SRC_COUNT
 } AudioRouterSource_t;
 
@@ -46,6 +50,7 @@ typedef enum {
     AUDIO_SINK_ESPNOW,      // ESP-NOW broadcast uplink (G.711), 8 kHz
     AUDIO_SINK_AI,          // xiaozhi AI mic uplink (Opus-encoded), 16 kHz
     AUDIO_SINK_APRS,        // AFSK demodulator mic tap, 16 kHz
+    AUDIO_SINK_SIGNALING,   // MDC1200/DTMF decoder tap, 16 kHz
     AUDIO_SINK_COUNT
 } AudioRouterSink_t;
 

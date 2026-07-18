@@ -19,6 +19,7 @@ set(app_sources
     services/nanny.cpp
     services/ota_service.cpp
     services/radio_favorites.cpp
+    services/signaling_service.cpp
     services/smb_vfs.cpp
     services/storage_service.cpp
     services/video_call.cpp
@@ -48,6 +49,7 @@ set(app_sources
     lib/nrl_audio_bridge.cpp
     lib/nrl_captive_dns.cpp
     lib/nrl_g711.cpp
+    lib/dtmf_codec.cpp
     lib/nrl_usb_console.cpp
     lib/nrl_wifi.cpp
     lib/wifi_config_portal.cpp
@@ -80,6 +82,7 @@ set(app_priv_requires
     esp_https_ota
     esp_http_server
     mbedtls
+    mdc1200
     esp_lcd
     esp_netif
     esp_ringbuf

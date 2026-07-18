@@ -21,6 +21,7 @@
 #include "driver/status_io.h"
 #include "services/aprs_service.h"
 #include "services/espnow_link.h"
+#include "services/signaling_service.h"
 
 #include <esp_log.h>
 #include <esp_system.h>
@@ -497,9 +498,9 @@ OpusVoiceDec *s_opus_dec = nullptr;
 int16_t s_opus_tx_stage[kOpusFrameSamples];
 size_t s_opus_tx_fill = 0u;
 
-static void sendOpusVoice16k(const int16_t *pcm16k, const size_t sample_count)
+static void sendOpusVoice16k(const int16_t *pcm16k, const size_t sample_count, const bool gated)
 {
-    if (!uplinkGateOpen()) {
+    if (gated && !uplinkGateOpen()) {
         s_opus_tx_fill = 0u; // drop the partial frame on squelch close
         return;
     }
@@ -542,6 +543,8 @@ static void uplinkSinkWrite(const uint8_t source_id,
                             const size_t sample_count,
                             void *)
 {
+    const bool signaling_tail = source_id == AUDIO_SRC_MDC_NRL ||
+                                source_id == AUDIO_SRC_DTMF_NRL;
     // A media stream (nanny/beacon) owns the uplink exclusively while
     // active: captured audio would garble the G.711 accumulator.
     if (s_media_uplink_active) {
@@ -582,7 +585,7 @@ static void uplinkSinkWrite(const uint8_t source_id,
     }
 
     if (s_voice_codec == 1u) {
-        sendOpusVoice16k(samples, sample_count);
+        sendOpusVoice16k(samples, sample_count, !signaling_tail);
         return;
     }
 
@@ -598,7 +601,11 @@ static void uplinkSinkWrite(const uint8_t source_id,
             pcm8k[i] = static_cast<int16_t>((a + b) / 2);
         }
         if (pairs > 0u) {
-            sendVoiceFrame(pcm8k, pairs);
+            if (signaling_tail) {
+                sendVoiceFrameInternal(pcm8k, pairs, false);
+            } else {
+                sendVoiceFrame(pcm8k, pairs);
+            }
         }
         offset += take;
     }
@@ -835,6 +842,9 @@ static void stopDownlinkPlayback(void)
         return;
     }
 
+    // NRL voice marks this flag through logIncomingVoicePacket(). ESP-NOW uses
+    // the same playback lifecycle but must not trigger the NRL speaker tail.
+    const bool was_nrl_voice = s_voice_stream_logged;
     AUDIO_ClearOutputQueue();
 
 #if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
@@ -866,6 +876,12 @@ static void stopDownlinkPlayback(void)
         s_tail_suppress_until_ms = now + tail_ms;
     } else {
         s_tail_suppress_until_ms = 0u;
+    }
+
+    // Append configured MDC1200/DTMF audio only after the network voice queue
+    // has ended, so the burst is the radio-side tail rather than mixed voice.
+    if (was_nrl_voice) {
+        SIGNALING_OnNetworkVoiceEnded();
     }
 }
 
@@ -1031,6 +1047,10 @@ constexpr size_t kSerialAtLineMax = 288u;
 char s_serial_at_line[kSerialAtLineMax];
 size_t s_serial_at_len = 0u;
 uint8_t s_serial_at_payload[kSerialAtLineMax + 1u];
+// Serial AT commands execute inside nrl_main_loop. Keep the 1 KB reply object
+// off that task's 6 KB stack; the remote AT path has its own result object on
+// the separate 16 KB bridge task.
+NrlAtCommandResult s_serial_at_result = {};
 
 // Execute one AT command line typed on the USB debug serial and print the
 // reply back to the same serial port.
@@ -1057,21 +1077,21 @@ static void processSerialAtLine(char *line)
     s_serial_at_payload[0] = 0x01u;
     memcpy(s_serial_at_payload + 1u, line, len);
 
-    NrlAtCommandResult at_result = {};
-    NRL_AT_HandlePayload(s_serial_at_payload, len + 1u, NRL_AT_SOURCE_SERIAL, &at_result);
+    NRL_AT_HandlePayload(s_serial_at_payload, len + 1u, NRL_AT_SOURCE_SERIAL, &s_serial_at_result);
 
-    if (at_result.should_reply && at_result.payload_size > 1u) {
+    if (s_serial_at_result.should_reply && s_serial_at_result.payload_size > 1u) {
         // Skip the 0x02 reply marker; the remainder is CRLF-delimited text.
-        NRL_USB_Console_Write(at_result.payload + 1u, at_result.payload_size - 1u);
+        NRL_USB_Console_Write(s_serial_at_result.payload + 1u,
+                              s_serial_at_result.payload_size - 1u);
     }
 
-    if (at_result.restart_wifi || at_result.restart_udp) {
+    if (s_serial_at_result.restart_wifi || s_serial_at_result.restart_udp) {
         ESP_LOGI(TAG,"[AT] applying config via serial: restart_wifi=%d restart_udp=%d\n",
-                      at_result.restart_wifi ? 1 : 0,
-                      at_result.restart_udp ? 1 : 0);
-        restartTransport(at_result.restart_wifi, at_result.restart_udp);
+                      s_serial_at_result.restart_wifi ? 1 : 0,
+                      s_serial_at_result.restart_udp ? 1 : 0);
+        restartTransport(s_serial_at_result.restart_wifi, s_serial_at_result.restart_udp);
     }
-    if (at_result.reboot) {
+    if (s_serial_at_result.reboot) {
         scheduleReboot();
     }
 }
@@ -1106,6 +1126,7 @@ static void pollSerialAtConsole(void)
 
 static void bridgeTask(void *)
 {
+    bool previous_sql = STATUS_IO_IsSqlActive();
     while (true) {
         if (!ensureNetworkAndUdp()) {
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1249,6 +1270,13 @@ static void bridgeTask(void *)
         }
 
         STATUS_IO_Poll();
+        const bool current_sql = STATUS_IO_IsSqlActive();
+        if (previous_sql && !current_sql && ESPNOW_LINK_GetPttMode() == 0u) {
+            // The captured voice gate just closed: queue the signaling burst
+            // ungated so it follows the final NRL voice packet.
+            SIGNALING_OnLocalPttReleased();
+        }
+        previous_sql = current_sql;
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
