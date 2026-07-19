@@ -9,6 +9,8 @@
 #include "driver/es8311.h"
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
+#include "driver/gps_serial.h"
+#include "driver/serial_port_config.h"
 #include "services/ai_assistant.h"
 #include "services/aprs_service.h"
 #include "services/display_notice.h"
@@ -228,6 +230,9 @@ static bool appendSupportedAtList(uint8_t *payload,
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     char sci_config[32] = "9600,8,N,1";
+    char uart1_io[24] = "0,0";
+    char uart2_io[24] = "0,0";
+    char uart2_config[32] = "9600,8,N,1";
     char wifi_pass[32] = "(empty)";
     char hp_drive[4] = "OFF";
     char ptt_mode[8] = "NRL";
@@ -247,6 +252,14 @@ static bool appendSupportedAtList(uint8_t *payload,
         ipText(currentWifiIpValue(config->wifi_gateway, nrlWifiStaGateway(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
         ipText(currentWifiIpValue(config->wifi_dns, nrlWifiStaDns(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
     }
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    snprintf(uart1_io, sizeof(uart1_io), "%d,%d", serial.uart1_rx_pin, serial.uart1_tx_pin);
+    snprintf(uart2_io, sizeof(uart2_io), "%d,%d", serial.uart2_rx_pin, serial.uart2_tx_pin);
+    snprintf(uart2_config, sizeof(uart2_config), "%lu,%u,%c,%u",
+             static_cast<unsigned long>(serial.uart2_baud),
+             static_cast<unsigned>(serial.uart2_data_bits), serial.uart2_parity,
+             static_cast<unsigned>(serial.uart2_stop_bits));
     return appendKeyValueLine(payload, capacity, used, "WIFI_SSID", (config != nullptr) ? config->wifi_ssid : "") &&
            appendKeyValueLine(payload, capacity, used, "WIFI_PASS", wifi_pass) &&
            appendUnsignedLine(payload, capacity, used, "WIFI_DHCP", (config != nullptr && config->wifi_dhcp_enabled) ? 1u : 0u) &&
@@ -255,6 +268,13 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendKeyValueLine(payload, capacity, used, "WIFI_GW", wifi_gw) &&
            appendKeyValueLine(payload, capacity, used, "WIFI_DNS", wifi_dns) &&
            appendKeyValueLine(payload, capacity, used, "SCI", sci_config) &&
+           appendKeyValueLine(payload, capacity, used, "UART0", "RESERVED(LOG/AT)") &&
+           appendKeyValueLine(payload, capacity, used, "UART1", sci_config) &&
+           appendKeyValueLine(payload, capacity, used, "UART1_ENABLE", serial.uart1_enabled ? "ON" : "OFF") &&
+           appendKeyValueLine(payload, capacity, used, "UART1_IO", uart1_io) &&
+           appendKeyValueLine(payload, capacity, used, "UART2", uart2_config) &&
+           appendKeyValueLine(payload, capacity, used, "UART2_ENABLE", serial.uart2_enabled ? "ON" : "OFF") &&
+           appendKeyValueLine(payload, capacity, used, "UART2_IO", uart2_io) &&
            appendUnsignedLine(payload, capacity, used, "CH", (config != nullptr) ? config->channel : 0u) &&
            appendKeyValueLine(payload, capacity, used, "D_IP", (config != nullptr) ? config->server_host : "") &&
            appendUnsignedLine(payload, capacity, used, "D_PORT", (config != nullptr) ? config->server_port : 0u) &&
@@ -447,6 +467,30 @@ static bool parseSciConfigValue(const char *text,
     *out_data_bits = static_cast<uint8_t>(data_bits);
     *out_parity = parity;
     *out_stop_bits = static_cast<uint8_t>(stop_bits);
+    return true;
+}
+
+static bool parseIoConfigValue(const char *text, int *out_rx, int *out_tx)
+{
+    if (text == nullptr || out_rx == nullptr || out_tx == nullptr) return false;
+    char buffer[48];
+    const size_t text_len = strlen(text);
+    if (text_len == 0u || text_len >= sizeof(buffer)) return false;
+    memcpy(buffer, text, text_len + 1u);
+    char *comma = strchr(buffer, ',');
+    if (comma == nullptr || strchr(comma + 1, ',') != nullptr) return false;
+    *comma = '\0';
+    char *rx_text = buffer;
+    char *tx_text = comma + 1;
+    trimText(rx_text);
+    trimText(tx_text);
+    unsigned long rx = 0u, tx = 0u;
+    if (!parseUnsignedValue(rx_text, &rx) || !parseUnsignedValue(tx_text, &tx) ||
+        rx > 127u || tx > 127u) {
+        return false;
+    }
+    *out_rx = static_cast<int>(rx);
+    *out_tx = static_cast<int>(tx);
     return true;
 }
 
@@ -2187,14 +2231,134 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     }
 #endif
 
-    if (stringEqualsIgnoreCase(command.command, "SCI")) {
+    if (stringEqualsIgnoreCase(command.command, "UART0")) {
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           is_query ? "UART0" : "ERR",
+                           is_query ? "RESERVED(LOG/AT)" : "UART0_RESERVED");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "UART1_ENABLE") ||
+        stringEqualsIgnoreCase(command.command, "UART2_ENABLE")) {
+        const bool uart1 = stringEqualsIgnoreCase(command.command, "UART1_ENABLE");
+        const char *reply_key = uart1 ? "UART1_ENABLE" : "UART2_ENABLE";
+        SerialPortConfig old_config{};
+        SERIAL_PORT_CONFIG_Get(&old_config);
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               reply_key,
+                               (uart1 ? old_config.uart1_enabled : old_config.uart2_enabled)
+                                   ? "ON" : "OFF");
+            return;
+        }
+        bool enabled = false;
+        SerialPortConfig updated = old_config;
+        bool ok = parseBoolValue(command.value, &enabled);
+        if (ok) {
+            if (uart1) updated.uart1_enabled = enabled;
+            else updated.uart2_enabled = enabled;
+        }
+        ok = ok && SERIAL_PORT_CONFIG_Set(&updated, true) &&
+             (uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+        if (!ok) {
+            (void)SERIAL_PORT_CONFIG_Set(&old_config, true);
+            (void)(uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", reply_key);
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           reply_key, enabled ? "ON" : "OFF");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "UART1_IO") ||
+        stringEqualsIgnoreCase(command.command, "UART2_IO")) {
+        const bool uart1 = stringEqualsIgnoreCase(command.command, "UART1_IO");
+        SerialPortConfig old_config{};
+        SERIAL_PORT_CONFIG_Get(&old_config);
+        if (is_query) {
+            char text[24];
+            snprintf(text, sizeof(text), "%d,%d",
+                     uart1 ? old_config.uart1_rx_pin : old_config.uart2_rx_pin,
+                     uart1 ? old_config.uart1_tx_pin : old_config.uart2_tx_pin);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               uart1 ? "UART1_IO" : "UART2_IO", text);
+            return;
+        }
+        int rx = -1, tx = -1;
+        SerialPortConfig updated = old_config;
+        bool ok = parseIoConfigValue(command.value, &rx, &tx);
+        if (ok && uart1) {
+            updated.uart1_rx_pin = rx;
+            updated.uart1_tx_pin = tx;
+        } else if (ok) {
+            updated.uart2_rx_pin = rx;
+            updated.uart2_tx_pin = tx;
+        }
+        ok = ok && SERIAL_PORT_CONFIG_Set(&updated, true) &&
+             (uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+        if (!ok) {
+            (void)SERIAL_PORT_CONFIG_Set(&old_config, true);
+            (void)(uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", uart1 ? "UART1_IO" : "UART2_IO");
+            return;
+        }
+        char text[24];
+        snprintf(text, sizeof(text), "%d,%d", rx, tx);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           uart1 ? "UART1_IO" : "UART2_IO", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "UART2")) {
+        SerialPortConfig old_config{};
+        SERIAL_PORT_CONFIG_Get(&old_config);
+        char uart_config[32];
+        if (is_query) {
+            snprintf(uart_config, sizeof(uart_config), "%lu,%u,%c,%u",
+                     static_cast<unsigned long>(old_config.uart2_baud),
+                     static_cast<unsigned>(old_config.uart2_data_bits),
+                     old_config.uart2_parity,
+                     static_cast<unsigned>(old_config.uart2_stop_bits));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "UART2", uart_config);
+            return;
+        }
+        SerialPortConfig updated = old_config;
+        bool ok = parseSciConfigValue(command.value, &updated.uart2_baud,
+                                      &updated.uart2_data_bits, &updated.uart2_parity,
+                                      &updated.uart2_stop_bits) &&
+                  SERIAL_PORT_CONFIG_Set(&updated, true) && GPS_SERIAL_ReloadConfig();
+        if (!ok) {
+            (void)SERIAL_PORT_CONFIG_Set(&old_config, true);
+            (void)GPS_SERIAL_ReloadConfig();
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", "UART2");
+            return;
+        }
+        snprintf(uart_config, sizeof(uart_config), "%lu,%u,%c,%u",
+                 static_cast<unsigned long>(updated.uart2_baud),
+                 static_cast<unsigned>(updated.uart2_data_bits), updated.uart2_parity,
+                 static_cast<unsigned>(updated.uart2_stop_bits));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "UART2", uart_config);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "SCI") ||
+        stringEqualsIgnoreCase(command.command, "UART1")) {
+        const bool sci_alias = stringEqualsIgnoreCase(command.command, "SCI");
+        const char *reply_key = sci_alias ? "SCI" : "UART1";
         char sci_config[32];
         if (is_query) {
             formatSciConfig(config->sci, sci_config, sizeof(sci_config));
-            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SCI", sci_config);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, reply_key, sci_config);
             return;
         }
 
+        const SciSerialConfig old_sci = config->sci;
         uint32_t baud = 0u;
         uint8_t data_bits = 0u;
         char parity = '\0';
@@ -2202,13 +2366,17 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         if (!parseSciConfigValue(command.value, &baud, &data_bits, &parity, &stop_bits) ||
             !EXTERNAL_RADIO_SetSciConfig(baud, data_bits, parity, stop_bits, true) ||
             !SCI_SERIAL_ApplyConfig(baud, data_bits, parity, stop_bits)) {
-            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "SCI");
+            (void)EXTERNAL_RADIO_SetSciConfig(old_sci.baud, old_sci.data_bits,
+                                              old_sci.parity, old_sci.stop_bits, true);
+            (void)SCI_SERIAL_ApplyConfig(old_sci.baud, old_sci.data_bits,
+                                         old_sci.parity, old_sci.stop_bits);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", reply_key);
             return;
         }
 
         const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
         formatSciConfig(updated->sci, sci_config, sizeof(sci_config));
-        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SCI", sci_config);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, reply_key, sci_config);
         return;
     }
 

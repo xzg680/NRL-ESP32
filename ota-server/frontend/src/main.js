@@ -53,12 +53,12 @@ const boards = [
     zh: {
       name: "S31 Korvo",
       tagline: "ESP32-S31 全功能开发板",
-      features: ["ES8389 音频、800×480 RGB 电容触摸屏与 LVGL 界面", "ADC 按键：音量、模式和 PTT；板载 RGB 状态灯", "TF 卡、USB-OTG 主机、本地音乐与网络收音机", "蓝牙 HFP 耳机 / A2DP、ESP-NOW 脱网对讲、AI 语音", "兼容 DVP 摄像头的 NRL 视频通话；当前未启用外接 SCI"],
+      features: ["ES8389 音频、800×480 RGB 电容触摸屏与 LVGL 界面", "ADC 按键：音量、模式和 PTT；板载 RGB 状态灯", "TF 卡、USB-OTG 主机、本地音乐与网络收音机", "蓝牙 HFP 耳机 / A2DP、ESP-NOW 脱网对讲、AI 语音", "UART1/SCI 与 UART2/GPS 可由 Web/AT 配置，默认关闭并与 DVP 摄像头互斥"],
     },
     en: {
       name: "S31 Korvo",
       tagline: "ESP32-S31 full-featured dev board",
-      features: ["ES8389 audio, 800×480 RGB capacitive touch display, and LVGL UI", "ADC volume/mode/PTT buttons and onboard RGB status LED", "TF card, USB-OTG host, local music, and Internet radio", "Bluetooth HFP headset / A2DP, ESP-NOW intercom, and AI voice", "NRL video calls with compatible DVP cameras; external SCI is disabled"],
+      features: ["ES8389 audio, 800×480 RGB capacitive touch display, and LVGL UI", "ADC volume/mode/PTT buttons and onboard RGB status LED", "TF card, USB-OTG host, local music, and Internet radio", "Bluetooth HFP headset / A2DP, ESP-NOW intercom, and AI voice", "Web/AT configurable UART1/SCI and UART2/GPS; off by default and mutually exclusive with DVP cameras"],
     },
   },
   {
@@ -99,7 +99,7 @@ const featureMatrix = [
   { zh: "AEC、降噪、高通、尾音抑制与编解码器增益", en: "AEC, noise reduction, high-pass, tail suppression, and codec gain", all: "yes" },
   { zh: "电台 PTT / SQL 控制", en: "Radio PTT / squelch control", gezipai: "yes", bh4tdv: "yes", s31_korvo: "partial", s31_function_coreboard: "partial" },
   { zh: "三位频道选择（0–7）", en: "Three-bit channel selection (0–7)", gezipai: "no", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "no" },
-  { zh: "SCI 串口透明传输", en: "SCI serial passthrough", gezipai: "yes", bh4tdv: "yes", s31_korvo: "no", s31_function_coreboard: "yes" },
+  { zh: "SCI 串口透明传输", en: "SCI serial passthrough", gezipai: "yes", bh4tdv: "yes", s31_korvo: "partial", s31_function_coreboard: "yes" },
   { zh: "状态灯", en: "Status indicator", all: "yes" },
   { zh: "彩色显示屏", en: "Color display", gezipai: "yes", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },
   { zh: "触摸界面", en: "Touch interface", gezipai: "no", bh4tdv: "no", s31_korvo: "yes", s31_function_coreboard: "no" },

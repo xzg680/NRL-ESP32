@@ -2,6 +2,7 @@
 
 #include "board_pins.h"
 #include "external_radio.h"
+#include "serial_port_config.h"
 
 #include <driver/uart.h>
 #include <esp_log.h>
@@ -12,10 +13,9 @@ static const char *TAG = "SCI";
 
 namespace {
 
-// Both boards drive the NRL transparent-passthrough link from UART1; only the
-// GPIO mapping (NRL_PIN_SCI_RX/TX in board_pins.h) differs. Console logs are
-// routed via USB-Serial-JTAG on both boards (sdkconfig:
-// CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y), so UART0 is left free for other use.
+// SCI is always UART1. UART0 remains reserved for the system log/AT console;
+// UART2 is the independent GPS/NMEA port. RX/TX pins come from the persisted
+// serial-port config, whose board defaults live in board_pins.h.
 constexpr uart_port_t kSciPort = UART_NUM_1;
 constexpr size_t kSciRxBufBytes = 512u;
 
@@ -25,6 +25,13 @@ uint32_t s_sci_baud = 0u;
 uint8_t s_sci_data_bits = 0u;
 char s_sci_parity = '\0';
 uint8_t s_sci_stop_bits = 0u;
+
+static void stopDriver()
+{
+    if (s_sci_driver_installed) uart_driver_delete(kSciPort);
+    s_sci_driver_installed = false;
+    s_sci_ready = false;
+}
 
 static bool buildUartConfig(uint32_t baud, uint8_t data_bits, char parity,
                             uint8_t stop_bits, uart_config_t &out)
@@ -66,6 +73,12 @@ extern "C" bool SCI_SERIAL_Init(void)
     return true;
 #endif
 
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    if (!serial.uart1_enabled) {
+        stopDriver();
+        return true;
+    }
     if (s_sci_ready) {
         return true;
     }
@@ -99,6 +112,13 @@ extern "C" bool SCI_SERIAL_ApplyConfig(const uint32_t baud,
         return false;
     }
 
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    if (!serial.uart1_enabled) {
+        stopDriver();
+        return true;
+    }
+
     if (s_sci_ready &&
         s_sci_baud == baud &&
         s_sci_data_bits == data_bits &&
@@ -116,9 +136,7 @@ extern "C" bool SCI_SERIAL_ApplyConfig(const uint32_t baud,
         // Reinstalling lets us change parity/stop-bits/data-bits cleanly;
         // uart_param_config alone is sufficient for baud-only changes but a
         // full reinstall keeps the code path uniform.
-        uart_driver_delete(kSciPort);
-        s_sci_driver_installed = false;
-        s_sci_ready = false;
+        stopDriver();
     }
 
     if (uart_driver_install(kSciPort, kSciRxBufBytes, /*tx_buf=*/0,
@@ -134,7 +152,7 @@ extern "C" bool SCI_SERIAL_ApplyConfig(const uint32_t baud,
         return false;
     }
 
-    if (uart_set_pin(kSciPort, NRL_PIN_SCI_TX, NRL_PIN_SCI_RX,
+    if (uart_set_pin(kSciPort, serial.uart1_tx_pin, serial.uart1_rx_pin,
                      UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
         uart_driver_delete(kSciPort);
         s_sci_driver_installed = false;
@@ -151,9 +169,18 @@ extern "C" bool SCI_SERIAL_ApplyConfig(const uint32_t baud,
              static_cast<unsigned>(data_bits),
              parity,
              static_cast<unsigned>(stop_bits),
-             NRL_PIN_SCI_RX,
-             NRL_PIN_SCI_TX);
+             serial.uart1_rx_pin,
+             serial.uart1_tx_pin);
     return true;
+}
+
+extern "C" bool SCI_SERIAL_ReloadPins(void)
+{
+#if defined(NRL_HAS_SCI_SERIAL) && !NRL_HAS_SCI_SERIAL
+    return true;
+#endif
+    stopDriver();
+    return SCI_SERIAL_Init();
 }
 
 extern "C" int SCI_SERIAL_Available(void)
@@ -162,7 +189,9 @@ extern "C" int SCI_SERIAL_Available(void)
     return 0;
 #endif
 
-    if (!SCI_SERIAL_Init()) {
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    if (!serial.uart1_enabled || !SCI_SERIAL_Init()) {
         return 0;
     }
     size_t buffered = 0;
@@ -180,7 +209,10 @@ extern "C" size_t SCI_SERIAL_Read(uint8_t *buffer, const size_t buffer_size)
     return 0u;
 #endif
 
-    if (buffer == nullptr || buffer_size == 0u || !SCI_SERIAL_Init()) {
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    if (!serial.uart1_enabled || buffer == nullptr || buffer_size == 0u ||
+        !SCI_SERIAL_Init()) {
         return 0u;
     }
 
@@ -198,7 +230,10 @@ extern "C" size_t SCI_SERIAL_Write(const uint8_t *data, const size_t data_size)
     return 0u;
 #endif
 
-    if (data == nullptr || data_size == 0u || !SCI_SERIAL_Init()) {
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    if (!serial.uart1_enabled || data == nullptr || data_size == 0u ||
+        !SCI_SERIAL_Init()) {
         return 0u;
     }
     const int wrote = uart_write_bytes(kSciPort, reinterpret_cast<const char *>(data), data_size);

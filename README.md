@@ -4,7 +4,7 @@
 
 HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
-当前固件版本：`0.7.9`
+当前固件版本：`0.8.0`
 
 本项目是以 ESP32-S31 为主要目标平台、兼容 ESP32-S3 板卡的 NRL 网络语音电台桥接固件，用于把电台音频、PTT、SQL、频道选择、串口透明传输和网络配置集中到一个嵌入式应用中。不同板卡分别适配 ES8311 或 ES8389 等音频编解码器，当前工程覆盖 Moto3188/NRL 硬件及 ESP32-S31 开发板。
 
@@ -16,7 +16,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 | --- | --- | --- | --- |
 | `gezipai` | 格子派，ESP32-S3 | ES7210 麦克风 ADC + ES8311 DAC、240×240 ST7789 彩屏、电池电压检测、音量+/音量-/PTT 三按键、三色状态灯、SCI 串口 | 带小屏幕和实体 PTT 的便携式网络语音终端 |
 | `bh4tdv` | BH4TDV NRL-3188 / Moto3188 控制板，ESP32-S3 | ES8311 全双工音频、PTT/SQL/三色状态灯、三位频道选择（0–7）、SCI 串口；无板载屏幕 | 连接 3188 电台的网络桥接与频道控制 |
-| `s31_korvo` | ESP32-S31-Korvo-1，ESP32-S31 | ES8389 音频、800×480 RGB 触摸屏、ADC 按键（音量、模式、PTT）、TF 卡、USB-OTG 主机、板载 RGB 状态灯 | 带触控界面的多媒体/网络语音终端；当前未启用外接 SCI 串口 |
+| `s31_korvo` | ESP32-S31-Korvo-1，ESP32-S31 | ES8389 音频、800×480 RGB 触摸屏、ADC 按键（音量、模式、PTT）、TF 卡、USB-OTG 主机、板载 RGB 状态灯 | 带触控界面的多媒体/网络语音终端；UART1/SCI 与 UART2/GPS 默认关闭，可通过 Web/AT 启用 |
 | `s31_function_coreboard` | ESP32-S31-Function-CoreBoard-1，ESP32-S31 | ES8311 音频、YT8531 千兆以太网、USB-A 主机、WS2812 RGB 状态灯、SCI 串口；无屏幕、无实体音量/PTT 键 | 需要有线网络或 USB 存储的功能核心板方案 |
 
 ### 板卡实物与界面
@@ -38,7 +38,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
 左图为 `s31_korvo` 使用的 ESP32-S31-Korvo-1，提供屏幕、触摸、TF 卡、USB 主机及音频外设；右图为 `s31_function_coreboard` 使用的 ESP32-S31-Function-CoreBoard-1，提供 RJ45 千兆以太网、USB-A 主机、板载音频和 RGB 状态灯。
 
-> 注意：网页 USB 刷机仅支持 ESP32-S3 的 `gezipai` 和 `bh4tdv`；两块 ESP32-S31 板请使用串口烧录。Korvo 的 SCI 引脚仍为预留映射，固件当前关闭 SCI 串口功能。
+> 注意：网页 USB 刷机仅支持 ESP32-S3 的 `gezipai` 和 `bh4tdv`；两块 ESP32-S31 板请使用串口烧录。Korvo 的 UART1/SCI 与 UART2/GPS 使用 DVP 摄像头接口 GPIO，默认关闭，可通过 Web/AT 启用；启用后不能同时使用并口摄像头。
 
 ## 扩展功能与适用范围
 

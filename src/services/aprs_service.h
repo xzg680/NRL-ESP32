@@ -3,8 +3,8 @@
 
 // APRS transceiver service (all four boards):
 //
-//  - Position beacons from a GPS on the SCI/COM port (NMEA RMC/GGA, tee'd from
-//    the transparent-serial uplink), falling back to a configured default
+//  - Position beacons from a GPS on dedicated UART2 (NMEA RMC/GGA), falling
+//    back to a configured default
 //    lat/lon while the GPS is absent or has no fix.
 //  - Network side: APRS-IS TCP client (configurable server, default
 //    asia.aprs2.net:14580). Beacons go up as TNC2 lines; packets received from the
@@ -96,9 +96,6 @@ void APRS_SERVICE_GetConfig(AprsConfig *out);
 
 // Queue a beacon immediately (both directions as enabled).
 bool APRS_SERVICE_SendBeaconNow(void);
-
-// GPS/NMEA byte tee from the SCI serial poll (nrl_audio_bridge).
-void APRS_SERVICE_FeedSciBytes(const uint8_t *data, size_t size);
 
 // Own current position: GPS fix when fresh, else the configured default.
 // Returns true when the position came from a live GPS fix.

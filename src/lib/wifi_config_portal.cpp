@@ -10,6 +10,9 @@
 
 #include "../app/driver/es8311.h"
 #include "../app/driver/external_radio.h"
+#include "../app/driver/gps_serial.h"
+#include "../app/driver/sci_serial.h"
+#include "../app/driver/serial_port_config.h"
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
 #include "../services/ai_assistant.h"
@@ -1301,6 +1304,114 @@ static esp_err_t handleSaveSignaling(httpd_req_t *req)
     }
     if (!ok) ESP_LOGE(TAG, "signaling config save via web failed");
     sendSignalingSavedJson(ok);
+    return ESP_OK;
+}
+
+static void sendSerialSavedJson(const bool ok)
+{
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    const ExternalRadioConfig *radio = EXTERNAL_RADIO_GetConfig();
+    char body[512];
+    snprintf(body, sizeof(body),
+             "{\"ok\":%s,\"fields\":{"
+             "\"uart1_enabled\":\"%u\",\"uart2_enabled\":\"%u\","
+             "\"uart1_rx_pin\":\"%d\",\"uart1_tx_pin\":\"%d\","
+             "\"uart1_baud\":\"%lu\",\"uart1_data_bits\":\"%u\","
+             "\"uart1_parity\":\"%c\",\"uart1_stop_bits\":\"%u\","
+             "\"uart2_rx_pin\":\"%d\",\"uart2_tx_pin\":\"%d\","
+             "\"uart2_baud\":\"%lu\",\"uart2_data_bits\":\"%u\","
+             "\"uart2_parity\":\"%c\",\"uart2_stop_bits\":\"%u\"}}",
+             ok ? "true" : "false",
+             serial.uart1_enabled ? 1u : 0u, serial.uart2_enabled ? 1u : 0u,
+             serial.uart1_rx_pin, serial.uart1_tx_pin,
+             static_cast<unsigned long>(radio != nullptr ? radio->sci.baud : 9600u),
+             static_cast<unsigned>(radio != nullptr ? radio->sci.data_bits : 8u),
+             radio != nullptr ? radio->sci.parity : 'N',
+             static_cast<unsigned>(radio != nullptr ? radio->sci.stop_bits : 1u),
+             serial.uart2_rx_pin, serial.uart2_tx_pin,
+             static_cast<unsigned long>(serial.uart2_baud),
+             static_cast<unsigned>(serial.uart2_data_bits), serial.uart2_parity,
+             static_cast<unsigned>(serial.uart2_stop_bits));
+    s_server.send(ok ? 200 : 400, "application/json; charset=utf-8", body);
+}
+
+static esp_err_t handleSaveSerial(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+
+    SerialPortConfig before{};
+    SERIAL_PORT_CONFIG_Get(&before);
+    SerialPortConfig updated = before;
+    const ExternalRadioConfig *radio = EXTERNAL_RADIO_GetConfig();
+    const SciSerialConfig old_sci = radio != nullptr ? radio->sci : SciSerialConfig{9600u, 8u, 'N', 1u};
+    SciSerialConfig new_sci = old_sci;
+
+    if (s_server.hasArg("uart1_enabled_present")) {
+        updated.uart1_enabled = s_server.hasArg("uart1_enabled");
+    }
+    if (s_server.hasArg("uart2_enabled_present")) {
+        updated.uart2_enabled = s_server.hasArg("uart2_enabled");
+    }
+
+    auto parseNumber = [](const std::string &text, unsigned long max, unsigned long *out) {
+        return parseUIntArg(text, out) && *out <= max;
+    };
+    unsigned long value = 0u;
+    bool ok =
+        parseNumber(s_server.arg("uart1_rx_pin"), 127u, &value);
+    if (ok) updated.uart1_rx_pin = static_cast<int>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart1_tx_pin"), 127u, &value);
+    if (ok) updated.uart1_tx_pin = static_cast<int>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart1_baud"), 921600u, &value) && value >= 300u;
+    if (ok) new_sci.baud = static_cast<uint32_t>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart1_data_bits"), 8u, &value) && value >= 5u;
+    if (ok) new_sci.data_bits = static_cast<uint8_t>(value);
+    if (ok) {
+        const std::string parity = s_server.arg("uart1_parity");
+        ok = parity.size() == 1u;
+        if (ok) new_sci.parity = static_cast<char>(toupper(static_cast<unsigned char>(parity[0])));
+    }
+    if (ok) ok = parseNumber(s_server.arg("uart1_stop_bits"), 2u, &value) && value >= 1u;
+    if (ok) new_sci.stop_bits = static_cast<uint8_t>(value);
+
+    if (ok) ok = parseNumber(s_server.arg("uart2_rx_pin"), 127u, &value);
+    if (ok) updated.uart2_rx_pin = static_cast<int>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart2_tx_pin"), 127u, &value);
+    if (ok) updated.uart2_tx_pin = static_cast<int>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart2_baud"), 921600u, &value) && value >= 300u;
+    if (ok) updated.uart2_baud = static_cast<uint32_t>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart2_data_bits"), 8u, &value) && value >= 5u;
+    if (ok) updated.uart2_data_bits = static_cast<uint8_t>(value);
+    if (ok) {
+        const std::string parity = s_server.arg("uart2_parity");
+        ok = parity.size() == 1u;
+        if (ok) updated.uart2_parity = static_cast<char>(toupper(static_cast<unsigned char>(parity[0])));
+    }
+    if (ok) ok = parseNumber(s_server.arg("uart2_stop_bits"), 2u, &value) && value >= 1u;
+    if (ok) updated.uart2_stop_bits = static_cast<uint8_t>(value);
+
+    if (ok) ok = SERIAL_PORT_CONFIG_Validate(&updated);
+    if (ok) ok = EXTERNAL_RADIO_SetSciConfig(new_sci.baud, new_sci.data_bits,
+                                               new_sci.parity, new_sci.stop_bits, false);
+    if (ok) ok = SERIAL_PORT_CONFIG_Set(&updated, true);
+    if (ok) ok = EXTERNAL_RADIO_SaveConfig();
+    // Reload UART1 unconditionally because its GPIOs may have changed even
+    // when baud/data/parity/stop are unchanged.
+    if (ok) ok = SCI_SERIAL_ReloadPins() && GPS_SERIAL_ReloadConfig();
+    if (!ok) {
+        (void)EXTERNAL_RADIO_SetSciConfig(old_sci.baud, old_sci.data_bits,
+                                          old_sci.parity, old_sci.stop_bits, false);
+        (void)EXTERNAL_RADIO_SaveConfig();
+        (void)SERIAL_PORT_CONFIG_Set(&before, true);
+        (void)SCI_SERIAL_ReloadPins();
+        (void)GPS_SERIAL_ReloadConfig();
+        ESP_LOGE(TAG, "serial config save via web failed (invalid/conflicting GPIO or UART params)");
+    }
+    sendSerialSavedJson(ok);
     return ESP_OK;
 }
 
@@ -2695,6 +2806,7 @@ static void ensureServerRunning()
         { "/aprs/stations",        HTTP_GET,  handleAprsStations },
         { "/signaling",            HTTP_GET,  handleSignalingPage },
         { "/save_signaling",       HTTP_POST, handleSaveSignaling },
+        { "/save_serial",          HTTP_POST, handleSaveSerial },
         { "/update",               HTTP_GET,  handleUpdatePage },
         { "/update",               HTTP_POST, handleUpdate },
         { "/ota/status",           HTTP_GET,  handleOtaStatus },

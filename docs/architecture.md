@@ -15,7 +15,7 @@
 5. 蓝牙耳机通话 (HFP, 已有基础)
 6. AI 助手
 7. ESP-NOW (脱网近距离语音)
-8. APRS 收发 (四块板): SCI/COM 口 GPS (NMEA) 位置信标 → APRS-IS 网络
+8. APRS 收发 (四块板): 独立 UART2 GPS (NMEA) 位置信标 → APRS-IS 网络
    (可配服务器, 默认 asia.aprs2.net:14580, passcode 自动计算; 无 GPS 时用配置的
    默认经纬度) 和/或 Bell 202 AFSK 经扬声器→电台发射 (VOX 起振);
    麦克风侧解调电台收到的 APRS 音频, 解码后转发 APRS-IS (qAR iGate 方向)

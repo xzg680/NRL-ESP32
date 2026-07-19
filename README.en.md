@@ -2,7 +2,7 @@
 
 [Chinese manual](README.md) · HTML: [Chinese](README.html) / [English](README.en.html)
 
-Current firmware version: `0.7.9`
+Current firmware version: `0.8.0`
 
 This project is an NRL network-radio bridge firmware primarily targeting ESP32-S31, while retaining support for ESP32-S3 boards. It brings radio audio, PTT, SQL, channel selection, SCI serial passthrough, and network configuration into one embedded application. Board targets use the appropriate audio codec, including ES8311 or ES8389; the project covers Moto3188/NRL hardware and ESP32-S31 development boards.
 
@@ -14,7 +14,7 @@ Every target shares the NRL network-voice stack, Wi-Fi provisioning portal, remo
 | --- | --- | --- | --- |
 | `gezipai` | Gezipai, ESP32-S3 | ES7210 microphone ADC + ES8311 DAC, 240×240 ST7789 colour display, battery-voltage sensing, volume up/down/PTT buttons, three status LEDs, SCI serial | Portable network-voice terminal with a small display and physical PTT |
 | `bh4tdv` | BH4TDV NRL-3188 / Moto3188 controller, ESP32-S3 | ES8311 full-duplex audio, PTT/SQL/three status LEDs, three-bit channel select (0–7), SCI serial; no on-board display | Network bridge and channel controller for a 3188 radio |
-| `s31_korvo` | ESP32-S31-Korvo-1, ESP32-S31 | ES8389 audio, 800×480 RGB touch display, ADC buttons (volume, mode, PTT), TF card, USB-OTG host, on-board RGB status LED | Touch-based multimedia and network-voice terminal; external SCI serial is currently disabled |
+| `s31_korvo` | ESP32-S31-Korvo-1, ESP32-S31 | ES8389 audio, 800×480 RGB touch display, ADC buttons (volume, mode, PTT), TF card, USB-OTG host, on-board RGB status LED | Touch-based multimedia and network-voice terminal; UART1/SCI and UART2/GPS default to off and can be enabled through Web/AT |
 | `s31_function_coreboard` | ESP32-S31-Function-CoreBoard-1, ESP32-S31 | ES8311 audio, YT8531 Gigabit Ethernet, USB-A host, WS2812 RGB status LED, SCI serial; no display or physical volume/PTT buttons | Function-core design requiring wired networking or USB storage |
 
 ### Board Photos and UI
@@ -36,7 +36,7 @@ From left to right: the Gezipai ESP32-S3 terminal, BH4TDV NRL-3188 controller, a
 
 The left image is the ESP32-S31-Korvo-1 used by `s31_korvo`, with display, touch, TF-card, USB-host, and audio peripherals. The right image is the ESP32-S31-Function-CoreBoard-1 used by `s31_function_coreboard`, with RJ45 Gigabit Ethernet, USB-A host, on-board audio, and an RGB status LED.
 
-> USB web flashing is available only for the ESP32-S3 targets, `gezipai` and `bh4tdv`. Flash the two ESP32-S31 boards over serial. The Korvo SCI pins are still provisional and SCI serial is disabled in the current firmware.
+> USB web flashing is available only for the ESP32-S3 targets, `gezipai` and `bh4tdv`. Flash the two ESP32-S31 boards over serial. Korvo UART1/SCI and UART2/GPS use DVP-camera GPIOs and default to off; they can be enabled through Web/AT, but cannot coexist with a parallel camera.
 
 ## Extended Features and Availability
 

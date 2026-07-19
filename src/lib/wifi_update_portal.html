@@ -32,6 +32,7 @@
       <a href="/audio" data-i18n="audioSettings">Audio Settings</a>
       <a href="/media" data-i18n="mediaConfig">Media / Nanny</a>
       <a href="/aprs" data-i18n="aprsConfig">APRS</a>
+      <a href="/signaling" data-i18n="signalingConfig">Signaling / CTCSS</a>
       <a class="active" href="/update" data-i18n="firmwareUpdate">Firmware Update</a>
     </nav>
 
@@ -39,12 +40,12 @@
     <p class="notice" data-i18n="otaNotice">Select a firmware.bin file from support or from a trusted release. The device will reboot after a successful update.</p>
 
     <section class="panel release-notes">
-      <h2 data-i18n="aprsReleaseTitle">APRS feature updates</h2>
+      <h2 data-i18n="releaseTitle">0.8.0 feature updates</h2>
       <ul>
-        <li data-i18n="aprsReleaseFeature">Adds APRS-IS networking, radio AFSK transmit/receive, and a stations-heard page.</li>
-        <li data-i18n="aprsReleaseCoords">Uses WGS-84 APRS coordinates in ddmm.mmmm / dddmm.mmmm format; the N/E suffix is added automatically.</li>
-        <li data-i18n="aprsReleaseDefaults">Defaults to asia.aprs2.net, the TCP/IP symbol, and position 3153.3100N / 11848.8460E.</li>
-        <li data-i18n="aprsReleaseFixes">Fixes Gezipai Chinese APRS text and the extra status packet that made a 60-second interval appear as about 32 seconds.</li>
+        <li data-i18n="releaseSerial">Adds dedicated GPS UART2 plus persistent Web/AT configuration for UART1/2 GPIO and framing parameters, with conflict checks.</li>
+        <li data-i18n="releaseAprs">Fixes APRS-IS remark transmission and keeps GPS independent from SCI traffic.</li>
+        <li data-i18n="releaseSignaling">Adds S31 Korvo on-screen CTCSS, MDC1200 and DTMF controls and improves Web signaling navigation.</li>
+        <li data-i18n="releaseKorvo">Korvo UART1/SCI and UART2/GPS default to off and initialize only when enabled.</li>
       </ul>
     </section>
 

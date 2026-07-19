@@ -4,6 +4,7 @@
 #include "audio/audio_focus.h"
 #include "driver/board_pins.h"
 #include "driver/external_radio.h"
+#include "driver/gps_serial.h"
 #include "lib/aprs/aprs_ax25.h"
 #include "lib/aprs/aprs_modem.h"
 #include "lib/aprs/parse_aprs.h"
@@ -121,7 +122,7 @@ float s_gps_speed_kmh = -1.0f;
 uint16_t s_gps_course = 0;
 uint32_t s_gps_last_fix_ms = 0;
 
-// NMEA byte tee ring (producer: bridge task, consumer: aprs task)
+// NMEA ring, filled by the APRS task from dedicated UART2.
 constexpr size_t kNmeaRingSize = 1024u;
 uint8_t s_nmea_ring[kNmeaRingSize];
 volatile size_t s_nmea_head = 0;
@@ -408,6 +409,25 @@ void drainNmeaRing()
             s_nmea_line_len = 0;
         }
     }
+}
+
+void pollGpsSerial()
+{
+    uint8_t bytes[192];
+    for (;;) {
+        const size_t count = GPS_SERIAL_Read(bytes, sizeof(bytes));
+        if (count == 0u) break;
+        size_t head = s_nmea_head;
+        for (size_t i = 0; i < count; ++i) {
+            const size_t next = (head + 1u) % kNmeaRingSize;
+            if (next == s_nmea_tail) break;
+            s_nmea_ring[head] = bytes[i];
+            head = next;
+        }
+        s_nmea_head = head;
+        if (count < sizeof(bytes)) break;
+    }
+    drainNmeaRing();
 }
 
 bool ownPosition(double *lat, double *lon, double *alt_m)
@@ -774,10 +794,11 @@ void sendBeacon()
                                ? radio->server_host
                                : "unknown";
     const uint16_t nrl_port = (radio != nullptr) ? radio->server_port : 0u;
-    char net_comment[112];
-    snprintf(net_comment, sizeof(net_comment), "@udp://%s:%u,NRL-ESP32",
-             nrl_host, (unsigned)nrl_port);
-    char net_info[200];
+    char net_comment[160];
+    snprintf(net_comment, sizeof(net_comment), "@udp://%s:%u,NRL-ESP32%s%s",
+             nrl_host, (unsigned)nrl_port,
+             s_cfg.comment[0] != '\0' ? " " : "", s_cfg.comment);
+    char net_info[240];
     buildPositionInfo(net_info, sizeof(net_info), net_comment);
     unlockCfg();
 
@@ -1017,6 +1038,10 @@ void aprsTask(void *)
         const bool auto_interval = s_cfg.auto_interval;
         unlockCfg();
 
+        // UART2 is independent of SCI. Keep the latest fix warm even while
+        // APRS transmission is disabled so enabling can beacon immediately.
+        pollGpsSerial();
+
         if (!enabled) {
             if (s_is_socket >= 0) {
                 isDisconnect();
@@ -1024,8 +1049,6 @@ void aprsTask(void *)
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
-
-        drainNmeaRing();
 
         if (s_is_reconnect_requested) {
             s_is_reconnect_requested = false;
@@ -1099,6 +1122,9 @@ extern "C" void APRS_SERVICE_Init(void)
     s_cfg_mutex = xSemaphoreCreateMutex();
     s_station_mutex = xSemaphoreCreateMutex();
     loadConfig();
+    if (!GPS_SERIAL_Init()) {
+        ESP_LOGW(TAG, "GPS UART2 initialization failed; using default position");
+    }
 
     s_stations = static_cast<StationRec *>(
         heap_caps_calloc(kStationCount, sizeof(StationRec), MALLOC_CAP_SPIRAM));
@@ -1395,23 +1421,6 @@ extern "C" bool APRS_SERVICE_SendBeaconNow(void)
     }
     s_last_beacon_ms = 0;
     return true;
-}
-
-extern "C" void APRS_SERVICE_FeedSciBytes(const uint8_t *data, size_t size)
-{
-    if (data == nullptr || !s_cfg.enabled) {
-        return;
-    }
-    size_t head = s_nmea_head;
-    for (size_t i = 0; i < size; ++i) {
-        const size_t next = (head + 1) % kNmeaRingSize;
-        if (next == s_nmea_tail) {
-            break;
-        }
-        s_nmea_ring[head] = data[i];
-        head = next;
-    }
-    s_nmea_head = head;
 }
 
 extern "C" bool APRS_SERVICE_GetOwnPosition(double *lat, double *lon, double *alt_m)

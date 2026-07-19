@@ -7,6 +7,7 @@
 #include "wifi_update_portal_page.generated.h"
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
+#include "../app/driver/serial_port_config.h"
 #include "../services/ai_assistant.h"
 #include "../services/aprs_service.h"
 #include "../services/espnow_link.h"
@@ -293,6 +294,22 @@ std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *
     replaceToken(html, "{{PTT_TIMEOUT}}", fromU32(config->ptt_timeout_s));
     replaceToken(html, "{{VOICE_PAYLOAD_BYTES}}", fromU32(config->voice_payload_bytes));
     replaceToken(html, "{{TAIL_SUPPRESS_MS}}", fromU32(config->tail_suppress_ms));
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    replaceToken(html, "{{UART1_ENABLED_CHECKED}}", checkedAttr(serial.uart1_enabled));
+    replaceToken(html, "{{UART2_ENABLED_CHECKED}}", checkedAttr(serial.uart2_enabled));
+    replaceToken(html, "{{UART1_RX_PIN}}", fromI32(serial.uart1_rx_pin));
+    replaceToken(html, "{{UART1_TX_PIN}}", fromI32(serial.uart1_tx_pin));
+    replaceToken(html, "{{UART1_BAUD}}", fromU32(config->sci.baud));
+    replaceToken(html, "{{UART1_DATA_BITS}}", fromU32(config->sci.data_bits));
+    replaceToken(html, "{{UART1_PARITY}}", std::string(1, config->sci.parity));
+    replaceToken(html, "{{UART1_STOP_BITS}}", fromU32(config->sci.stop_bits));
+    replaceToken(html, "{{UART2_RX_PIN}}", fromI32(serial.uart2_rx_pin));
+    replaceToken(html, "{{UART2_TX_PIN}}", fromI32(serial.uart2_tx_pin));
+    replaceToken(html, "{{UART2_BAUD}}", fromU32(serial.uart2_baud));
+    replaceToken(html, "{{UART2_DATA_BITS}}", fromU32(serial.uart2_data_bits));
+    replaceToken(html, "{{UART2_PARITY}}", std::string(1, serial.uart2_parity));
+    replaceToken(html, "{{UART2_STOP_BITS}}", fromU32(serial.uart2_stop_bits));
     const uint8_t nrl_codec = NRLAudioBridge_GetVoiceCodec();
     replaceToken(html, "{{CODEC_G711_SELECTED}}", nrl_codec == 0u ? " selected" : "");
     replaceToken(html, "{{CODEC_OPUS_SELECTED}}", nrl_codec == 1u ? " selected" : "");
