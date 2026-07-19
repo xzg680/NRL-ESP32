@@ -79,6 +79,15 @@ The following capabilities are implemented in the current codebase. Features mar
   - All four build targets can use the OTA management system. `gezipai` and `bh4tdv` additionally support first-time full USB web flashing in Chrome/Edge; `s31_korvo` and `s31_function_coreboard` require serial flashing for the first install, then can use device OTA.
   - A device persists its OTA service URL and device token, checks a compatible-release manifest periodically or on demand, and can install the latest or a specified historical version. Production OTA downloads accept HTTPS only. Use local serial AT commands `AT+OTAURL`, `AT+OTACHECK`, `AT+OTALIST`, and `AT+OTA` to configure and run updates.
   - Administrators manage releases with web login or an admin token. When `OTA_SERVER_URL`, `OTA_UPLOAD_TOKEN`, and related release variables are present, `scripts/build.py` uploads the release package automatically after a successful build.
+  - Use `scripts/publish_ota_mcp.py` for reviewed production releases. It creates a one-time MCP upload, transfers the complete flash package, checks the staged status, and explicitly confirms publication. Re-running it verifies the application size and SHA-256 instead of creating a duplicate release.
+
+```powershell
+$env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
+$env:OTA_ADMIN_TOKEN = '<admin token>'
+python scripts/publish_ota_mcp.py --version 0.8.3 --notes 'release notes'
+# Verify all four published board packages without writing:
+python scripts/publish_ota_mcp.py --version 0.8.3 --verify-only
+```
 
 ## Features
 

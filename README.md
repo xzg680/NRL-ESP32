@@ -81,6 +81,15 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
   - 所有四个构建目标均可接入 OTA 管理系统；`gezipai` / `bh4tdv` 还可通过 Chrome/Edge 的 USB 网页刷机首次全量安装，`s31_korvo` / `s31_function_coreboard` 保持串口首次烧录，后续可使用设备 OTA。
   - 设备端保存 OTA 服务 URL 与设备令牌，定时或按需拉取兼容版本清单，可安装最新版本或指定历史版本；生产 OTA 下载仅接受 HTTPS。可通过本地串口 AT 命令 `AT+OTAURL`、`AT+OTACHECK`、`AT+OTALIST`、`AT+OTA` 管理和执行更新。
   - 管理员可通过网页登录或管理令牌维护发布；构建环境设置 `OTA_SERVER_URL`、`OTA_UPLOAD_TOKEN` 等变量后，`scripts/build.py` 会在构建成功后自动上传发布包。
+  - 推荐使用 `scripts/publish_ota_mcp.py` 进行需要审核确认的正式发布。脚本通过 MCP 创建一次性上传会话，上传完整刷机包后校验状态，再显式确认发布；重复执行时会核对应用镜像大小和 SHA-256，不会重复创建相同版本。
+
+```powershell
+$env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
+$env:OTA_ADMIN_TOKEN = '<管理员令牌>'
+python scripts/publish_ota_mcp.py --version 0.8.3 --notes 'release notes'
+# 仅核验服务器上的四板发布包：
+python scripts/publish_ota_mcp.py --version 0.8.3 --verify-only
+```
 
 ## 支持功能
 
