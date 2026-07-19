@@ -75,7 +75,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
   - ESP32-S31 Function CoreBoard 还可使用板载 YT8531 千兆以太网；Wi-Fi 仍可作为回退连接。
 
 - **版本 OTA 与发布服务**
-  - 项目内置 `ota-server/` OTA 管理系统：Go 服务端嵌入 Vue 管理界面，使用 SQLite 保存按板卡、版本和发布通道（如 `stable` / `beta`）划分的固件发布记录与更新说明。
+  - OTA 管理系统已拆分到独立的 [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) 仓库：Go 服务端配合 Vue 管理界面，使用 SQLite 保存按板卡、版本和发布通道（如 `stable` / `beta`）划分的固件发布记录与更新说明。
   - 管理后台提供板卡介绍、各板卡固件历史与变更说明、USB 刷机入口，以及设备管理面板。设备在检查更新时会上报板卡型号、固件版本、呼号、SSID、IP 和最后在线时间，后台可识别有可用更新的设备。
   - 发布流程以**完整刷机包**为唯一来源：一次上传包含 bootloader、分区表、OTA data、应用及所需资源镜像。服务端从其中登记应用镜像作为设备 OTA 版本，并为 ESP32-S3 板同时生成 USB 网页刷机 manifest，避免两套固件来源不一致。
   - 所有四个构建目标均可接入 OTA 管理系统；`gezipai` / `bh4tdv` 还可通过 Chrome/Edge 的 USB 网页刷机首次全量安装，`s31_korvo` / `s31_function_coreboard` 保持串口首次烧录，后续可使用设备 OTA。

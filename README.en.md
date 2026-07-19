@@ -73,7 +73,7 @@ The following capabilities are implemented in the current codebase. Features mar
   - The ESP32-S31 Function CoreBoard can use its on-board YT8531 Gigabit Ethernet, with Wi-Fi retained as a fallback.
 
 - **Release OTA and publishing service**
-  - The repository includes an `ota-server/` OTA management system: a Go server with an embedded Vue admin UI and SQLite registry for firmware releases and release notes, organized by board, version, and release channel (such as `stable` / `beta`).
+  - The OTA management system now lives in the separate [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) repository: a Go server with a Vue admin UI and SQLite registry for firmware releases and release notes, organized by board, version, and release channel (such as `stable` / `beta`).
   - The management UI provides board introductions, per-board firmware history and changelogs, USB flashing, and a device dashboard. During an update check, a device reports its board, firmware version, callsign, SSID, IP address, and last-seen time, allowing the dashboard to flag devices with an available update.
   - The **complete flash package** is the single release source. One upload contains the bootloader, partition table, OTA data, application, and required resource images. The server registers the application slice as the device OTA release and, for ESP32-S3 boards, serves a USB web-flasher manifest from the same package, preventing drift between the two delivery paths.
   - All four build targets can use the OTA management system. `gezipai` and `bh4tdv` additionally support first-time full USB web flashing in Chrome/Edge; `s31_korvo` and `s31_function_coreboard` require serial flashing for the first install, then can use device OTA.
