@@ -715,9 +715,10 @@ void menuRow(lv_obj_t *scr, int y, const char *text, bool selected)
 
     lv_obj_t *lbl = makeLabel(row, &lv_font_montserrat_14,
                               selected ? kColorCallIdle : kColorSub);
-    lv_obj_set_width(lbl, kWidth - 24);
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 7, 0);
+    lv_obj_set_size(lbl, kWidth - 24,
+                    lv_font_get_line_height(&lv_font_montserrat_14));
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 7, 0);
     char line[64] = {};
     snprintf(line, sizeof(line), "%s%s", selected ? "> " : "  ", text);
     lv_label_set_text(lbl, line);
@@ -946,7 +947,7 @@ void buildAprsSettingsMenu()
 }
 
 // Dedicated APRS station page: BACK row plus the most recent stations heard,
-// one compact line per station (callsign, distance, speed, age).
+// one compact line per station (callsign, distance, source, age).
 void buildAprsListMenu()
 {
     lv_obj_t *scr = prepareContent();
@@ -969,18 +970,12 @@ void buildAprsListMenu()
         if (!isnan(s.distance_km)) {
             snprintf(dist, sizeof(dist), "%.1fkm", static_cast<double>(s.distance_km));
         }
-        char spd[16] = "";
-        if (!isnan(s.speed_kmh)) {
-            snprintf(spd, sizeof(spd), " %.0fkm/h", static_cast<double>(s.speed_kmh));
-        } else if (!isnan(s.derived_speed_kmh)) {
-            snprintf(spd, sizeof(spd), " ~%.0fkm/h", static_cast<double>(s.derived_speed_kmh));
-        }
         char age[12];
         if (s.age_s < 60u) snprintf(age, sizeof(age), "%lus", static_cast<unsigned long>(s.age_s));
         else snprintf(age, sizeof(age), "%lum", static_cast<unsigned long>(s.age_s / 60u));
         char line[64];
-        snprintf(line, sizeof(line), "%s %s%s %s %s",
-                 s.name, dist, spd, s.via_rf ? "RF" : "IS", age);
+        snprintf(line, sizeof(line), "%s %s %s %s",
+                 s.name, dist, s.via_rf ? "RF" : "IS", age);
         menuRow(scr, 25 + static_cast<int>(i) * 24, line, false);
     }
     menuFooter(scr, "PTT BACK");
