@@ -2535,6 +2535,9 @@ static esp_err_t handleOtaStatus(httpd_req_t *req)
                        "\",\"configured\":" + (status.configured ? "true" : "false") +
                        ",\"checking\":" + (status.checking ? "true" : "false") +
                        ",\"updating\":" + (status.updating ? "true" : "false") +
+                       ",\"update_bytes\":" + std::to_string(status.update_bytes) +
+                       ",\"update_size\":" + std::to_string(status.update_size) +
+                       ",\"update_percent\":" + std::to_string(status.update_percent) +
                        ",\"last_check_ms\":" + std::to_string(status.last_check_ms) +
                        ",\"latest_version\":\"" + jsonEscape(status.latest_version) +
                        "\",\"last_error\":\"" + jsonEscape(status.last_error) +

@@ -227,6 +227,7 @@ lv_obj_t *s_lbl_detail = nullptr;
 lv_obj_t *s_lbl_form_status = nullptr;
 lv_obj_t *s_notice_panel = nullptr;
 lv_obj_t *s_lbl_notice = nullptr;
+lv_obj_t *s_bar_notice_progress = nullptr;
 char s_shown_notice[96] = {};
 uint32_t s_notice_sequence = 0u;
 uint32_t s_notice_color = 0xFFFFFFFFu;
@@ -887,6 +888,8 @@ const TrEntry kTr[] = {
     // Shared
     {"OTA CHECKING...", "正在检查 OTA..."},
     {"OTA DOWNLOADING...", "正在下载 OTA 固件..."},
+    {"OTA UPDATING...", "正在升级 OTA 固件..."},
+    {"OTA Updating %u%%", "OTA 升级 %u%%"},
     {"OTA UPLOADING...", "正在上传 OTA 固件..."},
     {"OTA CHECK FAILED", "OTA 检查失败"},
     {"OTA UPDATE FAILED", "OTA 升级失败"},
@@ -900,6 +903,7 @@ const TrEntry kTr[] = {
     {"Checking for updates...", "正在检查更新..."},
     {"Update check requested...", "已请求检查更新..."},
     {"Installing firmware...", "正在安装固件..."},
+    {"Installing firmware... %u%%", "正在安装固件... %u%%"},
     {"Firmware install requested...", "已请求安装固件..."},
     {"OTA server URL saved.", "OTA 服务器地址已保存。"},
     {"Save failed: out of memory.", "保存失败：内存不足。"},
@@ -1243,6 +1247,7 @@ void clearScreen()
     s_lbl_form_status = nullptr;
     s_notice_panel = nullptr;
     s_lbl_notice = nullptr;
+    s_bar_notice_progress = nullptr;
     s_shown_notice[0] = '\0';
     s_notice_sequence = 0u;
     s_notice_color = kColorUnset;
@@ -1554,20 +1559,22 @@ void buildConfig()
     s_page = Page::Config;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    // Two compact five-slot rows keep MDC and DTMF independent without hiding
-    // any existing settings page.
-    button(scr, 24, 84, 140, 120, "WiFi", Action::Wifi);
-    button(scr, 174, 84, 140, 120, "NRL", Action::Station);
-    button(scr, 324, 84, 140, 120, "Audio", Action::Audio);
-    button(scr, 474, 84, 140, 120, "BT", Action::Bt);
-    button(scr, 624, 84, 150, 120, "MDC", Action::Mdc);
-    button(scr, 24, 220, 140, 120, "DTMF", Action::Dtmf);
-    button(scr, 174, 220, 140, 120, "Nanny", Action::Nanny);
-    button(scr, 324, 220, 140, 120, "NAS", Action::Smb);
-    button(scr, 474, 220, 140, 120, "ESP-NOW", Action::EspNow);
-    button(scr, 624, 220, 150, 120, "About", Action::About);
+    // Keep every settings entry visible in a uniform 4 x 3 grid. The compact
+    // 80 px rows leave the fixed bottom bar exclusively for Back and Language.
+    button(scr, 24, 84, 180, 80, "WiFi", Action::Wifi);
+    button(scr, 214, 84, 180, 80, "NRL", Action::Station);
+    button(scr, 404, 84, 180, 80, "Audio", Action::Audio);
+    button(scr, 594, 84, 180, 80, "BT", Action::Bt);
+
+    button(scr, 24, 174, 180, 80, "CTCSS", Action::Ctcss);
+    button(scr, 214, 174, 180, 80, "MDC", Action::Mdc);
+    button(scr, 404, 174, 180, 80, "DTMF", Action::Dtmf);
+    button(scr, 594, 174, 180, 80, "ESP-NOW", Action::EspNow);
+
+    button(scr, 24, 264, 180, 80, "Nanny", Action::Nanny);
+    button(scr, 214, 264, 180, 80, "NAS", Action::Smb);
+    button(scr, 404, 264, 180, 80, "About", Action::About);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
-    button(scr, 264, 372, 180, 76, "CTCSS", Action::Ctcss);
 
     // Language selector: switching persists and rebuilds this page in place.
     fieldLabel(scr, 470, 388, "Language");
@@ -4765,7 +4772,12 @@ void refreshOtaPage()
     char status_text[sizeof(s_shown_ota_status)] = {};
     uint32_t status_color = kColorSub;
     if (ota->updating) {
-        snprintf(status_text, sizeof(status_text), "%s", tr("Installing firmware..."));
+        if (ota->update_size > 0u) {
+            snprintf(status_text, sizeof(status_text), tr("Installing firmware... %u%%"),
+                     static_cast<unsigned>(ota->update_percent));
+        } else {
+            snprintf(status_text, sizeof(status_text), "%s", tr("Installing firmware..."));
+        }
         status_color = kColorWarn;
     } else if (ota->checking) {
         snprintf(status_text, sizeof(status_text), "%s", tr("Checking for updates..."));
@@ -4832,18 +4844,50 @@ void refreshDisplayNotice()
         lv_obj_set_width(s_lbl_notice, 526);
         lv_obj_set_style_text_align(s_lbl_notice, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_center(s_lbl_notice);
+        s_bar_notice_progress = lv_bar_create(s_notice_panel);
+        lv_obj_set_size(s_bar_notice_progress, 526, 10);
+        lv_bar_set_range(s_bar_notice_progress, 0, 100);
+        lv_bar_set_value(s_bar_notice_progress, 0, LV_ANIM_OFF);
+        lv_obj_set_style_radius(s_bar_notice_progress, 5, LV_PART_MAIN);
+        lv_obj_set_style_radius(s_bar_notice_progress, 5, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(s_bar_notice_progress, lv_color_hex(kColorBorder), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_bar_notice_progress, lv_color_hex(color), LV_PART_INDICATOR);
+        lv_obj_add_flag(s_bar_notice_progress, LV_OBJ_FLAG_HIDDEN);
         s_notice_sequence = 0u;
         s_notice_color = kColorUnset;
     }
     lv_obj_remove_flag(s_notice_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_notice_panel);
+    if (notice.progress_percent >= 0 && s_bar_notice_progress != nullptr) {
+        lv_obj_set_size(s_notice_panel, 560, 78);
+        lv_obj_set_pos(s_lbl_notice, 0, -2);
+        lv_obj_set_pos(s_bar_notice_progress, 0, 30);
+        lv_bar_set_value(s_bar_notice_progress, notice.progress_percent, LV_ANIM_OFF);
+        lv_obj_remove_flag(s_bar_notice_progress, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_set_size(s_notice_panel, 560, 52);
+        lv_obj_center(s_lbl_notice);
+        if (s_bar_notice_progress != nullptr) {
+            lv_obj_add_flag(s_bar_notice_progress, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     if (s_notice_sequence != notice.sequence) {
         s_notice_sequence = notice.sequence;
-        setLabel(s_lbl_notice, s_shown_notice, sizeof(s_shown_notice), tr(notice.text));
+        if (notice.progress_percent >= 0) {
+            char progress_text[40] = {};
+            snprintf(progress_text, sizeof(progress_text), tr("OTA Updating %u%%"),
+                     static_cast<unsigned>(notice.progress_percent));
+            setLabel(s_lbl_notice, s_shown_notice, sizeof(s_shown_notice), progress_text);
+        } else {
+            setLabel(s_lbl_notice, s_shown_notice, sizeof(s_shown_notice), tr(notice.text));
+        }
     }
     if (s_notice_color != color) {
         setLabelColor(s_lbl_notice, s_notice_color, color);
         lv_obj_set_style_border_color(s_notice_panel, lv_color_hex(color), 0);
+        if (s_bar_notice_progress != nullptr) {
+            lv_obj_set_style_bg_color(s_bar_notice_progress, lv_color_hex(color), LV_PART_INDICATOR);
+        }
     }
 }
 

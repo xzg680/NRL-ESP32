@@ -133,6 +133,31 @@ void setError(const char *error)
     xSemaphoreGive(s_ota.lock);
 }
 
+void setUpdateProgress(uint32_t bytes, uint32_t size)
+{
+    uint32_t percent = size > 0u
+                           ? static_cast<uint32_t>((static_cast<uint64_t>(bytes) * 100u) / size)
+                           : 0u;
+    if (percent > 100u) percent = 100u;
+
+    bool percent_changed = false;
+    xSemaphoreTake(s_ota.lock, portMAX_DELAY);
+    percent_changed = s_ota.status.update_size != size ||
+                      s_ota.status.update_percent != percent;
+    s_ota.status.update_bytes = bytes;
+    s_ota.status.update_size = size;
+    s_ota.status.update_percent = static_cast<uint8_t>(percent);
+    xSemaphoreGive(s_ota.lock);
+
+    if (percent_changed && size > 0u) {
+        char notice[40] = {};
+        snprintf(notice, sizeof(notice), "OTA UPDATING %u%%",
+                 static_cast<unsigned>(percent));
+        DISPLAY_NOTICE_PostProgress(notice, DISPLAY_NOTICE_WARNING, 0u,
+                                    static_cast<uint8_t>(percent));
+    }
+}
+
 void finishReleaseCheck(bool ok)
 {
     xSemaphoreTake(s_ota.lock, portMAX_DELAY);
@@ -276,6 +301,9 @@ bool installVersion(const char *version)
         }
     }
     s_ota.status.updating = true;
+    s_ota.status.update_bytes = 0u;
+    s_ota.status.update_size = 0u;
+    s_ota.status.update_percent = 0u;
     xSemaphoreGive(s_ota.lock);
     if (release.url[0] == '\0') {
         setError("requested version is not in the current manifest");
@@ -290,20 +318,47 @@ bool installVersion(const char *version)
         DISPLAY_NOTICE_Post("OTA UPDATE FAILED", DISPLAY_NOTICE_ERROR, 10000u);
         return false;
     }
-    DISPLAY_NOTICE_Post("OTA DOWNLOADING...", DISPLAY_NOTICE_WARNING, 0u);
+    DISPLAY_NOTICE_Post("OTA UPDATING...", DISPLAY_NOTICE_WARNING, 0u);
     esp_http_client_config_t http = {};
     http.url = url.c_str(); http.timeout_ms = 30000; http.crt_bundle_attach = esp_crt_bundle_attach;
     esp_https_ota_config_t ota = {};
     ota.http_config = &http;
     ota.bulk_flash_erase = false;
-    const esp_err_t err = esp_https_ota(&ota);
+    esp_https_ota_handle_t ota_handle = nullptr;
+    esp_err_t err = esp_https_ota_begin(&ota, &ota_handle);
+    uint32_t image_size = 0u;
+    if (err == ESP_OK) {
+        const int reported_size = esp_https_ota_get_image_size(ota_handle);
+        if (reported_size > 0) image_size = static_cast<uint32_t>(reported_size);
+        setUpdateProgress(0u, image_size);
+
+        do {
+            err = esp_https_ota_perform(ota_handle);
+            const int bytes_read = esp_https_ota_get_image_len_read(ota_handle);
+            const int current_size = esp_https_ota_get_image_size(ota_handle);
+            if (current_size > 0) image_size = static_cast<uint32_t>(current_size);
+            if (bytes_read >= 0) {
+                setUpdateProgress(static_cast<uint32_t>(bytes_read), image_size);
+            }
+        } while (err == ESP_ERR_HTTPS_OTA_IN_PROGRESS);
+
+        if (err == ESP_OK && !esp_https_ota_is_complete_data_received(ota_handle)) {
+            err = ESP_FAIL;
+        }
+        if (err == ESP_OK) {
+            err = esp_https_ota_finish(ota_handle);
+        } else {
+            esp_https_ota_abort(ota_handle);
+        }
+    }
     if (err != ESP_OK) {
         char error[96] = {};
-        snprintf(error, sizeof(error), "firmware download failed: %s", esp_err_to_name(err));
+        snprintf(error, sizeof(error), "firmware update failed: %s", esp_err_to_name(err));
         setError(error);
         DISPLAY_NOTICE_Post("OTA UPDATE FAILED", DISPLAY_NOTICE_ERROR, 10000u);
         return false;
     }
+    if (image_size > 0u) setUpdateProgress(image_size, image_size);
     ESP_LOGI(TAG, "OTA image %s written; rebooting", release.version);
     DISPLAY_NOTICE_Post("OTA COMPLETE - REBOOTING", DISPLAY_NOTICE_SUCCESS, 0u);
     vTaskDelay(pdMS_TO_TICKS(1200));

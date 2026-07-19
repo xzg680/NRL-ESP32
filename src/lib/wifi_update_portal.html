@@ -40,11 +40,12 @@
     <p class="notice" data-i18n="otaNotice">Select a firmware.bin file from support or from a trusted release. The device will reboot after a successful update.</p>
 
     <section class="panel release-notes">
-      <h2 data-i18n="releaseTitle">0.8.2 feature updates</h2>
+      <h2 data-i18n="releaseTitle">0.8.3 feature updates</h2>
       <ul>
-        <li data-i18n="releaseAprsMessages">Restores Gezipai display notifications for APRS-IS text, status and other packets without a position.</li>
-        <li data-i18n="releaseAprsSummary">Keeps the ticker compact: callsign/SSID plus message text, or distance, speed and comment for position packets.</li>
-        <li data-i18n="releaseAprsStations">Fixes ordinary callsign position packets being omitted from the APRS station list.</li>
+        <li data-i18n="releaseSettingsGrid">Uses a 4 x 3 grid on the S31 settings screen so all 11 items stay clear of the Back button.</li>
+        <li data-i18n="releaseOtaScreenProgress">Shows real OTA download/write percentage and a progress bar on display-equipped boards.</li>
+        <li data-i18n="releaseOtaWebProgress">Shows real remote OTA progress in the device web page, including boards without a display.</li>
+        <li data-i18n="releaseAprsStations">Keeps Gezipai APRS station rows on one line and omits speed when space is limited.</li>
       </ul>
     </section>
 
@@ -57,6 +58,9 @@
         <div class="actions"><button type="submit" data-i18n="saveOtaServer">Save OTA server</button><button id="ota-check" type="button" data-i18n="checkReleases">Check releases</button></div>
       </form>
       <p id="remote-ota-status" class="prog-status" data-i18n="remoteNotConfigured">Not configured</p>
+      <div id="remote-ota-progress" class="prog-wrap" hidden>
+        <div class="prog-bar"><div id="remote-ota-bar"></div></div>
+      </div>
       <label><span data-i18n="availableVersions">Available versions</span><select id="ota-release-list"><option value="" data-i18n="checkReleasesFirst">Check releases first</option></select></label>
       <div class="actions"><button id="ota-install" type="button" data-i18n="installSelectedVersion">Install selected version</button></div>
     </section>

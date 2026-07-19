@@ -154,6 +154,7 @@ lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_cpu = nullptr;
 lv_obj_t *s_lbl_hint = nullptr;
 lv_obj_t *s_lbl_ota = nullptr;
+lv_obj_t *s_bar_ota = nullptr;
 lv_obj_t *s_content = nullptr;
 
 adc_oneshot_unit_handle_t s_adc = nullptr;
@@ -646,6 +647,7 @@ void resetCenterWidgets()
     s_lbl_time = nullptr;
     s_lbl_hint = nullptr;
     s_lbl_ota = nullptr;
+    s_bar_ota = nullptr;
     s_shown_callsign[0] = '\0';
     s_shown_ssid[0] = '\0';
     s_shown_time[0] = '\0';
@@ -845,8 +847,26 @@ void buildOtaMenu()
         lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_20, kColorTx);
         lv_obj_set_width(lbl, kWidth);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 64);
-        lv_label_set_text(lbl, "INSTALLING...");
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 54);
+        char progress[32] = {};
+        if (ota->update_size > 0u) {
+            snprintf(progress, sizeof(progress), "INSTALLING %u%%",
+                     static_cast<unsigned>(ota->update_percent));
+        } else {
+            snprintf(progress, sizeof(progress), "INSTALLING...");
+        }
+        lv_label_set_text(lbl, progress);
+        if (ota->update_size > 0u) {
+            lv_obj_t *bar = lv_bar_create(scr);
+            lv_obj_set_pos(bar, 20, 94);
+            lv_obj_set_size(bar, kWidth - 40, 10);
+            lv_bar_set_range(bar, 0, 100);
+            lv_bar_set_value(bar, ota->update_percent, LV_ANIM_OFF);
+            lv_obj_set_style_radius(bar, 5, LV_PART_MAIN);
+            lv_obj_set_style_radius(bar, 5, LV_PART_INDICATOR);
+            lv_obj_set_style_bg_color(bar, lv_color_hex(kColorCaption), LV_PART_MAIN);
+            lv_obj_set_style_bg_color(bar, lv_color_hex(kColorTx), LV_PART_INDICATOR);
+        }
     } else if (ota->release_count == 0u) {
         lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_16, kColorSub);
         lv_obj_set_width(lbl, kWidth - 20);
@@ -1199,6 +1219,17 @@ void buildHomeContent()
     // Doubles as the APRS monitor ticker; long packet lines scroll circularly.
     lv_label_set_long_mode(s_lbl_ota, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_ota, "");
+
+    s_bar_ota = lv_bar_create(content);
+    lv_obj_set_pos(s_bar_ota, 20, 165);
+    lv_obj_set_size(s_bar_ota, kWidth - 40, 4);
+    lv_bar_set_range(s_bar_ota, 0, 100);
+    lv_bar_set_value(s_bar_ota, 0, LV_ANIM_OFF);
+    lv_obj_set_style_radius(s_bar_ota, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_bar_ota, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_bar_ota, lv_color_hex(kColorCaption), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_bar_ota, lv_color_hex(kColorApWarn), LV_PART_INDICATOR);
+    lv_obj_add_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
 }
 
 void buildUi()
@@ -1684,6 +1715,7 @@ void refreshOtaNotice()
     const NrlOtaStatus *status = otaUiSnapshot();
     char text[sizeof(s_shown_ota)] = {};
     uint32_t color = kColorApWarn;
+    int progress_percent = -1;
     DisplayNoticeSnapshot notice = {};
     DISPLAY_NOTICE_Get(&notice);
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -1692,12 +1724,19 @@ void refreshOtaNotice()
     if (notice_active) {
         snprintf(text, sizeof(text), "%.*s",
                  static_cast<int>(sizeof(text) - 1u), notice.text);
+        progress_percent = notice.progress_percent;
         if (notice.level == DISPLAY_NOTICE_SUCCESS) color = kColorGood;
         else if (notice.level == DISPLAY_NOTICE_ERROR) color = kColorWeak;
         else if (notice.level == DISPLAY_NOTICE_WARNING) color = kColorApWarn;
         else color = kColorAccent;
     } else if (status != nullptr && status->updating) {
-        snprintf(text, sizeof(text), "OTA UPDATING...");
+        if (status->update_size > 0u) {
+            snprintf(text, sizeof(text), "OTA UPDATING %u%%",
+                     static_cast<unsigned>(status->update_percent));
+            progress_percent = status->update_percent;
+        } else {
+            snprintf(text, sizeof(text), "OTA UPDATING...");
+        }
         color = kColorTx;
     } else if (status != nullptr && status->checking) {
         snprintf(text, sizeof(text), "OTA CHECKING...");
@@ -1718,6 +1757,14 @@ void refreshOtaNotice()
     }
     if (setLabel(s_lbl_ota, s_shown_ota, sizeof(s_shown_ota), text)) {
         lv_obj_set_style_text_color(s_lbl_ota, lv_color_hex(color), 0);
+    }
+    if (s_bar_ota != nullptr) {
+        if (progress_percent >= 0) {
+            lv_bar_set_value(s_bar_ota, progress_percent, LV_ANIM_OFF);
+            lv_obj_remove_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
@@ -2032,10 +2079,12 @@ void processMenuInput(uint32_t now)
             s_menu_ota_requested = false;
         }
         char state[sizeof(s_menu_ota_state)] = {};
-        int used = snprintf(state, sizeof(state), "%u|%u|%u|%u|%s|%s",
+        int used = snprintf(state, sizeof(state), "%u|%u|%u|%u|%lu|%u|%s|%s",
                             ota->checking ? 1u : 0u, ota->updating ? 1u : 0u,
                             static_cast<unsigned>(ota->release_count),
                             s_menu_ota_requested ? 1u : 0u,
+                            static_cast<unsigned long>(ota->update_size),
+                            static_cast<unsigned>(ota->update_percent),
                             ota->latest_version, ota->last_error);
         for (size_t i = 0; i < ota->release_count && used > 0 &&
                            static_cast<size_t>(used) < sizeof(state) - 2u; ++i) {

@@ -4,10 +4,14 @@ zh:{language:'语言',wifiConfig:'WiFi配置',nrlConfig:'NRL配置',audioSetting
 };
 Object.assign(translations.en,{remoteOtaIntro:'The device periodically reports its board, firmware, NRL callsign and SSID to the OTA server. HTTP is intended only for a trusted LAN; HTTPS is recommended otherwise.',otaServerUrl:'OTA server URL (HTTP/HTTPS)',useHttpsServerUrl:'Use an HTTP or HTTPS OTA server URL. The address was not saved.'});
 Object.assign(translations.zh,{remoteOtaIntro:'设备会定期向 OTA 服务器报告板卡、固件版本、NRL 呼号和 SSID，并且只显示适用于当前板卡的固件。HTTP 仅建议在可信局域网使用，其他环境请使用 HTTPS。',otaServerUrl:'OTA 服务器地址（HTTP/HTTPS）',useHttpsServerUrl:'请输入 HTTP 或 HTTPS OTA 服务器地址，当前地址没有保存。'});
-Object.assign(translations.en,{mediaConfig:'Media / Nanny',aprsConfig:'APRS',releaseTitle:'0.8.2 feature updates',releaseAprsMessages:'Restores Gezipai display notifications for APRS-IS text, status and other packets without a position.',releaseAprsSummary:'Keeps the ticker compact: callsign/SSID plus message text, or distance, speed and comment for position packets.',releaseAprsStations:'Fixes ordinary callsign position packets being omitted from the APRS station list.'});
-Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS',releaseTitle:'0.8.2 功能更新',releaseAprsMessages:'恢复 Gezipai 屏幕显示 APRS-IS 转发的文本、状态及其他无坐标数据包。',releaseAprsSummary:'滚动信息保持精简：文本包显示呼号/SSID和正文，位置包显示距离、速度和备注。',releaseAprsStations:'修复普通呼号位置包未进入 APRS 台站列表的问题。'});
+Object.assign(translations.en,{mediaConfig:'Media / Nanny',aprsConfig:'APRS'});
+Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS'});
 Object.assign(translations.en,{signalingConfig:'Signaling / CTCSS'});
 Object.assign(translations.zh,{signalingConfig:'信令 / CTCSS'});
+Object.assign(translations.en,{remoteUpdating:'Installing firmware... {percent}%'});
+Object.assign(translations.en,{releaseTitle:'0.8.3 feature updates',releaseSettingsGrid:'Uses a 4 x 3 grid on the S31 settings screen so all 11 items stay clear of the Back button.',releaseOtaScreenProgress:'Shows real OTA download/write percentage and a progress bar on display-equipped boards.',releaseOtaWebProgress:'Shows real remote OTA progress in the device web page, including boards without a display.',releaseAprsStations:'Keeps Gezipai APRS station rows on one line and omits speed when space is limited.'});
+Object.assign(translations.zh,{releaseTitle:'0.8.3 功能更新',releaseSettingsGrid:'S31 屏幕设置页改为 4 × 3 网格，11 个项目均不会遮挡底部返回按钮。',releaseOtaScreenProgress:'带屏幕板卡在 OTA 下载和写入时显示真实百分比与进度条。',releaseOtaWebProgress:'设备 Web 页面显示远程 OTA 的真实进度，无屏幕板卡也可查看。',releaseAprsStations:'格子派 APRS 台站列表保持单行显示，空间不足时省略速度字段。'});
+Object.assign(translations.zh,{remoteUpdating:'正在升级固件... {percent}%'});
 function lang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}
 function t(k,values={}){const l=lang();let text=(translations[l]&&translations[l][k])||translations.en[k]||k;Object.entries(values).forEach(([name,value])=>{text=text.replace('{'+name+'}',String(value));});return text;}
 function localizeApiError(message){const keys={'Use an HTTPS server URL':'useHttpsServerUrl','Use an HTTP or HTTPS server URL':'useHttpsServerUrl','Configure the OTA server first':'configureOtaFirst','Select a released version':'selectReleasedVersion','Request failed':'requestFailed'};return keys[message]?t(keys[message]):message;}
@@ -20,20 +24,48 @@ function setOta(k,p){otaCurrentKey=k;otaCurrentPct=(p==null?null:p);otaStatus.re
 function pollAlive(){let n=0;const max=30;const tick=()=>{if(n>=max){setOta('otaRebootTimeout',null);return;}n++;const c=new AbortController();const tm=setTimeout(()=>c.abort(),1500);fetch('/ping?_='+Date.now(),{cache:'no-store',signal:c.signal}).then((r)=>{clearTimeout(tm);if(r.ok){setOta('otaRebooted',null);}else{setTimeout(tick,2000);}}).catch(()=>{clearTimeout(tm);setTimeout(tick,2000);});};setTimeout(tick,3000);}
 if(otaForm){otaForm.addEventListener('submit',function(e){e.preventDefault();const f=otaFile.files&&otaFile.files[0];if(!f)return;otaSubmit.disabled=true;otaProgress.hidden=false;otaBar.classList.remove('done','failed');otaBar.style.width='0%';setOta('otaUploading',0);const xhr=new XMLHttpRequest();xhr.upload.onprogress=function(ev){if(ev.lengthComputable){const pct=Math.floor(ev.loaded*100/ev.total);otaBar.style.width=pct+'%';setOta('otaUploading',pct);}};xhr.upload.onload=function(){otaBar.style.width='100%';setOta('otaInstalling',null);};xhr.onload=function(){if(xhr.status===200){otaBar.style.width='100%';otaBar.classList.add('done');setOta('otaRebooting',null);pollAlive();}else{otaBar.classList.add('failed');setOta('otaFailed',null);otaSubmit.disabled=false;}};xhr.onerror=function(){otaBar.classList.add('failed');setOta('otaFailed',null);otaSubmit.disabled=false;};xhr.open('POST','/update');xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.send(f);});}
 
-const remoteConfig=document.getElementById('remote-ota-config'),remoteUrl=document.getElementById('ota-server-url'),remoteToken=document.getElementById('ota-device-token'),remoteStatus=document.getElementById('remote-ota-status'),releaseList=document.getElementById('ota-release-list'),checkRemote=document.getElementById('ota-check'),installRemote=document.getElementById('ota-install');
-let remotePollTimer=null,remotePollUntil=0;
+const remoteConfig=document.getElementById('remote-ota-config'),remoteUrl=document.getElementById('ota-server-url'),remoteToken=document.getElementById('ota-device-token'),remoteStatus=document.getElementById('remote-ota-status'),remoteProgress=document.getElementById('remote-ota-progress'),remoteBar=document.getElementById('remote-ota-bar'),releaseList=document.getElementById('ota-release-list'),checkRemote=document.getElementById('ota-check'),installRemote=document.getElementById('ota-install');
+let remotePollTimer=null,remotePollUntil=0,remoteInstallPolling=false,remoteSawUpdating=false;
 async function remotePost(path,data){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(data)});const v=await r.json().catch(()=>({error:t('requestFailed')}));if(!r.ok)throw new Error(v.error||t('requestFailed'));return v;}
-function renderReleaseList(){if(!releaseList)return;const selected=releaseList.value;const releases=(lastRemoteStatus&&lastRemoteStatus.releases)||[];releaseList.innerHTML='';const first=document.createElement('option');first.value='';first.textContent=releases.length?t('selectVersion'):((lastRemoteStatus&&lastRemoteStatus.last_check_ms)?t('noCompatibleReleases'):t('checkReleasesFirst'));releaseList.appendChild(first);releases.forEach((release)=>{const option=document.createElement('option');option.value=release.version;option.textContent=release.version+(release.notes?' — '+release.notes:'');releaseList.appendChild(option);});releaseList.value=selected;installRemote.disabled=!releaseList.value;}
-function renderRemote(){if(!remoteStatus)return;if(remoteMessage){remoteStatus.textContent=t(remoteMessage.key,remoteMessage.values);}else if(lastRemoteStatus&&lastRemoteStatus.last_error){remoteStatus.textContent=t('remoteError',{error:localizeApiError(lastRemoteStatus.last_error)});}else if(!lastRemoteStatus||!lastRemoteStatus.configured){remoteStatus.textContent=t('remoteNotConfigured');}else if(lastRemoteStatus.checking||lastRemoteStatus.updating){remoteStatus.textContent=t('remoteWorking');}else{remoteStatus.textContent=t('remoteLatest',{version:lastRemoteStatus.latest_version||t('none')});}const configured=!!(lastRemoteStatus&&lastRemoteStatus.configured);checkRemote.disabled=!configured;if(remoteUrl&&configured)remoteUrl.value=lastRemoteStatus.server_url;renderReleaseList();}
-function showRemote(status){lastRemoteStatus=status;remoteMessage=null;renderRemote();}
+function renderReleaseList(){if(!releaseList)return;const selected=releaseList.value;const releases=(lastRemoteStatus&&lastRemoteStatus.releases)||[];releaseList.innerHTML='';const first=document.createElement('option');first.value='';first.textContent=releases.length?t('selectVersion'):((lastRemoteStatus&&lastRemoteStatus.last_check_ms)?t('noCompatibleReleases'):t('checkReleasesFirst'));releaseList.appendChild(first);releases.forEach((release)=>{const option=document.createElement('option');option.value=release.version;option.textContent=release.version+(release.notes?' — '+release.notes:'');releaseList.appendChild(option);});releaseList.value=selected;const busy=!!(lastRemoteStatus&&(lastRemoteStatus.checking||lastRemoteStatus.updating))||remoteInstallPolling;installRemote.disabled=busy||!releaseList.value;}
+function renderRemote(){
+  if(!remoteStatus)return;
+  const updating=!!(lastRemoteStatus&&lastRemoteStatus.updating);
+  const progressKnown=updating&&Number(lastRemoteStatus.update_size)>0;
+  const percent=progressKnown?Math.max(0,Math.min(100,Number(lastRemoteStatus.update_percent)||0)):0;
+  if(remoteProgress)remoteProgress.hidden=!progressKnown;
+  if(remoteBar)remoteBar.style.width=percent+'%';
+  if(remoteMessage)remoteStatus.textContent=t(remoteMessage.key,remoteMessage.values);
+  else if(lastRemoteStatus&&lastRemoteStatus.last_error)remoteStatus.textContent=t('remoteError',{error:localizeApiError(lastRemoteStatus.last_error)});
+  else if(!lastRemoteStatus||!lastRemoteStatus.configured)remoteStatus.textContent=t('remoteNotConfigured');
+  else if(progressKnown)remoteStatus.textContent=t('remoteUpdating',{percent});
+  else if(lastRemoteStatus.checking||updating)remoteStatus.textContent=t('remoteWorking');
+  else remoteStatus.textContent=t('remoteLatest',{version:lastRemoteStatus.latest_version||t('none')});
+  const configured=!!(lastRemoteStatus&&lastRemoteStatus.configured);
+  checkRemote.disabled=!configured||!!(lastRemoteStatus&&(lastRemoteStatus.checking||lastRemoteStatus.updating))||remoteInstallPolling;
+  if(remoteUrl&&configured)remoteUrl.value=lastRemoteStatus.server_url;
+  renderReleaseList();
+}
+function showRemote(status){
+  lastRemoteStatus=status;
+  if(remoteInstallPolling){
+    if(status.updating){remoteSawUpdating=true;remoteMessage=null;}
+    else if(status.last_error||(remoteSawUpdating&&!status.updating)){
+      remoteInstallPolling=false;
+      remotePollUntil=0;
+      remoteMessage=null;
+    }
+  }else remoteMessage=null;
+  renderRemote();
+}
 function setRemoteMessage(key,values={}){remoteMessage={key,values};renderRemote();}
 function scheduleRemoteRefresh(delay=1000){if(remotePollTimer)clearTimeout(remotePollTimer);remotePollTimer=setTimeout(refreshRemote,delay);}
-function startRemotePolling(){remotePollUntil=Date.now()+20000;scheduleRemoteRefresh(500);}
-async function refreshRemote(){try{const r=await fetch('/ota/status',{cache:'no-store'});if(!r.ok)throw new Error(t('requestFailed'));showRemote(await r.json());}catch(error){setRemoteMessage('remoteError',{error:localizeApiError(error.message)});}finally{if(Date.now()<remotePollUntil)scheduleRemoteRefresh();}}
+function startRemotePolling(duration=20000){remotePollUntil=Date.now()+duration;scheduleRemoteRefresh(500);}
+async function refreshRemote(){try{const r=await fetch('/ota/status',{cache:'no-store'});if(!r.ok)throw new Error(t('requestFailed'));showRemote(await r.json());}catch(error){if(remoteInstallPolling){remoteSawUpdating=true;setRemoteMessage('otaRebooting');}else setRemoteMessage('remoteError',{error:localizeApiError(error.message)});}finally{if(Date.now()<remotePollUntil)scheduleRemoteRefresh();}}
 if(remoteConfig)remoteConfig.addEventListener('submit',async(e)=>{e.preventDefault();const serverUrl=remoteUrl.value.trim();const scheme=serverUrl.toLowerCase();if(!scheme.startsWith('http://')&&!scheme.startsWith('https://')){setRemoteMessage('remoteError',{error:t('useHttpsServerUrl')});remoteUrl.focus();return;}try{await remotePost('/ota/config',{server_url:serverUrl,device_token:remoteToken.value});setRemoteMessage('remoteSavedChecking');await remotePost('/ota/check',{});startRemotePolling();}catch(error){setRemoteMessage('remoteError',{error:localizeApiError(error.message)});}});
 if(checkRemote)checkRemote.addEventListener('click',async()=>{try{await remotePost('/ota/check',{});setRemoteMessage('remoteChecking');startRemotePolling();}catch(error){setRemoteMessage('remoteError',{error:localizeApiError(error.message)});}});
-if(installRemote)installRemote.addEventListener('click',async()=>{const version=releaseList.value;if(!version)return;if(!confirm(t('confirmInstall',{version})))return;try{await remotePost('/ota/install',{version});setRemoteMessage('remoteDownloading');}catch(error){setRemoteMessage('remoteError',{error:localizeApiError(error.message)});}});
-if(releaseList)releaseList.addEventListener('change',()=>{installRemote.disabled=!releaseList.value;});
+if(installRemote)installRemote.addEventListener('click',async()=>{const version=releaseList.value;if(!version)return;if(!confirm(t('confirmInstall',{version})))return;try{await remotePost('/ota/install',{version});remoteInstallPolling=true;remoteSawUpdating=false;setRemoteMessage('remoteDownloading');startRemotePolling(300000);}catch(error){setRemoteMessage('remoteError',{error:localizeApiError(error.message)});}});
+if(releaseList)releaseList.addEventListener('change',()=>{const busy=!!(lastRemoteStatus&&(lastRemoteStatus.checking||lastRemoteStatus.updating))||remoteInstallPolling;installRemote.disabled=busy||!releaseList.value;});
 
 applyLanguage(lang());
 document.querySelectorAll('input[name="lang"]').forEach((radio)=>{radio.addEventListener('change',function(){if(this.checked)applyLanguage(this.value);});});
