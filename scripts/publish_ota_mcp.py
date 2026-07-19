@@ -13,11 +13,14 @@ Required environment:
                    a compatibility fallback).
 
 Optional environment: OTA_VERSION, OTA_CHANNEL, OTA_RELEASE_NOTES.
+When this script is run from NRL-OTA, set NRL_FIRMWARE_REPO or pass
+--firmware-repo unless an adjacent NRL-ESP32 checkout can be auto-detected.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -27,10 +30,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from publish_ota import BOARDS, build_multipart, firmware_version, package_from_build
-
-
 MCP_PROTOCOL_VERSION = "2025-11-25"
+BOARDS = ("gezipai", "bh4tdv", "s31_korvo", "s31_function_coreboard")
 REQUIRED_TOOLS = {
     "firmware.create_upload",
     "firmware.get_status",
@@ -131,6 +132,44 @@ class MCPClient:
         return urllib.parse.urljoin(self.url + "/", path)
 
 
+def resolve_firmware_repo(configured: str) -> Path:
+    script_repo = Path(__file__).resolve().parent.parent
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    else:
+        candidates.extend(
+            [
+                script_repo,
+                script_repo.parent / "NRL-ESP32",
+                script_repo.parent / "nrl-esp32",
+            ]
+        )
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if (
+            (candidate / "scripts" / "publish_ota.py").is_file()
+            and (candidate / "src" / "lib" / "nrl_version.h").is_file()
+        ):
+            return candidate
+    if configured:
+        raise ValueError(f"not an NRL-ESP32 checkout: {configured}")
+    raise ValueError(
+        "NRL-ESP32 checkout not found; pass --firmware-repo or set "
+        "NRL_FIRMWARE_REPO"
+    )
+
+
+def load_package_helpers(repo: Path) -> Any:
+    source = repo / "scripts" / "publish_ota.py"
+    spec = importlib.util.spec_from_file_location("_nrl_publish_ota", source)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"could not load package helpers from {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def application_identity(
     meta: dict[str, Any], files: list[tuple[str, Path]]
 ) -> tuple[int, str]:
@@ -178,8 +217,9 @@ def upload_package(
     upload: dict[str, Any],
     meta: dict[str, Any],
     files: list[tuple[str, Path]],
+    package_helpers: Any,
 ) -> None:
-    body, boundary = build_multipart(meta, files)
+    body, boundary = package_helpers.build_multipart(meta, files)
     request = urllib.request.Request(
         client.upload_url(str(upload["upload_path"])),
         data=body,
@@ -209,8 +249,11 @@ def publish_board(
     notes: str,
     ttl_minutes: int,
     verify_only: bool,
+    package_helpers: Any,
 ) -> bool:
-    meta, files = package_from_build(repo, board, version, channel, notes)
+    meta, files = package_helpers.package_from_build(
+        repo, board, version, channel, notes
+    )
     app_size, app_sha256 = application_identity(meta, files)
     current = existing_release(client, board, version, channel)
     if current is not None:
@@ -242,7 +285,7 @@ def publish_board(
             "ttl_minutes": ttl_minutes,
         },
     )
-    upload_package(client, upload, meta, files)
+    upload_package(client, upload, meta, files, package_helpers)
     status = client.call_tool(
         "firmware.get_status", {"upload_id": str(upload["upload_id"])}
     )
@@ -277,6 +320,11 @@ def main() -> int:
         help="board(s) to publish; omitted means all four boards",
     )
     parser.add_argument("--server", default=os.environ.get("OTA_SERVER_URL", ""))
+    parser.add_argument(
+        "--firmware-repo",
+        default=os.environ.get("NRL_FIRMWARE_REPO", ""),
+        help="NRL-ESP32 checkout containing build/<board> (auto-detected when adjacent)",
+    )
     parser.add_argument("--version")
     parser.add_argument("--channel", default=os.environ.get("OTA_CHANNEL", "stable"))
     parser.add_argument("--notes", default=os.environ.get("OTA_RELEASE_NOTES", ""))
@@ -298,8 +346,12 @@ def main() -> int:
     if not 5 <= args.ttl_minutes <= 120:
         raise SystemExit("ttl-minutes must be between 5 and 120")
 
-    repo = Path(__file__).resolve().parent.parent
-    version = (args.version or firmware_version(repo)).removeprefix("v")
+    try:
+        repo = resolve_firmware_repo(args.firmware_repo)
+        package_helpers = load_package_helpers(repo)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    version = (args.version or package_helpers.firmware_version(repo)).removeprefix("v")
     boards = args.boards or list(BOARDS)
     try:
         client = MCPClient(args.server, token)
@@ -322,6 +374,7 @@ def main() -> int:
                     args.notes,
                     args.ttl_minutes,
                     args.verify_only,
+                    package_helpers,
                 )
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, MCPError) as exc:
