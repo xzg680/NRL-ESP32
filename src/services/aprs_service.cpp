@@ -795,7 +795,7 @@ void sendBeacon()
                                : "unknown";
     const uint16_t nrl_port = (radio != nullptr) ? radio->server_port : 0u;
     char net_comment[160];
-    snprintf(net_comment, sizeof(net_comment), "@udp://%s:%u,NRL-ESP32%s%s",
+    snprintf(net_comment, sizeof(net_comment), "@udp://%s:%u%s%s",
              nrl_host, (unsigned)nrl_port,
              s_cfg.comment[0] != '\0' ? " " : "", s_cfg.comment);
     char net_info[240];
@@ -810,7 +810,7 @@ void sendBeacon()
         // Send this APRS status packet once per login so map sites retain the
         // second information row without counting two packets every interval.
         if (!s_is_status_sent && s_is_socket >= 0 && s_is_logged_in) {
-            snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:>%s,v%s",
+            snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:>NRL-ESP32,%s,v%s",
                      call, boardType(), NRL_FIRMWARE_VERSION);
             isSendLine(line);
             s_is_status_sent = s_is_socket >= 0 && s_is_logged_in;
