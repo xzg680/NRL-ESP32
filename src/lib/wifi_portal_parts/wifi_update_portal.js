@@ -4,8 +4,8 @@ zh:{language:'语言',wifiConfig:'WiFi配置',nrlConfig:'NRL配置',audioSetting
 };
 Object.assign(translations.en,{remoteOtaIntro:'The device periodically reports its board, firmware, NRL callsign and SSID to the OTA server. HTTP is intended only for a trusted LAN; HTTPS is recommended otherwise.',otaServerUrl:'OTA server URL (HTTP/HTTPS)',useHttpsServerUrl:'Use an HTTP or HTTPS OTA server URL. The address was not saved.'});
 Object.assign(translations.zh,{remoteOtaIntro:'设备会定期向 OTA 服务器报告板卡、固件版本、NRL 呼号和 SSID，并且只显示适用于当前板卡的固件。HTTP 仅建议在可信局域网使用，其他环境请使用 HTTPS。',otaServerUrl:'OTA 服务器地址（HTTP/HTTPS）',useHttpsServerUrl:'请输入 HTTP 或 HTTPS OTA 服务器地址，当前地址没有保存。'});
-Object.assign(translations.en,{mediaConfig:'Media / Nanny',aprsConfig:'APRS',releaseTitle:'0.8.1 feature updates',releaseAprsLayout:'Moves NRL-ESP32 from the APRS position remark to the status row before the board model and firmware version.'});
-Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS',releaseTitle:'0.8.1 功能更新',releaseAprsLayout:'将 NRL-ESP32 从 APRS 位置备注行移到状态行，并显示在板卡型号和固件版本之前。'});
+Object.assign(translations.en,{mediaConfig:'Media / Nanny',aprsConfig:'APRS',releaseTitle:'0.8.2 feature updates',releaseAprsMessages:'Restores Gezipai display notifications for APRS-IS text, status and other packets without a position.',releaseAprsSummary:'Keeps the ticker compact: callsign/SSID plus message text, or distance, speed and comment for position packets.',releaseAprsStations:'Fixes ordinary callsign position packets being omitted from the APRS station list.'});
+Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS',releaseTitle:'0.8.2 功能更新',releaseAprsMessages:'恢复 Gezipai 屏幕显示 APRS-IS 转发的文本、状态及其他无坐标数据包。',releaseAprsSummary:'滚动信息保持精简：文本包显示呼号/SSID和正文，位置包显示距离、速度和备注。',releaseAprsStations:'修复普通呼号位置包未进入 APRS 台站列表的问题。'});
 Object.assign(translations.en,{signalingConfig:'Signaling / CTCSS'});
 Object.assign(translations.zh,{signalingConfig:'信令 / CTCSS'});
 function lang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}

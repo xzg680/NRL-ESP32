@@ -1711,27 +1711,13 @@ void refreshOtaNotice()
         snprintf(text, sizeof(text), "NEW FW %.20s VOL+/-", status->latest_version);
         color = kColorGood;
     } else if (APRS_SERVICE_IsEnabled()) {
-        // Lowest priority: show a human-readable summary of the newest APRS
-        // station. Do not expose raw TNC2 paths, coordinates or protocol
-        // fields in the small scrolling ticker.
-        AprsStationInfo station = {};
-        if (APRS_SERVICE_GetStations(&station, 1u) == 1u) {
-            char distance[16] = "--km";
-            if (!isnan(station.distance_km)) {
-                snprintf(distance, sizeof(distance), "%.1fkm",
-                         static_cast<double>(station.distance_km));
-            }
-            char speed[20] = {};
-            if (!isnan(station.speed_kmh)) {
-                snprintf(speed, sizeof(speed), " %.0fkm/h",
-                         static_cast<double>(station.speed_kmh));
-            } else if (!isnan(station.derived_speed_kmh)) {
-                snprintf(speed, sizeof(speed), " ~%.0fkm/h",
-                         static_cast<double>(station.derived_speed_kmh));
-            }
-            snprintf(text, sizeof(text), "APRS %s %s%s%s%s",
-                     station.name, distance, speed,
-                     station.comment[0] != '\0' ? " " : "", station.comment);
+        // Every parsed APRS packet gets a compact summary. Unlike the station
+        // list, this also covers text/status packets that have no position.
+        char summary[sizeof(text)] = {};
+        if (APRS_SERVICE_GetLastSummary(summary, sizeof(summary)) != 0u &&
+            summary[0] != '\0') {
+            snprintf(text, sizeof(text), "APRS %.*s",
+                     static_cast<int>(sizeof(text) - 6u), summary);
             color = kColorAccent;
         }
     }

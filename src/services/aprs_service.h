@@ -117,6 +117,11 @@ uint32_t APRS_SERVICE_GetStationRevision(void);
 // Returns the monotonically increasing sequence of that packet (0 = none yet).
 uint32_t APRS_SERVICE_GetLastPacket(char *out, size_t out_size);
 
+// Human-readable summary of the last parsed packet for the small display:
+// callsign/SSID plus distance, speed and comment for position packets; or
+// callsign/SSID plus message/status text for packets without a position.
+uint32_t APRS_SERVICE_GetLastSummary(char *out, size_t out_size);
+
 #ifdef __cplusplus
 }
 #endif

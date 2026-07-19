@@ -156,6 +156,7 @@ size_t s_is_line_len = 0;
 uint32_t s_rx_count = 0;
 uint32_t s_tx_count = 0;
 char s_last_packet[300] = {0};
+char s_last_packet_summary[160] = {0};
 uint32_t s_last_packet_seq = 0;
 
 // TX pacing
@@ -451,11 +452,112 @@ bool ownPosition(double *lat, double *lon, double *alt_m)
 
 // ---------------------------------------------------------------- stations --
 
-void touchLastPacket(const char *tnc2)
+void copyDisplayText(char *out, size_t out_size, const char *text, size_t text_len)
 {
-    lockStations(); // shares the station mutex with APRS_SERVICE_GetLastPacket
+    if (out == nullptr || out_size == 0u) {
+        return;
+    }
+    size_t used = 0u;
+    bool pending_space = false;
+    for (size_t i = 0u; i < text_len && used + 1u < out_size; ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c == '\r' || c == '\n' || c == '\t' || c == ' ') {
+            pending_space = used != 0u;
+            continue;
+        }
+        if (c < 0x20u || c == 0x7fu) {
+            continue;
+        }
+        if (pending_space) {
+            if (used + 2u >= out_size) {
+                break;
+            }
+            out[used++] = ' ';
+        }
+        pending_space = false;
+        if (used + 1u >= out_size) {
+            break;
+        }
+        out[used++] = static_cast<char>(c);
+    }
+    out[used] = '\0';
+}
+
+void buildPacketSummary(const struct pbuf_t *pb, char *out, size_t out_size)
+{
+    if (pb == nullptr || out == nullptr || out_size == 0u) {
+        return;
+    }
+    out[0] = '\0';
+
+    char source[12] = {};
+    size_t source_len = 0u;
+    if (pb->srccall_end != nullptr && pb->srccall_end >= pb->data) {
+        source_len = static_cast<size_t>(pb->srccall_end - pb->data);
+    }
+    if (source_len == 0u || source_len >= sizeof(source)) {
+        source_len = pb->srcname_len < sizeof(source) - 1u
+                         ? pb->srcname_len
+                         : sizeof(source) - 1u;
+        if (pb->srcname != nullptr && source_len > 0u) {
+            memcpy(source, pb->srcname, source_len);
+        }
+    } else {
+        memcpy(source, pb->data, source_len);
+    }
+    source[source_len] = '\0';
+    if (source[0] == '\0') {
+        snprintf(source, sizeof(source), "UNKNOWN");
+    }
+
+    char description[96] = {};
+    if (pb->comment != nullptr && pb->comment_len > 0u) {
+        copyDisplayText(description, sizeof(description), pb->comment, pb->comment_len);
+    } else if (pb->info_start != nullptr && pb->packet_len > 0) {
+        const char *packet_end = pb->data + pb->packet_len;
+        if (pb->info_start < packet_end) {
+            const char *body = pb->info_start + 1;
+            size_t body_len = static_cast<size_t>(packet_end - body);
+            // APRS text message: :ADDRESSEE:body{message-id
+            if (pb->info_start[0] == ':' && body_len >= 10u && body[9] == ':') {
+                body += 10;
+                body_len -= 10u;
+                const char *message_id = static_cast<const char *>(memchr(body, '{', body_len));
+                if (message_id != nullptr) {
+                    body_len = static_cast<size_t>(message_id - body);
+                }
+            }
+            copyDisplayText(description, sizeof(description), body, body_len);
+        }
+    }
+
+    if (pb->flags & F_HASPOS) {
+        char distance[16] = "--km";
+        double own_lat = 0.0, own_lon = 0.0;
+        ownPosition(&own_lat, &own_lon, nullptr);
+        if (own_lat != 0.0 || own_lon != 0.0) {
+            snprintf(distance, sizeof(distance), "%.1fkm",
+                     s_parser.distance(own_lon, own_lat, pb->lng, pb->lat));
+        }
+        char speed[20] = {};
+        if (pb->flags & F_CSRSPD) {
+            snprintf(speed, sizeof(speed), " %.0fkm/h", pb->speed);
+        }
+        snprintf(out, out_size, "%s %s%s%s%s", source, distance, speed,
+                 description[0] != '\0' ? " " : "", description);
+    } else {
+        snprintf(out, out_size, "%s%s%s", source,
+                 description[0] != '\0' ? " " : "", description);
+    }
+}
+
+void touchLastPacket(const char *tnc2, const char *summary)
+{
+    lockStations(); // shared with the last-packet UI snapshot getters
     strncpy(s_last_packet, tnc2, sizeof(s_last_packet) - 1);
     s_last_packet[sizeof(s_last_packet) - 1] = '\0';
+    strncpy(s_last_packet_summary, summary, sizeof(s_last_packet_summary) - 1);
+    s_last_packet_summary[sizeof(s_last_packet_summary) - 1] = '\0';
     s_last_packet_seq++;
     unlockStations();
 }
@@ -607,13 +709,19 @@ bool parseTnc2(const char *line_in, bool via_rf)
     pb.dstname_len = (uint8_t)(end_ssid_off - gt_off - 1);
     pb.dstcall_end = &pb.data[end_ssid_off];
     pb.srccall_end = &pb.data[gt_off];
+    // The parser replaces this with an object/item name when appropriate.
+    // Ordinary station packets otherwise need the TNC2 source as their name.
+    pb.srcname = pb.data;
+    pb.srcname_len = static_cast<uint8_t>(gt_off);
 
     if (s_parser.parse_aprs(&pb) == 0) {
         return false;
     }
 
-    touchLastPacket(line_in);
     updateStation(&pb, via_rf);
+    char summary[sizeof(s_last_packet_summary)] = {};
+    buildPacketSummary(&pb, summary, sizeof(summary));
+    touchLastPacket(line_in, summary);
     return true;
 }
 
@@ -1505,6 +1613,19 @@ extern "C" uint32_t APRS_SERVICE_GetLastPacket(char *out, size_t out_size)
     }
     lockStations();
     strncpy(out, s_last_packet, out_size - 1);
+    out[out_size - 1] = '\0';
+    const uint32_t seq = s_last_packet_seq;
+    unlockStations();
+    return seq;
+}
+
+extern "C" uint32_t APRS_SERVICE_GetLastSummary(char *out, size_t out_size)
+{
+    if (out == nullptr || out_size == 0) {
+        return 0;
+    }
+    lockStations();
+    strncpy(out, s_last_packet_summary, out_size - 1);
     out[out_size - 1] = '\0';
     const uint32_t seq = s_last_packet_seq;
     unlockStations();
