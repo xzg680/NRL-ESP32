@@ -1090,7 +1090,7 @@ void sendBeacon()
                                     : static_cast<unsigned>(s_gps_course % 360u);
         const double display_speed = fmin(static_cast<double>(s_gps_speed_kmh), 1850.0);
         const double display_altitude = fmax(-99999.0, fmin(s_gps_alt_m, 999999.0));
-        snprintf(gps_text, sizeof(gps_text), "SPD=%.1fkm/h CRS=%03u ALT=%.0fm",
+        snprintf(gps_text, sizeof(gps_text), "%.1fkm/h,%03u,%.0fm",
                  display_speed, course, display_altitude);
     } else {
         gps_text[0] = '\0';

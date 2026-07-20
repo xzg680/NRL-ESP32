@@ -4,7 +4,7 @@
 
 HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
-当前固件版本：`0.8.5`
+当前固件版本：`0.8.9`
 
 本项目是以 ESP32-S31 为主要目标平台、兼容 ESP32-S3 板卡的 NRL 网络语音电台桥接固件，用于把电台音频、PTT、SQL、频道选择、串口透明传输和网络配置集中到一个嵌入式应用中。不同板卡分别适配 ES8311 或 ES8389 等音频编解码器，当前工程覆盖 Moto3188/NRL 硬件及 ESP32-S31 开发板。
 
@@ -86,9 +86,9 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 ```powershell
 $env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
 $env:OTA_ADMIN_TOKEN = '<管理员令牌>'
-python scripts/publish_ota_mcp.py --version 0.8.5 --notes 'release notes'
+python scripts/publish_ota_mcp.py --notes 'release notes'
 # 仅核验服务器上的四板发布包：
-python scripts/publish_ota_mcp.py --version 0.8.5 --verify-only
+python scripts/publish_ota_mcp.py --verify-only
 ```
 
 ## 支持功能

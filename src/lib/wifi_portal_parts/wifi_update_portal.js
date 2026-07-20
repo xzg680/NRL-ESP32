@@ -9,8 +9,8 @@ Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS'});
 Object.assign(translations.en,{signalingConfig:'Signaling / CTCSS'});
 Object.assign(translations.zh,{signalingConfig:'信令 / CTCSS'});
 Object.assign(translations.en,{remoteUpdating:'Installing firmware... {percent}%'});
-Object.assign(translations.en,{releaseTitle:'0.8.8 feature updates',releaseGpsDiagnostics:'Adds GSV diagnostics with visible satellites, constellation/PRN, elevation, azimuth, and SNR to the APRS Web page.'});
-Object.assign(translations.zh,{releaseTitle:'0.8.8 功能更新',releaseGpsDiagnostics:'APRS 网页新增 GSV 诊断，显示可见卫星、星座/编号、仰角、方位角和信噪比。'});
+Object.assign(translations.en,{releaseTitle:'0.8.9 feature updates',releaseAprsCompact:'Shortens the APRS position comment to a compact speed, heading, and altitude summary without redundant field labels.'});
+Object.assign(translations.zh,{releaseTitle:'0.8.9 功能更新',releaseAprsCompact:'精简 APRS 位置备注，只保留速度、航向和海拔数值，去掉重复的字段标签。'});
 Object.assign(translations.zh,{remoteUpdating:'正在升级固件... {percent}%'});
 function lang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}
 function t(k,values={}){const l=lang();let text=(translations[l]&&translations[l][k])||translations.en[k]||k;Object.entries(values).forEach(([name,value])=>{text=text.replace('{'+name+'}',String(value));});return text;}
