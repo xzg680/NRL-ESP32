@@ -79,6 +79,7 @@ typedef struct {
     float speed_kmh;
     float hdop;
     uint16_t course_deg;
+    bool course_valid;
     uint32_t age_ms;           // age of the latest recognized NMEA sentence
 } AprsGpsInfo;
 

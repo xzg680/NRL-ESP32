@@ -64,20 +64,6 @@
     </form>
   </div>
 </section>
-<section class="panel" id="gps-live-panel" hidden>
-  <div class="section-head"><h2 data-i18n="gpsLive">GPS Live Information</h2><span class="hint mono" id="gps-live-state"></span></div>
-  <div class="grid">
-    <div><label data-i18n="gpsFixStatus">Fix status</label><div class="mono" id="gps-live-fix">-</div></div>
-    <div><label data-i18n="gpsSatellites">Satellites</label><div class="mono" id="gps-live-satellites">-</div></div>
-    <div><label data-i18n="gpsLatitude">Latitude</label><div class="mono" id="gps-live-latitude">-</div></div>
-    <div><label data-i18n="gpsLongitude">Longitude</label><div class="mono" id="gps-live-longitude">-</div></div>
-    <div><label data-i18n="gpsSpeed">Speed</label><div class="mono" id="gps-live-speed">-</div></div>
-    <div><label data-i18n="gpsCourse">Course</label><div class="mono" id="gps-live-course">-</div></div>
-    <div><label data-i18n="gpsAltitude">Altitude</label><div class="mono" id="gps-live-altitude">-</div></div>
-    <div><label data-i18n="gpsAccuracy">Fix quality / HDOP</label><div class="mono" id="gps-live-accuracy">-</div></div>
-    <div><label data-i18n="gpsUpdated">NMEA updated</label><div class="mono" id="gps-live-updated">-</div></div>
-  </div>
-</section>
 <section class="panel">
   <div class="section-head"><h2 data-i18n="radio">Radio</h2></div>
   <div class="grid">
@@ -347,6 +333,20 @@
     <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsAuto">Auto interval</label><input type="hidden" name="aprs_auto_present" value="1"><label class="hint"><input type="checkbox" name="aprs_auto" value="1" onchange="submitSwitch(this)" {{APRS_AUTO_CHECKED}}><span data-i18n="aprsAutoText">With a GPS fix, beacon faster while moving (30 s at 60+ km/h, or after a 300 m jump); the interval below is the ceiling when parked</span></label></form>
   </div>
 </section>
+<section class="panel" id="gps-live-panel" hidden>
+  <div class="section-head"><h2 data-i18n="gpsLive">GPS Live Information</h2><span class="hint mono" id="gps-live-state"></span></div>
+  <div class="grid">
+    <div><label data-i18n="gpsFixStatus">Fix status</label><div class="mono" id="gps-live-fix">-</div></div>
+    <div><label data-i18n="gpsSatellites">Satellites</label><div class="mono" id="gps-live-satellites">-</div></div>
+    <div><label data-i18n="gpsLatitude">Latitude</label><div class="mono" id="gps-live-latitude">-</div></div>
+    <div><label data-i18n="gpsLongitude">Longitude</label><div class="mono" id="gps-live-longitude">-</div></div>
+    <div><label data-i18n="gpsSpeed">Speed</label><div class="mono" id="gps-live-speed">-</div></div>
+    <div><label data-i18n="gpsCourse">Course</label><div class="mono" id="gps-live-course">-</div></div>
+    <div><label data-i18n="gpsAltitude">Altitude</label><div class="mono" id="gps-live-altitude">-</div></div>
+    <div><label data-i18n="gpsAccuracy">Fix quality / HDOP</label><div class="mono" id="gps-live-accuracy">-</div></div>
+    <div><label data-i18n="gpsUpdated">NMEA updated</label><div class="mono" id="gps-live-updated">-</div></div>
+  </div>
+</section>
 <section class="panel">
   <div class="section-head"><h2 data-i18n="aprsSettings">APRS Settings</h2><span class="hint" data-i18n="aprsSettingsHint">Callsign comes from the Radio page; passcode is derived automatically.</span></div>
   <div class="grid">
@@ -382,16 +382,47 @@
     <script>
     (function(){
       function fmt(v, suffix, digits) {
-        if (v === null || v === undefined || Number.isNaN(v)) return '-';
+        if (v === null || v === undefined || !Number.isFinite(Number(v))) return '-';
+        v = Number(v);
         return v.toFixed(digits === undefined ? 0 : digits) + (suffix || '');
+      }
+      function text(id, value) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = value;
+      }
+      function tr(key, fallback) {
+        return typeof t === 'function' ? t(key) : fallback;
+      }
+      function renderGps(gps) {
+        var panel = document.getElementById('gps-live-panel');
+        if (!panel) return;
+        var connected = !!(gps && gps.connected);
+        panel.hidden = !connected;
+        if (!connected) return;
+        var fixed = !!gps.fix;
+        text('gps-live-state', 'NMEA: OK');
+        text('gps-live-fix', fixed ? tr('gpsFixed', 'Fixed') : tr('gpsAcquiring', 'Acquiring'));
+        text('gps-live-satellites', gps.satellites === undefined ? '-' : String(gps.satellites));
+        text('gps-live-latitude', fixed ? fmt(gps.lat, '', 6) : '-');
+        text('gps-live-longitude', fixed ? fmt(gps.lon, '', 6) : '-');
+        text('gps-live-speed', fixed ? fmt(gps.speed, ' km/h', 1) : '-');
+        text('gps-live-course', fixed ? fmt(gps.course, '\u00b0', 0) : '-');
+        text('gps-live-altitude', fixed ? fmt(gps.alt, ' m', 1) : '-');
+        var quality = gps.quality === undefined ? '-' : 'Q=' + gps.quality;
+        if (gps.hdop !== undefined) quality += ' / HDOP=' + fmt(gps.hdop, '', 1);
+        text('gps-live-accuracy', quality);
+        text('gps-live-updated', fmt(Number(gps.age_ms) / 1000, ' s', 1));
       }
       function refresh() {
         fetch('/aprs/stations').then(function(r){ return r.json(); }).then(function(data){
+          if (!data) return;
+          renderGps(data.gps_info);
           var body = document.getElementById('aprs-stn-body');
-          if (!body || !data || !Array.isArray(data.stations)) return;
+          if (!body || !Array.isArray(data.stations)) return;
           var st = document.getElementById('aprs-stn-status');
           if (st) st.textContent = (data.net ? 'APRS-IS: OK' : 'APRS-IS: --') +
-                                   '  GPS: ' + (data.gps ? 'FIX' : '--') +
+                                   '  GPS: ' + (data.gps ? 'FIX' :
+                                      (data.gps_info && data.gps_info.connected ? 'DATA' : '--')) +
                                    '  RX: ' + data.rx + '  TX: ' + data.tx;
           body.innerHTML = '';
           if (!data.stations.length) {
@@ -421,7 +452,7 @@
         }).catch(function(){});
       }
       refresh();
-      setInterval(refresh, 5000);
+      setInterval(refresh, 1000);
     })();
     </script>
   </div>

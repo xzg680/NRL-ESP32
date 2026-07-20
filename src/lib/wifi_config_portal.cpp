@@ -1577,7 +1577,7 @@ static esp_err_t handleAprsStations(httpd_req_t *req)
                  static_cast<double>(gps.speed_kmh));
         body += num;
     }
-    if (gps.course_deg > 0u) {
+    if (gps.course_valid) {
         body += ",\"course\":" + std::to_string(gps.course_deg);
     }
     if (isfinite(gps.hdop)) {

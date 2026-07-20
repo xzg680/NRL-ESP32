@@ -124,6 +124,7 @@ double s_gps_alt_m = 0.0;
 float s_gps_speed_kmh = -1.0f;
 float s_gps_hdop = NAN;
 uint16_t s_gps_course = 0;
+bool s_gps_course_valid = false;
 int16_t s_gps_satellites = -1;
 uint8_t s_gps_fix_quality = 0;
 uint32_t s_gps_last_fix_ms = 0;
@@ -383,7 +384,8 @@ void handleNmeaLine(char *line)
             const double longitude = nmeaCoordToDeg(f[5], f[6]);
             const float speed_kmh = (f[7][0] != '\0')
                                         ? static_cast<float>(atof(f[7]) * 1.852)
-                                        : -1.0f;
+                                        : NAN;
+            const bool course_valid = f[8][0] != '\0';
             const uint16_t course = (f[8][0] != '\0')
                                         ? static_cast<uint16_t>(atof(f[8]))
                                         : 0u;
@@ -394,6 +396,7 @@ void handleNmeaLine(char *line)
             s_gps_lon = longitude;
             s_gps_speed_kmh = speed_kmh;
             s_gps_course = course;
+            s_gps_course_valid = course_valid;
             s_gps_last_fix_ms = received_ms;
             s_gps_fix = true;
             portEXIT_CRITICAL(&s_gps_mux);
@@ -1717,6 +1720,7 @@ extern "C" void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out)
     snapshot.speed_kmh = s_gps_speed_kmh;
     snapshot.hdop = s_gps_hdop;
     snapshot.course_deg = s_gps_course;
+    snapshot.course_valid = s_gps_course_valid;
     last_nmea_ms = s_gps_last_nmea_ms;
     last_fix_ms = s_gps_last_fix_ms;
     last_rmc_ms = s_gps_last_rmc_ms;
@@ -1742,6 +1746,7 @@ extern "C" void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out)
     if (!snapshot.has_fix || !rmc_fresh) {
         snapshot.speed_kmh = NAN;
         snapshot.course_deg = 0u;
+        snapshot.course_valid = false;
     }
     if (!snapshot.connected || !gga_fresh) {
         snapshot.fix_quality = 0u;
