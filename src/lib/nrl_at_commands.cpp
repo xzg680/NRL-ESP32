@@ -176,6 +176,33 @@ static bool appendUnsignedLine(uint8_t *payload,
     return appendReplyLine(payload, capacity, used, line);
 }
 
+static void formatMicPcmGain(const uint16_t gain_milli, char *out, const size_t out_size)
+{
+    if (out == nullptr || out_size == 0u) return;
+    snprintf(out, out_size, "%u.%03u",
+             static_cast<unsigned>(gain_milli / 1000u),
+             static_cast<unsigned>(gain_milli % 1000u));
+    size_t len = strlen(out);
+    while (len > 2u && out[len - 1u] == '0' && out[len - 2u] != '.') {
+        out[--len] = '\0';
+    }
+}
+
+static bool parseMicPcmGain(const char *text, uint16_t *out_milli)
+{
+    if (text == nullptr || out_milli == nullptr || text[0] == '\0') return false;
+    char *end = nullptr;
+    const float gain = strtof(text, &end);
+    if (end == text || end == nullptr || *end != '\0' || !isfinite(gain) ||
+        gain < 0.1f || gain > 5.0f) {
+        return false;
+    }
+    const long milli = lroundf(gain * 1000.0f);
+    if (milli < 100l || milli > 5000l) return false;
+    *out_milli = static_cast<uint16_t>(milli);
+    return true;
+}
+
 static const char *ipText(const uint32_t value, char *buffer, const size_t buffer_size)
 {
     if (buffer == nullptr || buffer_size == 0u) {
@@ -240,6 +267,7 @@ static bool appendSupportedAtList(uint8_t *payload,
     char wifi_mask[16] = "0.0.0.0";
     char wifi_gw[16] = "0.0.0.0";
     char wifi_dns[16] = "0.0.0.0";
+    char mic_pcm_gain[16] = "1.0";
     if (config != nullptr) {
         formatSciConfig(config->sci, sci_config, sizeof(sci_config));
         formatMaskedSecret(config->wifi_password, wifi_pass, sizeof(wifi_pass));
@@ -251,6 +279,7 @@ static bool appendSupportedAtList(uint8_t *payload,
         ipText(currentWifiIpValue(config->wifi_netmask, nrlWifiStaNetmask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
         ipText(currentWifiIpValue(config->wifi_gateway, nrlWifiStaGateway(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
         ipText(currentWifiIpValue(config->wifi_dns, nrlWifiStaDns(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
+        formatMicPcmGain(config->mic_pcm_gain_milli, mic_pcm_gain, sizeof(mic_pcm_gain));
     }
     SerialPortConfig serial{};
     SERIAL_PORT_CONFIG_Get(&serial);
@@ -290,6 +319,7 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendUnsignedLine(payload, capacity, used, "BATT_CAL", (config != nullptr) ? config->battery_cal_milli : 0u) &&
 #endif
            appendUnsignedLine(payload, capacity, used, "MIC_GAIN", (config != nullptr) ? config->mic_volume : 0u) &&
+           appendKeyValueLine(payload, capacity, used, "MIC_PCM_GAIN", mic_pcm_gain) &&
            appendUnsignedLine(payload, capacity, used, "VOLUME", (config != nullptr) ? config->line_out_volume : 0u) &&
            appendKeyValueLine(payload, capacity, used, "HP_DRIVE", hp_drive) &&
            appendKeyValueLine(payload, capacity, used, "CODEC",
@@ -1021,6 +1051,29 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
         applyCurrentAudioConfig();
         appendUnsignedLine(result->payload, sizeof(result->payload), &result->payload_size, "MIC_GAIN", updated->mic_volume);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "MIC_PCM_GAIN")) {
+        if (is_query) {
+            char gain[16];
+            formatMicPcmGain(config->mic_pcm_gain_milli, gain, sizeof(gain));
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "MIC_PCM_GAIN", gain);
+            return;
+        }
+        uint16_t gain_milli = 0u;
+        if (!parseMicPcmGain(command.value, &gain_milli) ||
+            !EXTERNAL_RADIO_SetMicPcmGain(gain_milli, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "ERR", "MIC_PCM_GAIN");
+            return;
+        }
+        char gain[16];
+        formatMicPcmGain(EXTERNAL_RADIO_GetConfig()->mic_pcm_gain_milli,
+                         gain, sizeof(gain));
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "MIC_PCM_GAIN", gain);
         return;
     }
 

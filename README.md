@@ -4,7 +4,7 @@
 
 HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
-当前固件版本：`0.8.3`
+当前固件版本：`0.8.5`
 
 本项目是以 ESP32-S31 为主要目标平台、兼容 ESP32-S3 板卡的 NRL 网络语音电台桥接固件，用于把电台音频、PTT、SQL、频道选择、串口透明传输和网络配置集中到一个嵌入式应用中。不同板卡分别适配 ES8311 或 ES8389 等音频编解码器，当前工程覆盖 Moto3188/NRL 硬件及 ESP32-S31 开发板。
 
@@ -86,9 +86,9 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 ```powershell
 $env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
 $env:OTA_ADMIN_TOKEN = '<管理员令牌>'
-python scripts/publish_ota_mcp.py --version 0.8.3 --notes 'release notes'
+python scripts/publish_ota_mcp.py --version 0.8.5 --notes 'release notes'
 # 仅核验服务器上的四板发布包：
-python scripts/publish_ota_mcp.py --version 0.8.3 --verify-only
+python scripts/publish_ota_mcp.py --version 0.8.5 --verify-only
 ```
 
 ## 支持功能
@@ -148,7 +148,7 @@ python scripts/publish_ota_mcp.py --version 0.8.3 --verify-only
 - 远程 AT 命令配置
   - 支持查询和设置频道、服务器、呼号、SSID、音量、SCI 参数等。
   - 支持远程重启命令。
-  - 常用命令包括 `AT+CH`、`AT+D_IP`、`AT+D_PORT`、`AT+CALL`、`AT+SSID`、`AT+PTT_TIMEOUT`、`AT+TAIL_SUPPRESS`、`AT+MIC_GAIN`、`AT+VOLUME`、`AT+HP_DRIVE`、`AT+SCI`、`AT+REBOOT`。
+  - 常用命令包括 `AT+CH`、`AT+D_IP`、`AT+D_PORT`、`AT+CALL`、`AT+SSID`、`AT+PTT_TIMEOUT`、`AT+TAIL_SUPPRESS`、`AT+MIC_GAIN`、`AT+MIC_PCM_GAIN`（`0.1`–`5.0`）、`AT+VOLUME`、`AT+HP_DRIVE`、`AT+SCI`、`AT+REBOOT`。
 
 - 参数持久化
   - 电台配置保存到共享 Flash/EEPROM 区域。

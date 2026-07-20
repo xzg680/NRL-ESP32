@@ -37,6 +37,9 @@ struct ExternalRadioConfig {
     uint8_t callsign_ssid;
     uint8_t device_mode;
     uint8_t mic_volume;
+    // Software gain applied to captured PCM, in 1/1000 units (1000 = 1.0x).
+    // Valid range: 100..5000 (0.1x..5.0x).
+    uint16_t mic_pcm_gain_milli;
     uint8_t line_out_volume;
     bool hp_drive_enabled;
     bool drc_enabled;
@@ -128,6 +131,7 @@ bool EXTERNAL_RADIO_SetLocalPort(uint16_t value, bool persist);
 bool EXTERNAL_RADIO_SetCallsign(const char *value, bool persist);
 bool EXTERNAL_RADIO_SetCallsignSsid(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_SetMicVolume(uint8_t value, bool persist);
+bool EXTERNAL_RADIO_SetMicPcmGain(uint16_t gain_milli, bool persist);
 bool EXTERNAL_RADIO_SetLineOutVolume(uint8_t value, bool persist);
 bool EXTERNAL_RADIO_ResetAudioConfig(bool persist);
 bool EXTERNAL_RADIO_SetHpDriveEnabled(bool enabled, bool persist);

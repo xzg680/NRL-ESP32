@@ -6,6 +6,10 @@
 <form class="item-form" method="post" action="/save_nrl"><label{{I18N_ATTR}}>{{LABEL}}</label><div class="eq-row"><input class="auto-slider" type="range" name="{{FIELD}}" min="{{MIN}}" max="{{MAX}}" step="1" value="{{VALUE}}" oninput="syncAutoSliderValue(this)" onpointerup="submitAutoSlider(this)" onchange="syncAutoSliderValue(this)"><input class="eq-value mono" type="number" value="{{VALUE}}" readonly tabindex="-1"></div></form>
 <!-- @endtemplate -->
 
+<!-- @template AUTO_NUMBER -->
+<form class="item-form" method="post" action="/save_nrl"><label{{I18N_ATTR}}>{{LABEL}}</label><input class="mono" type="number" name="{{FIELD}}" min="{{MIN}}" max="{{MAX}}" step="{{STEP}}" value="{{VALUE}}" onchange="submitSwitch(this)"></form>
+<!-- @endtemplate -->
+
 <!-- @template WIFI_OPTION -->
 <option value="{{VALUE}}"{{SELECTED}}>{{LABEL}}</option>
 <!-- @endtemplate -->
@@ -145,7 +149,7 @@
     </div>
   </div>
   <div class="grid">
-    <div class="subpanel"><h3 data-i18n="volume">Volume</h3><div class="subgrid">{{MIC_VOLUME_SLIDER}}{{LINE_OUT_VOLUME_SLIDER}}</div></div>
+    <div class="subpanel"><h3 data-i18n="volume">Volume</h3><div class="subgrid">{{MIC_VOLUME_SLIDER}}{{MIC_PCM_GAIN_INPUT}}{{LINE_OUT_VOLUME_SLIDER}}</div></div>
     <div class="subpanel"><h3 data-i18n="audioProcessing">Audio Processing</h3><div class="subgrid">
       {{AEC_SECTION}}
     </div></div>

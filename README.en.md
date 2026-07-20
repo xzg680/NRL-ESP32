@@ -2,7 +2,7 @@
 
 [Chinese manual](README.md) · HTML: [Chinese](README.html) / [English](README.en.html)
 
-Current firmware version: `0.8.2`
+Current firmware version: `0.8.5`
 
 This project is an NRL network-radio bridge firmware primarily targeting ESP32-S31, while retaining support for ESP32-S3 boards. It brings radio audio, PTT, SQL, channel selection, SCI serial passthrough, and network configuration into one embedded application. Board targets use the appropriate audio codec, including ES8311 or ES8389; the project covers Moto3188/NRL hardware and ESP32-S31 development boards.
 
@@ -84,9 +84,9 @@ The following capabilities are implemented in the current codebase. Features mar
 ```powershell
 $env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
 $env:OTA_ADMIN_TOKEN = '<admin token>'
-python scripts/publish_ota_mcp.py --version 0.8.3 --notes 'release notes'
+python scripts/publish_ota_mcp.py --version 0.8.5 --notes 'release notes'
 # Verify all four published board packages without writing:
-python scripts/publish_ota_mcp.py --version 0.8.3 --verify-only
+python scripts/publish_ota_mcp.py --version 0.8.5 --verify-only
 ```
 
 ## Features
@@ -128,7 +128,7 @@ python scripts/publish_ota_mcp.py --version 0.8.3 --verify-only
 - Remote AT command configuration
   - Supports querying and changing channel, server settings, callsign, SSID, volume, SCI parameters, and output mode.
   - Supports remote reboot.
-  - Common commands: `AT+CH`, `AT+D_IP`, `AT+D_PORT`, `AT+CALL`, `AT+SSID`, `AT+MIC_GAIN`, `AT+VOLUME`, `AT+HP_DRIVE`, `AT+SCI`, `AT+REBOOT`.
+  - Common commands: `AT+CH`, `AT+D_IP`, `AT+D_PORT`, `AT+CALL`, `AT+SSID`, `AT+MIC_GAIN`, `AT+MIC_PCM_GAIN` (`0.1`–`5.0`), `AT+VOLUME`, `AT+HP_DRIVE`, `AT+SCI`, `AT+REBOOT`.
 
 - Persistent configuration
   - Radio and network configuration is saved to the shared Flash/EEPROM area.

@@ -577,6 +577,19 @@ static std::string buildAudioSections(const ExternalRadioConfig *config)
     return WifiConfigPortalView_BuildAudioSections(config);
 }
 
+static std::string formatMicPcmGain(const uint16_t gain_milli)
+{
+    char value[16];
+    snprintf(value, sizeof(value), "%u.%03u",
+             static_cast<unsigned>(gain_milli / 1000u),
+             static_cast<unsigned>(gain_milli % 1000u));
+    size_t len = strlen(value);
+    while (len > 2u && value[len - 1u] == '0' && value[len - 2u] != '.') {
+        value[--len] = '\0';
+    }
+    return std::string(value);
+}
+
 // Look up the canonical, just-saved value for one form field name. The save
 // handler echoes these back so the client can refresh its inputs from device
 // truth (post-clamp, post-sanitize) without re-rendering the whole page.
@@ -602,6 +615,7 @@ static std::string savedValueForArg(const ExternalRadioConfig *config, const std
     if (name == "tail_suppress_ms") return std::to_string(config->tail_suppress_ms);
     if (name == "battery_cal_milli") return std::to_string(config->battery_cal_milli);
     if (name == "mic_volume") return std::to_string(config->mic_volume);
+    if (name == "mic_pcm_gain") return formatMicPcmGain(config->mic_pcm_gain_milli);
     if (name == "line_out_volume") return std::to_string(config->line_out_volume);
     if (name == "hp_drive_enabled") return config->hp_drive_enabled ? "1" : "0";
     if (name == "aec_enabled") return config->aec_enabled ? "1" : "0";
@@ -711,6 +725,7 @@ static void logChangedFields(const ExternalRadioConfig *before,
     LOG_UINT(voice_payload_bytes);
     LOG_UINT(tail_suppress_ms);
     LOG_UINT(mic_volume);
+    LOG_UINT(mic_pcm_gain_milli);
     LOG_UINT(line_out_volume);
     LOG_BOOL(hp_drive_enabled);
     LOG_BOOL(aec_enabled);
@@ -1021,7 +1036,7 @@ static void sendSavedFieldsJson(const bool ok)
     }
     if (s_server.hasArg("audio_reset_defaults")) {
         static const char *kAudioFields[] = {
-            "mic_volume", "line_out_volume", "hp_drive_enabled",
+            "mic_volume", "mic_pcm_gain", "line_out_volume", "hp_drive_enabled",
             "aec_enabled", "aec_reference_source", "ai_noise_enabled",
             "mic_hpf_enabled", "drc_enabled", "drc_winsize",
             "drc_maxlevel", "drc_minlevel", "dac_ramprate",
@@ -1618,6 +1633,21 @@ static bool parseUIntArg(const std::string &text, unsigned long *out_value)
     return true;
 }
 
+static bool parseMicPcmGainArg(const std::string &text, uint16_t *out_milli)
+{
+    if (out_milli == nullptr || text.empty()) return false;
+    char *end = nullptr;
+    const float gain = strtof(text.c_str(), &end);
+    if (end == text.c_str() || end == nullptr || *end != '\0' || !isfinite(gain) ||
+        gain < 0.1f || gain > 5.0f) {
+        return false;
+    }
+    const long milli = lroundf(gain * 1000.0f);
+    if (milli < 100l || milli > 5000l) return false;
+    *out_milli = static_cast<uint16_t>(milli);
+    return true;
+}
+
 static bool parseIpArg(const std::string &text, uint32_t *out_value)
 {
     if (out_value == nullptr || text.empty()) {
@@ -1811,6 +1841,11 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
         ok = parseUIntArg(s_server.arg("mic_volume"), &value) &&
              value <= 255UL &&
              EXTERNAL_RADIO_SetMicVolume(static_cast<uint8_t>(value), false);
+    }
+    if (ok && s_server.hasArg("mic_pcm_gain")) {
+        uint16_t gain_milli = 0u;
+        ok = parseMicPcmGainArg(s_server.arg("mic_pcm_gain"), &gain_milli) &&
+             EXTERNAL_RADIO_SetMicPcmGain(gain_milli, false);
     }
     if (ok && s_server.hasArg("line_out_volume")) {
         unsigned long value = 0UL;

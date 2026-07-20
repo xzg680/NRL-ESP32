@@ -104,6 +104,7 @@ constexpr float kMicHpf2B2 =  0.96935382f;
 constexpr float kMicHpf2A1 = -1.93571484f;
 constexpr float kMicHpf2A2 =  0.94170045f;
 static volatile bool s_mic_hpf_enabled = false;
+static volatile uint16_t s_mic_pcm_gain_milli = 1000u;
 static float s_mic_hpf1_x1 = 0.0f;
 static float s_mic_hpf1_x2 = 0.0f;
 static float s_mic_hpf1_y1 = 0.0f;
@@ -122,6 +123,18 @@ static inline void mic_hpf_reset(void) {
     s_mic_hpf2_x2 = 0.0f;
     s_mic_hpf2_y1 = 0.0f;
     s_mic_hpf2_y2 = 0.0f;
+}
+
+static inline int16_t mic_pcm_apply_gain(const int16_t sample) {
+    const int32_t gain_milli = static_cast<int32_t>(s_mic_pcm_gain_milli);
+    if (gain_milli == 1000) {
+        return sample;
+    }
+    int32_t scaled = static_cast<int32_t>(sample) * gain_milli;
+    scaled = (scaled + (scaled >= 0 ? 500 : -500)) / 1000;
+    if (scaled > INT16_MAX) return INT16_MAX;
+    if (scaled < INT16_MIN) return INT16_MIN;
+    return static_cast<int16_t>(scaled);
 }
 
 static inline void mic_hpf_apply(int16_t *frame, const size_t count) {
@@ -346,7 +359,7 @@ static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
     // driver level so the MIC-source AEC reference path is harmless even if
     // the user happens to pick it.
     for (size_t i = 0; i < kFrameSamples; ++i) {
-        dst[i] = raw[i * 2];
+        dst[i] = mic_pcm_apply_gain(raw[i * 2]);
         if (dst_ref != nullptr) {
 #if NRL_BOARD == NRL_BOARD_GEZIPAI
             dst_ref[i] = 0;
@@ -934,6 +947,22 @@ extern "C" void AUDIO_SetMicHpfEnabled(const bool enabled) {
 
 extern "C" bool AUDIO_GetMicHpfEnabled(void) {
     return s_mic_hpf_enabled;
+}
+
+extern "C" void AUDIO_SetMicPcmGain(const uint16_t gain_milli) {
+    const uint16_t normalized = (gain_milli >= 100u && gain_milli <= 5000u)
+                                    ? gain_milli
+                                    : 1000u;
+    if (s_mic_pcm_gain_milli != normalized) {
+        s_mic_pcm_gain_milli = normalized;
+        ESP_LOGI(TAG, "mic PCM gain=%u.%03ux",
+                 static_cast<unsigned>(normalized / 1000u),
+                 static_cast<unsigned>(normalized % 1000u));
+    }
+}
+
+extern "C" uint16_t AUDIO_GetMicPcmGain(void) {
+    return s_mic_pcm_gain_milli;
 }
 
 extern "C" int AUDIO_GetSampleRate(void) {

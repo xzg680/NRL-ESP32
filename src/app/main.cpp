@@ -274,6 +274,9 @@ static void initApp()
     // The mic ADC on this board is a separate ES7210 chip. ES8311_Init()
     // above has already started I2S, so MCLK/BCLK/LRCK are running and the
     // ES7210 can lock its clock. Configure it now so I2S DIN carries audio.
+    if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
+        ES7210_SetMicVolume(config->mic_volume);
+    }
     if (ES7210_Init()) {
         ESP_LOGI(TAG, "ES7210 mic ADC ready.");
     } else {

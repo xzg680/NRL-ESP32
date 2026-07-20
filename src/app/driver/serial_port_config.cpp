@@ -131,11 +131,20 @@ extern "C" bool SERIAL_PORT_CONFIG_Validate(const SerialPortConfig *config)
                      config->uart2_parity, config->uart2_stop_bits)) {
         return false;
     }
-    const int pins[] = {config->uart1_rx_pin, config->uart1_tx_pin,
-                        config->uart2_rx_pin, config->uart2_tx_pin};
-    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
-        for (size_t j = i + 1; j < sizeof(pins) / sizeof(pins[0]); ++j) {
-            if (pins[i] == pins[j]) return false;
+    if (config->uart1_rx_pin == config->uart1_tx_pin ||
+        config->uart2_rx_pin == config->uart2_tx_pin) {
+        return false;
+    }
+    // A disabled port does not reserve its GPIOs. This allows a board header
+    // such as Gezipai U0 (GPIO44/43) to be handed from UART1/SCI to UART2/GPS
+    // in one Web/AT configuration update.
+    if (config->uart1_enabled && config->uart2_enabled) {
+        const int uart1_pins[] = {config->uart1_rx_pin, config->uart1_tx_pin};
+        const int uart2_pins[] = {config->uart2_rx_pin, config->uart2_tx_pin};
+        for (const int uart1_pin : uart1_pins) {
+            for (const int uart2_pin : uart2_pins) {
+                if (uart1_pin == uart2_pin) return false;
+            }
         }
     }
     return true;

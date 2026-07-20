@@ -1,7 +1,9 @@
 #include "external_radio.h"
 
 #include "board_pins.h"
+#include "audio_passthrough.h"
 #include "eeprom.h"
+#include "es7210.h"
 #include "es8311.h"
 #include "es8389.h"
 #include "../../lib/nrl_audio_config.h"
@@ -36,6 +38,9 @@ constexpr uint8_t kLegacyConfigVersion4 = 4U;
 constexpr uint8_t kMinChannel = 0U;
 constexpr uint8_t kMaxChannel = 7U;
 constexpr uint8_t kDefaultMicVolume = 180U;
+constexpr uint16_t kDefaultMicPcmGainMilli = 1000U;
+constexpr uint16_t kMinMicPcmGainMilli = 100U;
+constexpr uint16_t kMaxMicPcmGainMilli = 5000U;
 constexpr uint8_t kDefaultLineOutVolume = 180U;
 constexpr uint8_t kPersistedHpDriveOff = 1U;
 constexpr uint8_t kPersistedHpDriveOn = 2U;
@@ -356,6 +361,7 @@ static void applyDefaultAdcConfig(void)
 static void applyDefaultAudioConfig(void)
 {
     s_config.mic_volume = kDefaultMicVolume;
+    s_config.mic_pcm_gain_milli = kDefaultMicPcmGainMilli;
     s_config.line_out_volume = kDefaultLineOutVolume;
     s_config.hp_drive_enabled = false;
     applyDefaultDrcConfig();
@@ -446,9 +452,11 @@ static void applyAudioConfigToCodec(void)
     ES8389_SetOutputVolume(s_config.line_out_volume);
     ES8389_SetInputGain(s_config.mic_volume);
 #endif
+    ES7210_SetMicVolume(s_config.mic_volume);
     // The mic HPF is a pure-software filter (no I2C registers involved), so
     // it is pushed to the codec driver separately from ES8311_ApplyAudioConfig.
     AUDIO_SetMicHpfEnabled(s_config.mic_hpf_enabled);
+    AUDIO_SetMicPcmGain(s_config.mic_pcm_gain_milli);
 }
 
 // Drives the BH4TDV radio's channel-select GPIOs. 格子派 has no channel-
@@ -565,6 +573,10 @@ static void normalizeConfig(void)
     if (s_config.battery_cal_milli < kMinBatteryCalMilli ||
         s_config.battery_cal_milli > kMaxBatteryCalMilli) {
         s_config.battery_cal_milli = kDefaultBatteryCalMilli;
+    }
+    if (s_config.mic_pcm_gain_milli < kMinMicPcmGainMilli ||
+        s_config.mic_pcm_gain_milli > kMaxMicPcmGainMilli) {
+        s_config.mic_pcm_gain_milli = kDefaultMicPcmGainMilli;
     }
     if (s_config.voice_payload_bytes < kMinVoicePayloadBytes ||
         s_config.voice_payload_bytes > kMaxVoicePayloadBytes) {
@@ -718,11 +730,16 @@ static bool loadPersistedConfig(void)
         // saves read 0 here, which is the default (suppression disabled).
         s_config.tail_suppress_ms = static_cast<uint16_t>(persisted.reserved2[2]) |
                                     (static_cast<uint16_t>(persisted.reserved2[3]) << 8);
+        // Software mic PCM gain uses the final two version-5 reserved bytes.
+        // An older saved config reads zero and is normalized to 1.0x.
+        s_config.mic_pcm_gain_milli = static_cast<uint16_t>(persisted.reserved2[4]) |
+                                      (static_cast<uint16_t>(persisted.reserved2[5]) << 8);
     } else {
         s_config.ptt_timeout_s = 0U;
         s_config.battery_cal_milli = 0U;
         s_config.voice_payload_bytes = 0U;
         s_config.tail_suppress_ms = 0U;
+        s_config.mic_pcm_gain_milli = 0U;
     }
     normalizeConfig();
     return true;
@@ -791,6 +808,8 @@ static bool savePersistedConfig(void)
     persisted.reserved2[1] = static_cast<uint8_t>((s_config.voice_payload_bytes >> 8) & 0xFFU);
     persisted.reserved2[2] = static_cast<uint8_t>(s_config.tail_suppress_ms & 0xFFU);
     persisted.reserved2[3] = static_cast<uint8_t>((s_config.tail_suppress_ms >> 8) & 0xFFU);
+    persisted.reserved2[4] = static_cast<uint8_t>(s_config.mic_pcm_gain_milli & 0xFFU);
+    persisted.reserved2[5] = static_cast<uint8_t>((s_config.mic_pcm_gain_milli >> 8) & 0xFFU);
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
@@ -845,6 +864,7 @@ extern "C" void EXTERNAL_RADIO_Init(void)
     }
 
     applyChannelOutputs();
+    AUDIO_SetMicPcmGain(s_config.mic_pcm_gain_milli);
     s_loaded = true;
 }
 
@@ -1027,6 +1047,20 @@ bool EXTERNAL_RADIO_SetMicVolume(const uint8_t value, const bool persist)
     EXTERNAL_RADIO_Init();
     s_config.mic_volume = value;
     applyAudioConfigToCodec();
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetMicPcmGain(const uint16_t gain_milli, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (gain_milli < kMinMicPcmGainMilli || gain_milli > kMaxMicPcmGainMilli) {
+        return false;
+    }
+    s_config.mic_pcm_gain_milli = gain_milli;
+    AUDIO_SetMicPcmGain(gain_milli);
     if (persist) {
         return savePersistedConfig();
     }

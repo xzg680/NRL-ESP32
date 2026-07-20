@@ -69,6 +69,11 @@ void AUDIO_SetAecReferenceSource(uint8_t source);
 void AUDIO_SetMicHpfEnabled(bool enabled);
 bool AUDIO_GetMicHpfEnabled(void);
 
+// Saturating software gain on PCM16 immediately after ADC/I2S capture.
+// `gain_milli` is 100..5000, where 1000 means 1.0x.
+void AUDIO_SetMicPcmGain(uint16_t gain_milli);
+uint16_t AUDIO_GetMicPcmGain(void);
+
 // Audio parameters mirrored to callers that need to size buffers.
 int AUDIO_GetSampleRate(void);
 size_t AUDIO_GetFrameSamples(void);

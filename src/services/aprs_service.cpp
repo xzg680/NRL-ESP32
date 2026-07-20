@@ -48,6 +48,7 @@ constexpr uint16_t kMaxBeaconIntervalS = 3600u;
 // the last-beaconed position sends one early. The configured
 // beacon_interval_s always remains the stationary/no-GPS ceiling.
 constexpr uint16_t kAutoMinIntervalS = 30u;
+constexpr uint32_t kStatusSatelliteUpdateMs = 60000u;
 constexpr double kAutoFastSpeedKmh = 60.0; // at/above: beacon at the floor rate
 constexpr double kAutoSlowSpeedKmh = 3.0;  // below: treated as stationary
 constexpr double kAutoMoveKm = 0.3;        // early beacon after moving this far
@@ -120,6 +121,7 @@ double s_gps_lon = 0.0;
 double s_gps_alt_m = 0.0;
 float s_gps_speed_kmh = -1.0f;
 uint16_t s_gps_course = 0;
+int16_t s_gps_satellites = -1;
 uint32_t s_gps_last_fix_ms = 0;
 
 // NMEA ring, filled by the APRS task from dedicated UART2.
@@ -147,6 +149,8 @@ uint32_t s_rx_level_n = 0;
 int s_is_socket = -1;
 bool s_is_logged_in = false;
 bool s_is_status_sent = false;
+int16_t s_is_status_satellites = -2; // -2=never sent, -1=no current fix
+uint32_t s_is_last_status_ms = 0;
 volatile bool s_is_reconnect_requested = false;
 uint32_t s_is_last_attempt_ms = 0;
 char s_is_line[600];
@@ -378,6 +382,12 @@ void handleNmeaLine(char *line)
     } else if (strncmp(type, "GGA", 3) == 0) {
         const size_t n = splitNmea(line, f, 20);
         // $xxGGA,time,lat,NS,lon,EW,fix,sats,hdop,alt,M,...
+        if (n >= 8 && f[7][0] != '\0') {
+            const long satellites = strtol(f[7], nullptr, 10);
+            s_gps_satellites = (satellites >= 0 && satellites <= 99)
+                                   ? static_cast<int16_t>(satellites)
+                                   : -1;
+        }
         if (n >= 10 && f[6][0] != '\0' && f[6][0] != '0' && f[2][0] != '\0') {
             s_gps_lat = nmeaCoordToDeg(f[2], f[3]);
             s_gps_lon = nmeaCoordToDeg(f[4], f[5]);
@@ -735,6 +745,8 @@ void isDisconnect()
     }
     s_is_logged_in = false;
     s_is_status_sent = false;
+    s_is_status_satellites = -2;
+    s_is_last_status_ms = 0;
     s_is_line_len = 0;
 }
 
@@ -863,7 +875,7 @@ void isPoll()
 
 // ----------------------------------------------------------------- beacons --
 
-// "!DDMM.mmN/DDDMM.mmE&/A=001234 comment"
+// "!DDMM.mmN/DDDMM.mmE&123/045/A=001234 comment"
 void buildPositionInfo(char *out, size_t out_size, const char *comment)
 {
     double lat = 0.0, lon = 0.0, alt = 0.0;
@@ -873,14 +885,43 @@ void buildPositionInfo(char *out, size_t out_size, const char *comment)
     const std::string lon_str = s_parser.deg2lon(lon);
     const long alt_ft = lround(alt * 3.28084);
 
-    if (comment != nullptr && comment[0] != '\0') {
-        snprintf(out, out_size, "!%s%c%s%c/A=%06ld %s",
+    // APRS course/speed data extension: ccc/sss, degrees and knots. Only
+    // advertise it while the RMC fix is fresh; a configured fallback position
+    // must not look like a live moving GPS station. APRS represents north as
+    // 360 degrees rather than 000.
+    char motion[9] = {};
+    const bool gps_fresh = s_gps_fix &&
+                           (nowMs() - s_gps_last_fix_ms) < kGpsFixFreshMs;
+    if (gps_fresh && isfinite(s_gps_speed_kmh) && s_gps_speed_kmh >= 0.0f) {
+        const unsigned course = (s_gps_course % 360u) == 0u
+                                    ? 360u
+                                    : static_cast<unsigned>(s_gps_course % 360u);
+        long speed_knots = lround(static_cast<double>(s_gps_speed_kmh) / 1.852);
+        if (speed_knots < 0) speed_knots = 0;
+        if (speed_knots > 999) speed_knots = 999;
+        snprintf(motion, sizeof(motion), "%03u/%03ld", course, speed_knots);
+    }
+
+    if (!gps_fresh) {
+        // The configured fallback coordinates keep the station visible, but
+        // do not attach zero/stale altitude or motion fields to them.
+        if (comment != nullptr && comment[0] != '\0') {
+            snprintf(out, out_size, "!%s%c%s%c %s",
+                     lat_str.c_str(), s_cfg.symbol_table, lon_str.c_str(),
+                     s_cfg.symbol_code, comment);
+        } else {
+            snprintf(out, out_size, "!%s%c%s%c",
+                     lat_str.c_str(), s_cfg.symbol_table, lon_str.c_str(),
+                     s_cfg.symbol_code);
+        }
+    } else if (comment != nullptr && comment[0] != '\0') {
+        snprintf(out, out_size, "!%s%c%s%c%s/A=%06ld %s",
                  lat_str.c_str(), s_cfg.symbol_table, lon_str.c_str(),
-                 s_cfg.symbol_code, alt_ft, comment);
+                 s_cfg.symbol_code, motion, alt_ft, comment);
     } else {
-        snprintf(out, out_size, "!%s%c%s%c/A=%06ld",
+        snprintf(out, out_size, "!%s%c%s%c%s/A=%06ld",
                  lat_str.c_str(), s_cfg.symbol_table, lon_str.c_str(),
-                 s_cfg.symbol_code, alt_ft);
+                 s_cfg.symbol_code, motion, alt_ft);
     }
 }
 
@@ -902,8 +943,29 @@ void sendBeacon()
                                ? radio->server_host
                                : "unknown";
     const uint16_t nrl_port = (radio != nullptr) ? radio->server_port : 0u;
-    char net_comment[160];
-    snprintf(net_comment, sizeof(net_comment), "@udp://%s:%u%s%s",
+    // Keep the map site's first text row focused on live navigation data and
+    // the user's endpoint/comment. The same values are also encoded in the
+    // APRS-standard ccc/sss and /A= fields by buildPositionInfo(), so APRS
+    // clients can parse them instead of relying on this human-readable text.
+    char gps_text[64];
+    const bool gps_fresh = s_gps_fix &&
+                           (nowMs() - s_gps_last_fix_ms) < kGpsFixFreshMs;
+    if (gps_fresh && isfinite(s_gps_speed_kmh) && s_gps_speed_kmh >= 0.0f &&
+        isfinite(s_gps_alt_m)) {
+        const unsigned course = (s_gps_course % 360u) == 0u
+                                    ? 360u
+                                    : static_cast<unsigned>(s_gps_course % 360u);
+        const double display_speed = fmin(static_cast<double>(s_gps_speed_kmh), 1850.0);
+        const double display_altitude = fmax(-99999.0, fmin(s_gps_alt_m, 999999.0));
+        snprintf(gps_text, sizeof(gps_text), "SPD=%.1fkm/h CRS=%03u ALT=%.0fm",
+                 display_speed, course, display_altitude);
+    } else {
+        gps_text[0] = '\0';
+    }
+
+    char net_comment[200];
+    snprintf(net_comment, sizeof(net_comment), "%s%s@udp://%s:%u%s%s",
+             gps_text, gps_text[0] != '\0' ? " " : "",
              nrl_host, (unsigned)nrl_port,
              s_cfg.comment[0] != '\0' ? " " : "", s_cfg.comment);
     char net_info[240];
@@ -914,14 +976,37 @@ void sendBeacon()
         char line[300];
         snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:%s", call, net_info);
         isSendLine(line);
-        // Board type and firmware are static for the lifetime of a connection.
-        // Send this APRS status packet once per login so map sites retain the
-        // second information row without counting two packets every interval.
-        if (!s_is_status_sent && s_is_socket >= 0 && s_is_logged_in) {
-            snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:>NRL-ESP32,%s,v%s",
-                     call, boardType(), NRL_FIRMWARE_VERSION);
+        // Keep satellite count on the map site's board/firmware status row,
+        // not in the position comment. Send immediately at login and when a
+        // fix first appears; later count changes are rate-limited to avoid an
+        // extra APRS-IS packet for every small constellation fluctuation.
+        const uint32_t status_now = nowMs();
+        const bool status_gps_fresh = s_gps_fix &&
+                                      (status_now - s_gps_last_fix_ms) < kGpsFixFreshMs;
+        const int16_t status_satellites =
+            (status_gps_fresh && s_gps_satellites >= 0) ? s_gps_satellites : -1;
+        const bool first_fix = s_is_status_satellites < 0 && status_satellites >= 0;
+        const bool lost_fix = s_is_status_satellites >= 0 && status_satellites < 0;
+        const bool satellite_changed = status_satellites != s_is_status_satellites;
+        const bool status_due = !s_is_status_sent ||
+            (satellite_changed &&
+             (first_fix || lost_fix ||
+              (status_now - s_is_last_status_ms) >= kStatusSatelliteUpdateMs));
+        if (status_due && s_is_socket >= 0 && s_is_logged_in) {
+            if (status_satellites >= 0) {
+                snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:>NRL-ESP32,%s,v%s,SAT=%d",
+                         call, boardType(), NRL_FIRMWARE_VERSION,
+                         static_cast<int>(status_satellites));
+            } else {
+                snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:>NRL-ESP32,%s,v%s",
+                         call, boardType(), NRL_FIRMWARE_VERSION);
+            }
             isSendLine(line);
             s_is_status_sent = s_is_socket >= 0 && s_is_logged_in;
+            if (s_is_status_sent) {
+                s_is_status_satellites = status_satellites;
+                s_is_last_status_ms = status_now;
+            }
         }
         s_tx_count++;
     }

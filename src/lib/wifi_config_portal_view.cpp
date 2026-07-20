@@ -239,6 +239,42 @@ static std::string buildAutoSubmitSlider(const char *field_name,
     return html;
 }
 
+static std::string buildAutoSubmitNumber(const char *field_name,
+                                         const char *label,
+                                         const char *i18n_key,
+                                         const char *min_value,
+                                         const char *max_value,
+                                         const char *step,
+                                         const char *value)
+{
+    std::string html = std::string(kWifiConfigPortalAutoNumberTemplate);
+    std::string i18n_attr;
+    if (i18n_key != nullptr && i18n_key[0] != '\0') {
+        i18n_attr = std::string(" data-i18n=\"") + i18n_key + "\"";
+    }
+    replaceToken(html, "{{I18N_ATTR}}", i18n_attr);
+    replaceToken(html, "{{LABEL}}", label);
+    replaceToken(html, "{{FIELD}}", field_name);
+    replaceToken(html, "{{MIN}}", min_value);
+    replaceToken(html, "{{MAX}}", max_value);
+    replaceToken(html, "{{STEP}}", step);
+    replaceToken(html, "{{VALUE}}", value);
+    return html;
+}
+
+static std::string formatMicPcmGain(const uint16_t gain_milli)
+{
+    char value[16];
+    snprintf(value, sizeof(value), "%u.%03u",
+             static_cast<unsigned>(gain_milli / 1000u),
+             static_cast<unsigned>(gain_milli % 1000u));
+    size_t len = strlen(value);
+    while (len > 2u && value[len - 1u] == '0' && value[len - 2u] != '.') {
+        value[--len] = '\0';
+    }
+    return std::string(value);
+}
+
 static std::string staIpOrNotConnected(uint32_t ip)
 {
     return (ip != 0u) ? ipToString(ip) : std::string("not connected");
@@ -383,6 +419,11 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
 #endif
     replaceToken(html, "{{HP_DRIVE_CHECKED}}", checkedAttr(config->hp_drive_enabled));
     replaceToken(html, "{{MIC_VOLUME_SLIDER}}", buildAutoSubmitSlider("mic_volume", "Mic Volume (0-255)", "micVolume", 0u, 255u, config->mic_volume));
+    const std::string mic_pcm_gain = formatMicPcmGain(config->mic_pcm_gain_milli);
+    replaceToken(html, "{{MIC_PCM_GAIN_INPUT}}",
+                 buildAutoSubmitNumber("mic_pcm_gain", "Mic PCM Gain (0.1-5.0x)",
+                                       "micPcmGain", "0.1", "5.0", "0.1",
+                                       mic_pcm_gain.c_str()));
     replaceToken(html, "{{LINE_OUT_VOLUME_SLIDER}}", buildAutoSubmitSlider("line_out_volume", "Line Out Volume (0-255)", "lineOutVolume", 0u, 255u, config->line_out_volume));
     replaceToken(html, "{{ADC_DMIC_CHECKED}}", checkedAttr(config->adc_dmic_enabled));
     replaceToken(html, "{{ADC_DMIC_VALUE}}", boolValue(config->adc_dmic_enabled));
