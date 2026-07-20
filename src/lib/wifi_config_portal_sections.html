@@ -21,7 +21,7 @@
     <span class="hint" id="scan-status" data-i18n="scanIdle">Click Scan to find nearby WiFi networks.</span>
   </div>
   <div class="grid">
-    <form class="item-form span-2" method="post" action="/save_wifi">
+    <form class="item-form span-2" method="post" action="/save_wifi" data-reload-on-save="1">
       <div class="subgrid">
         <div>
           <label data-i18n="wifiSsid">WiFi SSID</label>
@@ -35,8 +35,13 @@
         </div>
         <div><label data-i18n="wifiPassword">WiFi Password</label><input name="wifi_password" value="{{WIFI_PASSWORD}}"></div>
       </div>
-      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="wifiAddOrUpdate">Add / Update</button></div>
     </form>
+    <div class="span-2">
+      <label data-i18n="wifiSavedNetworks">Saved WiFi Networks</label>
+      <div class="hint" data-i18n="wifiSavedHint">Up to 5 networks; the displayed order is the connection priority.</div>
+      <div class="grid">{{WIFI_SAVED_PROFILES}}</div>
+    </div>
     <form class="item-form span-2" method="post" action="/save_wifi">
       <div class="subgrid">
         <div class="span-2"><label data-i18n="dhcp">DHCP</label><input type="hidden" name="wifi_dhcp_present" value="1"><label class="hint"><input id="wifi-dhcp-enabled" type="checkbox" name="wifi_dhcp_enabled" value="1" onchange="syncDhcpFields()" {{DHCP_CHECKED}}><span data-i18n="useDhcp">Use DHCP for station IP</span></label></div>

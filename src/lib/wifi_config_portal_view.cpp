@@ -309,7 +309,23 @@ std::string WifiConfigPortalView_BuildNetworkSection(const ExternalRadioConfig *
         wifi_options += option;
     }
     std::string html = std::string(kWifiConfigPortalNetworkSectionTemplate);
+    std::string saved_profiles;
+    const size_t profile_count = EXTERNAL_RADIO_GetWifiProfileCount();
+    for (size_t i = 0; i < profile_count; ++i) {
+        saved_profiles += "<form class=\"item-form\" method=\"post\" action=\"/save_wifi\" data-reload-on-save=\"1\">";
+        saved_profiles += "<input type=\"hidden\" name=\"wifi_profile_index\" value=\"" + fromU32(i) + "\">";
+        saved_profiles += "<label><span class=\"mono\">" + fromU32(i + 1U) + ". " +
+                          htmlEscape(config->wifi_profiles[i].ssid) + "</span></label>";
+        saved_profiles += "<div class=\"actions\">";
+        if (i > 0U) saved_profiles += "<button class=\"btn-small secondary\" type=\"button\" onclick=\"submitFormAction(this,'wifi_move_up')\" data-i18n=\"wifiPriorityUp\">Up</button>";
+        if (i + 1U < profile_count) saved_profiles += "<button class=\"btn-small secondary\" type=\"button\" onclick=\"submitFormAction(this,'wifi_move_down')\" data-i18n=\"wifiPriorityDown\">Down</button>";
+        saved_profiles += "<button class=\"btn-small secondary\" type=\"button\" onclick=\"submitFormAction(this,'wifi_delete')\" data-i18n=\"wifiDelete\">Delete</button></div></form>";
+    }
+    if (saved_profiles.empty()) {
+        saved_profiles = "<span class=\"hint\" data-i18n=\"wifiNoSaved\">No saved WiFi networks.</span>";
+    }
     replaceToken(html, "{{WIFI_OPTIONS}}", wifi_options);
+    replaceToken(html, "{{WIFI_SAVED_PROFILES}}", saved_profiles);
     replaceToken(html, "{{WIFI_PASSWORD}}", htmlEscape(config->wifi_password));
     replaceToken(html, "{{DHCP_CHECKED}}", checkedAttr(config->wifi_dhcp_enabled));
     replaceToken(html, "{{WIFI_IP}}", wifiDisplayIp(config, config->wifi_ip, nrlWifiStaIp()));

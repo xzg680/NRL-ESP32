@@ -25,6 +25,13 @@ struct SciSerialConfig {
     uint8_t stop_bits;
 };
 
+constexpr size_t EXTERNAL_RADIO_MAX_WIFI_PROFILES = 5U;
+
+struct ExternalWifiProfile {
+    char ssid[33];
+    char password[65];
+};
+
 enum ExternalRadioAecReferenceSource : uint8_t {
     EXTERNAL_RADIO_AEC_REF_NETWORK = 0,
     EXTERNAL_RADIO_AEC_REF_MIC = 1,
@@ -111,6 +118,10 @@ struct ExternalRadioConfig {
     // networked devices. 0 disables suppression; valid range 0..5000.
     uint16_t tail_suppress_ms;
     SciSerialConfig sci;
+    // Saved Wi-Fi networks in connection-priority order. Entry 0 mirrors the
+    // legacy wifi_ssid/wifi_password fields so existing AT/BLE/LCD callers
+    // remain source-compatible.
+    ExternalWifiProfile wifi_profiles[EXTERNAL_RADIO_MAX_WIFI_PROFILES];
     char wifi_ssid[33];
     char wifi_password[65];
     char server_host[65];
@@ -120,6 +131,10 @@ struct ExternalRadioConfig {
 const ExternalRadioConfig *EXTERNAL_RADIO_GetConfig(void);
 bool EXTERNAL_RADIO_SetWifiSsid(const char *value, bool persist);
 bool EXTERNAL_RADIO_SetWifiPassword(const char *value, bool persist);
+size_t EXTERNAL_RADIO_GetWifiProfileCount(void);
+bool EXTERNAL_RADIO_AddWifiProfile(const char *ssid, const char *password, bool persist);
+bool EXTERNAL_RADIO_RemoveWifiProfile(size_t index, bool persist);
+bool EXTERNAL_RADIO_MoveWifiProfile(size_t index, int direction, bool persist);
 bool EXTERNAL_RADIO_SetWifiIp(uint32_t value, bool persist);
 bool EXTERNAL_RADIO_SetWifiNetmask(uint32_t value, bool persist);
 bool EXTERNAL_RADIO_SetWifiGateway(uint32_t value, bool persist);

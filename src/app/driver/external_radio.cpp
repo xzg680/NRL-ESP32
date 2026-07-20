@@ -30,11 +30,12 @@ namespace {
 
 constexpr uint32_t kConfigAddress = 0x2C00U;
 constexpr uint32_t kConfigMagic = 0x58455655U;
-constexpr uint8_t kConfigVersion = 5U;
+constexpr uint8_t kConfigVersion = 6U;
 constexpr uint8_t kLegacyConfigVersion1 = 1U;
 constexpr uint8_t kLegacyConfigVersion2 = 2U;
 constexpr uint8_t kLegacyConfigVersion3 = 3U;
 constexpr uint8_t kLegacyConfigVersion4 = 4U;
+constexpr uint8_t kLegacyConfigVersion5 = 5U;
 constexpr uint8_t kMinChannel = 0U;
 constexpr uint8_t kMaxChannel = 7U;
 constexpr uint8_t kDefaultMicVolume = 180U;
@@ -115,9 +116,12 @@ struct PersistedExternalRadioConfig {
     uint32_t adceq_b1;
     uint32_t adceq_b2;
     uint8_t reserved4[4];
+    ExternalWifiProfile wifi_extra[EXTERNAL_RADIO_MAX_WIFI_PROFILES - 1U];
 } __attribute__((packed));
 
 static_assert((sizeof(PersistedExternalRadioConfig) % 8U) == 0U, "config must stay 8-byte aligned");
+static_assert(sizeof(PersistedExternalRadioConfig) <= 0x400U,
+              "config must fit its reserved 0x2C00..0x2FFF EEPROM window");
 
 ExternalRadioConfig s_config = {};
 bool s_loaded = false;
@@ -508,6 +512,7 @@ static void applyDefaults(void)
 
 static void applyNetworkDefaults(void)
 {
+    memset(s_config.wifi_profiles, 0, sizeof(s_config.wifi_profiles));
     s_config.wifi_ssid[0] = '\0';
     s_config.wifi_password[0] = '\0';
     s_config.wifi_ip = 0U;
@@ -525,6 +530,38 @@ static void normalizeConfig(void)
     s_config.channel = clampChannel(s_config.channel);
     sanitizeString(s_config.wifi_ssid);
     sanitizeString(s_config.wifi_password);
+    for (size_t i = 0; i < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
+        sanitizeString(s_config.wifi_profiles[i].ssid);
+        sanitizeString(s_config.wifi_profiles[i].password);
+    }
+    // Keep entry 0 as the legacy primary credentials, then compact and
+    // de-duplicate the remaining profiles while preserving priority order.
+    copyBounded(s_config.wifi_profiles[0].ssid,
+                sizeof(s_config.wifi_profiles[0].ssid), s_config.wifi_ssid);
+    copyBounded(s_config.wifi_profiles[0].password,
+                sizeof(s_config.wifi_profiles[0].password), s_config.wifi_password);
+    ExternalWifiProfile compact[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
+    size_t used = 0U;
+    for (size_t i = 0; i < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
+        const ExternalWifiProfile &candidate = s_config.wifi_profiles[i];
+        if (candidate.ssid[0] == '\0') continue;
+        bool duplicate = false;
+        for (size_t j = 0; j < used; ++j) {
+            if (strcmp(compact[j].ssid, candidate.ssid) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) compact[used++] = candidate;
+    }
+    memcpy(s_config.wifi_profiles, compact, sizeof(compact));
+    if (used > 0U) {
+        copyBounded(s_config.wifi_ssid, sizeof(s_config.wifi_ssid), compact[0].ssid);
+        copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password), compact[0].password);
+    } else {
+        s_config.wifi_ssid[0] = '\0';
+        s_config.wifi_password[0] = '\0';
+    }
     sanitizeString(s_config.server_host);
     sanitizeCallsign(s_config.callsign);
     s_config.device_mode = static_cast<uint8_t>(NRL_AUDIO_DEVICE_MODE);
@@ -605,7 +642,8 @@ static bool loadPersistedConfig(void)
          persisted.version != kLegacyConfigVersion1 &&
          persisted.version != kLegacyConfigVersion2 &&
          persisted.version != kLegacyConfigVersion3 &&
-         persisted.version != kLegacyConfigVersion4)) {
+         persisted.version != kLegacyConfigVersion4 &&
+         persisted.version != kLegacyConfigVersion5)) {
         return false;
     }
 
@@ -626,6 +664,18 @@ static bool loadPersistedConfig(void)
                         (static_cast<uint32_t>(persisted.reserved[7]) << 24);
     copyBounded(s_config.wifi_ssid, sizeof(s_config.wifi_ssid), persisted.wifi_ssid);
     copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password), persisted.wifi_password);
+    copyBounded(s_config.wifi_profiles[0].ssid, sizeof(s_config.wifi_profiles[0].ssid),
+                persisted.wifi_ssid);
+    copyBounded(s_config.wifi_profiles[0].password, sizeof(s_config.wifi_profiles[0].password),
+                persisted.wifi_password);
+    if (persisted.version == kConfigVersion) {
+        for (size_t i = 1; i < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
+            copyBounded(s_config.wifi_profiles[i].ssid,
+                        sizeof(s_config.wifi_profiles[i].ssid), persisted.wifi_extra[i - 1U].ssid);
+            copyBounded(s_config.wifi_profiles[i].password,
+                        sizeof(s_config.wifi_profiles[i].password), persisted.wifi_extra[i - 1U].password);
+        }
+    }
     copyBounded(s_config.server_host, sizeof(s_config.server_host), persisted.server_host);
     copyBounded(s_config.callsign, sizeof(s_config.callsign), persisted.callsign);
     if (persisted.version >= kLegacyConfigVersion2) {
@@ -638,7 +688,7 @@ static bool loadPersistedConfig(void)
     } else {
         applyDefaultDrcConfig();
     }
-    if (persisted.version == kConfigVersion) {
+    if (persisted.version >= kLegacyConfigVersion5) {
         s_config.daceq_b0 = persisted.daceq_b0;
         s_config.daceq_b1 = persisted.daceq_b1;
         s_config.daceq_a1 = persisted.daceq_a1;
@@ -695,7 +745,7 @@ static bool loadPersistedConfig(void)
         s_config.mic_hpf_enabled = true;
         s_config.bt_enabled = false;
     }
-    if (persisted.version == kConfigVersion) {
+    if (persisted.version >= kLegacyConfigVersion5) {
         loadAdcRegisters(persisted.adc_reg14,
                          persisted.adc_reg15,
                          persisted.adc_reg16,
@@ -716,7 +766,7 @@ static bool loadPersistedConfig(void)
     // reserved4[2..3] (both added without a config version bump). Configs
     // written before these features have the bytes as 0, which normalizeConfig()
     // maps back to the default.
-    if (persisted.version == kConfigVersion) {
+    if (persisted.version >= kLegacyConfigVersion5) {
         s_config.ptt_timeout_s = static_cast<uint16_t>(persisted.reserved4[0]) |
                                  (static_cast<uint16_t>(persisted.reserved4[1]) << 8);
         s_config.battery_cal_milli = static_cast<uint16_t>(persisted.reserved4[2]) |
@@ -747,6 +797,7 @@ static bool loadPersistedConfig(void)
 
 static bool savePersistedConfig(void)
 {
+    normalizeConfig();
     PersistedExternalRadioConfig persisted = {};
     persisted.magic = kConfigMagic;
     persisted.version = kConfigVersion;
@@ -812,6 +863,12 @@ static bool savePersistedConfig(void)
     persisted.reserved2[5] = static_cast<uint8_t>((s_config.mic_pcm_gain_milli >> 8) & 0xFFU);
     copyBounded(persisted.wifi_ssid, sizeof(persisted.wifi_ssid), s_config.wifi_ssid);
     copyBounded(persisted.wifi_password, sizeof(persisted.wifi_password), s_config.wifi_password);
+    for (size_t i = 1; i < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
+        copyBounded(persisted.wifi_extra[i - 1U].ssid,
+                    sizeof(persisted.wifi_extra[i - 1U].ssid), s_config.wifi_profiles[i].ssid);
+        copyBounded(persisted.wifi_extra[i - 1U].password,
+                    sizeof(persisted.wifi_extra[i - 1U].password), s_config.wifi_profiles[i].password);
+    }
     copyBounded(persisted.server_host, sizeof(persisted.server_host), s_config.server_host);
     copyBounded(persisted.callsign, sizeof(persisted.callsign), s_config.callsign);
 
@@ -916,6 +973,8 @@ bool EXTERNAL_RADIO_SetWifiSsid(const char *value, const bool persist)
         s_config.wifi_ssid[0] == '\0') {
         return false;
     }
+    copyBounded(s_config.wifi_profiles[0].ssid, sizeof(s_config.wifi_profiles[0].ssid),
+                s_config.wifi_ssid);
     if (persist) {
         return savePersistedConfig();
     }
@@ -925,7 +984,97 @@ bool EXTERNAL_RADIO_SetWifiSsid(const char *value, const bool persist)
 bool EXTERNAL_RADIO_SetWifiPassword(const char *value, const bool persist)
 {
     EXTERNAL_RADIO_Init();
-    return updateStringField(s_config.wifi_password, sizeof(s_config.wifi_password), value, persist);
+    if (!updateStringField(s_config.wifi_password, sizeof(s_config.wifi_password), value, false)) {
+        return false;
+    }
+    copyBounded(s_config.wifi_profiles[0].password,
+                sizeof(s_config.wifi_profiles[0].password), s_config.wifi_password);
+    return !persist || savePersistedConfig();
+}
+
+size_t EXTERNAL_RADIO_GetWifiProfileCount(void)
+{
+    EXTERNAL_RADIO_Init();
+    size_t count = 0U;
+    while (count < EXTERNAL_RADIO_MAX_WIFI_PROFILES &&
+           s_config.wifi_profiles[count].ssid[0] != '\0') {
+        ++count;
+    }
+    return count;
+}
+
+bool EXTERNAL_RADIO_AddWifiProfile(const char *ssid, const char *password, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    if (ssid == nullptr || ssid[0] == '\0' || strlen(ssid) > 32U ||
+        password == nullptr || strlen(password) > 64U) {
+        return false;
+    }
+    char clean_ssid[33] = {};
+    char clean_password[65] = {};
+    copyBounded(clean_ssid, sizeof(clean_ssid), ssid);
+    copyBounded(clean_password, sizeof(clean_password), password);
+    sanitizeString(clean_ssid);
+    sanitizeString(clean_password);
+    if (clean_ssid[0] == '\0') return false;
+
+    size_t index = EXTERNAL_RADIO_MAX_WIFI_PROFILES;
+    for (size_t i = 0; i < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
+        if (strcmp(s_config.wifi_profiles[i].ssid, clean_ssid) == 0) {
+            index = i;
+            break;
+        }
+        if (index == EXTERNAL_RADIO_MAX_WIFI_PROFILES &&
+            s_config.wifi_profiles[i].ssid[0] == '\0') {
+            index = i;
+        }
+    }
+    if (index >= EXTERNAL_RADIO_MAX_WIFI_PROFILES) return false;
+    copyBounded(s_config.wifi_profiles[index].ssid,
+                sizeof(s_config.wifi_profiles[index].ssid), clean_ssid);
+    copyBounded(s_config.wifi_profiles[index].password,
+                sizeof(s_config.wifi_profiles[index].password), clean_password);
+    if (index == 0U) {
+        copyBounded(s_config.wifi_ssid, sizeof(s_config.wifi_ssid), clean_ssid);
+        copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password), clean_password);
+    }
+    return !persist || savePersistedConfig();
+}
+
+bool EXTERNAL_RADIO_RemoveWifiProfile(const size_t index, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    const size_t count = EXTERNAL_RADIO_GetWifiProfileCount();
+    if (index >= count) return false;
+    for (size_t i = index; i + 1U < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
+        s_config.wifi_profiles[i] = s_config.wifi_profiles[i + 1U];
+    }
+    memset(&s_config.wifi_profiles[EXTERNAL_RADIO_MAX_WIFI_PROFILES - 1U], 0,
+           sizeof(s_config.wifi_profiles[0]));
+    copyBounded(s_config.wifi_ssid, sizeof(s_config.wifi_ssid),
+                s_config.wifi_profiles[0].ssid);
+    copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password),
+                s_config.wifi_profiles[0].password);
+    return !persist || savePersistedConfig();
+}
+
+bool EXTERNAL_RADIO_MoveWifiProfile(const size_t index, const int direction, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    const size_t count = EXTERNAL_RADIO_GetWifiProfileCount();
+    if (index >= count || (direction != -1 && direction != 1)) return false;
+    if ((direction < 0 && index == 0U) || (direction > 0 && index + 1U >= count)) {
+        return false;
+    }
+    const size_t other = direction < 0 ? index - 1U : index + 1U;
+    const ExternalWifiProfile tmp = s_config.wifi_profiles[index];
+    s_config.wifi_profiles[index] = s_config.wifi_profiles[other];
+    s_config.wifi_profiles[other] = tmp;
+    copyBounded(s_config.wifi_ssid, sizeof(s_config.wifi_ssid),
+                s_config.wifi_profiles[0].ssid);
+    copyBounded(s_config.wifi_password, sizeof(s_config.wifi_password),
+                s_config.wifi_profiles[0].password);
+    return !persist || savePersistedConfig();
 }
 
 bool EXTERNAL_RADIO_SetWifiIp(const uint32_t value, const bool persist)

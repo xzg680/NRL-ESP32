@@ -1725,11 +1725,29 @@ static esp_err_t handleSaveWifi(httpd_req_t *req)
         have_snapshot = true;
     }
 
-    if (ok && s_server.hasArg("wifi_ssid")) {
-        ok = EXTERNAL_RADIO_SetWifiSsid(s_server.arg("wifi_ssid").c_str(), false);
-    }
-    if (ok && s_server.hasArg("wifi_password")) {
-        ok = EXTERNAL_RADIO_SetWifiPassword(s_server.arg("wifi_password").c_str(), false);
+    bool wifi_profiles_changed = false;
+    if (s_server.hasArg("wifi_profile_index")) {
+        const std::string index_text = s_server.arg("wifi_profile_index");
+        char *end = nullptr;
+        const unsigned long index = strtoul(index_text.c_str(), &end, 10);
+        const bool valid_index = end != nullptr && *end == '\0' &&
+                                 index < EXTERNAL_RADIO_MAX_WIFI_PROFILES;
+        if (valid_index && s_server.hasArg("wifi_delete")) {
+            ok = EXTERNAL_RADIO_RemoveWifiProfile(static_cast<size_t>(index), false);
+        } else if (valid_index && s_server.hasArg("wifi_move_up")) {
+            ok = EXTERNAL_RADIO_MoveWifiProfile(static_cast<size_t>(index), -1, false);
+        } else if (valid_index && s_server.hasArg("wifi_move_down")) {
+            ok = EXTERNAL_RADIO_MoveWifiProfile(static_cast<size_t>(index), 1, false);
+        } else {
+            ok = false;
+        }
+        wifi_profiles_changed = ok;
+    } else if (s_server.hasArg("wifi_ssid")) {
+        const std::string password = s_server.hasArg("wifi_password")
+                                         ? s_server.arg("wifi_password") : std::string();
+        ok = EXTERNAL_RADIO_AddWifiProfile(s_server.arg("wifi_ssid").c_str(),
+                                           password.c_str(), false);
+        wifi_profiles_changed = ok;
     }
     if (ok && s_server.hasArg("wifi_dhcp_present")) {
         ok = EXTERNAL_RADIO_SetWifiDhcpEnabled(s_server.hasArg("wifi_dhcp_enabled"), false);
@@ -1761,7 +1779,8 @@ static esp_err_t handleSaveWifi(httpd_req_t *req)
     const ExternalRadioConfig *after = EXTERNAL_RADIO_GetConfig();
     if (ok && after != nullptr && have_snapshot) {
         logChangedFields(&before_snapshot, after);
-        const bool restart_wifi = strcmp(before_snapshot.wifi_ssid, after->wifi_ssid) != 0 ||
+        const bool restart_wifi = wifi_profiles_changed ||
+                                  strcmp(before_snapshot.wifi_ssid, after->wifi_ssid) != 0 ||
                                   strcmp(before_snapshot.wifi_password, after->wifi_password) != 0 ||
                                   before_snapshot.wifi_dhcp_enabled != after->wifi_dhcp_enabled ||
                                   before_snapshot.wifi_ip != after->wifi_ip ||

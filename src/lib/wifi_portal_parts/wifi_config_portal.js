@@ -27,6 +27,13 @@ const translations = {
         scanIdle: 'Click Scan to find nearby WiFi networks.',
         wifiSsid: 'WiFi SSID',
         wifiPassword: 'WiFi Password',
+        wifiAddOrUpdate: 'Add / Update',
+        wifiSavedNetworks: 'Saved WiFi Networks',
+        wifiSavedHint: 'Up to 5 networks; the displayed order is the connection priority.',
+        wifiDelete: 'Delete',
+        wifiPriorityUp: 'Up',
+        wifiPriorityDown: 'Down',
+        wifiNoSaved: 'No saved WiFi networks.',
         dhcp: 'DHCP',
         useDhcp: 'Use DHCP for station IP',
         wifiIp: 'WiFi IP',
@@ -315,6 +322,13 @@ const translations = {
         scanIdle: '点击扫描查找附近 WiFi。',
         wifiSsid: 'WiFi名称',
         wifiPassword: 'WiFi密码',
+        wifiAddOrUpdate: '新增 / 更新',
+        wifiSavedNetworks: '已保存的 WiFi 热点',
+        wifiSavedHint: '最多保存 5 个热点，显示顺序就是连接优先级。',
+        wifiDelete: '删除',
+        wifiPriorityUp: '上移',
+        wifiPriorityDown: '下移',
+        wifiNoSaved: '尚未保存 WiFi 热点。',
         dhcp: 'DHCP',
         useDhcp: '联网地址使用 DHCP 自动获取',
         wifiIp: 'WiFi IP 地址',
@@ -993,7 +1007,12 @@ const translations = {
     function submitFormFromButton(form) {
       const button = form.querySelector('button[type="submit"]');
       if (button) button.disabled = true;
-      postAndApply(form).then((reply) => flashButtonFeedback(button, reply && reply.ok));
+      postAndApply(form).then((reply) => {
+        flashButtonFeedback(button, reply && reply.ok);
+        if (reply && reply.ok && form.dataset.reloadOnSave === '1') {
+          setTimeout(() => window.location.reload(), 300);
+        }
+      });
     }
 
     function submitEqSlider(slider) {
@@ -1044,6 +1063,9 @@ const translations = {
         flag.remove();
         button.disabled = false;
         flashButtonFeedback(button, reply && reply.ok);
+        if (reply && reply.ok && form.dataset.reloadOnSave === '1') {
+          setTimeout(() => window.location.reload(), 300);
+        }
       });
     }
 

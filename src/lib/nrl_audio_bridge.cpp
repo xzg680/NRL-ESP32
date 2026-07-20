@@ -618,6 +618,53 @@ static void btHfpSinkWrite(const uint8_t /*source_id*/,
     NRL_BtHfp_PushPlayback(samples, sample_count);
 }
 
+static WifiConnResult connectSavedWifi(const ExternalRadioConfig *config)
+{
+    if (config == nullptr) {
+        return wifiEnsureConnected(NRL_AUDIO_WIFI_SSID, NRL_AUDIO_WIFI_PASSWORD, 10000u);
+    }
+
+    const size_t count = EXTERNAL_RADIO_GetWifiProfileCount();
+    if (count == 0U) return WIFI_CONN_FAILED;
+
+    // Scan once so unavailable profiles do not each consume a full connection
+    // timeout. Saved order is the priority; hidden/not-seen profiles are still
+    // attempted afterward so hidden SSIDs remain supported.
+    NrlWifiScanResult scanned[32] = {};
+    const bool scan_ok = nrlWifiScanStartBlocking(5000u);
+    const size_t scanned_count = scan_ok ? nrlWifiScanGetCache(scanned, 32U) : 0U;
+    bool attempted[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
+    WifiConnResult last = WIFI_CONN_FAILED;
+
+    for (size_t i = 0; i < count; ++i) {
+        bool visible = !scan_ok;
+        for (size_t j = 0; j < scanned_count; ++j) {
+            if (strcmp(config->wifi_profiles[i].ssid, scanned[j].ssid) == 0) {
+                visible = true;
+                break;
+            }
+        }
+        if (!visible) continue;
+        attempted[i] = true;
+        ESP_LOGI(TAG, "trying saved Wi-Fi %u/%u: \"%s\"",
+                 static_cast<unsigned>(i + 1U), static_cast<unsigned>(count),
+                 config->wifi_profiles[i].ssid);
+        last = wifiEnsureConnected(config->wifi_profiles[i].ssid,
+                                   config->wifi_profiles[i].password, 10000u);
+        if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) return last;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (attempted[i]) continue;
+        ESP_LOGI(TAG, "trying hidden/unseen saved Wi-Fi %u/%u: \"%s\"",
+                 static_cast<unsigned>(i + 1U), static_cast<unsigned>(count),
+                 config->wifi_profiles[i].ssid);
+        last = wifiEnsureConnected(config->wifi_profiles[i].ssid,
+                                   config->wifi_profiles[i].password, 10000u);
+        if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) return last;
+    }
+    return last;
+}
+
 static bool ensureNetworkAndUdp(void)
 {
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
@@ -647,8 +694,6 @@ static bool ensureNetworkAndUdp(void)
         s_next_wifi_retry_ms = 0u;  // re-enabled: reconnect promptly
         ESP_LOGI(TAG, "[NRL] Wi-Fi master switch ON -- reconnecting");
     }
-    const char *wifi_ssid = (config != nullptr) ? config->wifi_ssid : NRL_AUDIO_WIFI_SSID;
-    const char *wifi_password = (config != nullptr) ? config->wifi_password : NRL_AUDIO_WIFI_PASSWORD;
     const char *server_host = (config != nullptr) ? config->server_host : NRL_AUDIO_SERVER_HOST;
     const uint16_t server_port = (config != nullptr) ? config->server_port : static_cast<uint16_t>(NRL_AUDIO_SERVER_PORT);
     const uint16_t local_port = (config != nullptr) ? config->local_port : server_port;
@@ -659,7 +704,7 @@ static bool ensureNetworkAndUdp(void)
         return false;
     }
     if (!nrlNetworkConnected()) {
-        const WifiConnResult result = wifiEnsureConnected(wifi_ssid, wifi_password, 15000u);
+        const WifiConnResult result = connectSavedWifi(config);
         if (result != WIFI_CONN_OK && result != WIFI_ALREADY_ON_SSID) {
             if (s_wifi_connect_failures < 0xFFu) {
                 ++s_wifi_connect_failures;
