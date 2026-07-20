@@ -8,15 +8,16 @@ export.sh so `idf.py` is on PATH):
 
 Examples:
     python scripts/build.py gezipai build
-    python scripts/build.py gezipai_4g flash monitor -p COM5
+    python scripts/build.py bi4umd build
+    python scripts/build.py gezipai_4g build
     python scripts/build.py s31_korvo flash monitor -p COM5
     python scripts/build.py s31_function_coreboard flash monitor -p COM5
     
     python scripts/build.py bh4tdv fullclean
     python scripts/build.py gezipai menuconfig
 
-Boards: gezipai, gezipai_4g, bh4tdv, s31_korvo, s31_function_coreboard. If
-you omit the idf.py args it defaults to `build`.
+Boards: gezipai, bi4umd, gezipai_4g, bh4tdv, s31_korvo,
+s31_function_coreboard. If you omit the idf.py args it defaults to `build`.
 
 Each board gets its own build directory (build/<board>) and sdkconfig
 (build/<board>/sdkconfig), so you can switch boards without a reconfigure or
@@ -25,6 +26,7 @@ clobbering another board's config. This mirrors exactly what the GitHub CI does
 block expects.
 """
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +41,13 @@ BOARDS = {
         target="esp32s3",
         macro="NRL_BOARD_GEZIPAI",
         sdkconfig=["sdkconfig.gezipai.defaults"],
+        lvgl=True,
+        extra=[],
+    ),
+    "bi4umd": dict(
+        target="esp32s3",
+        macro="NRL_BOARD_BI4UMD",
+        sdkconfig=["sdkconfig.bi4umd.defaults"],
         lvgl=True,
         extra=[],
     ),
@@ -71,6 +80,54 @@ BOARDS = {
         extra=[],
     ),
 }
+
+
+def idf_python() -> Path:
+    """Return a Python interpreter containing ESP-IDF's dependencies."""
+    configured = os.environ.get("IDF_PYTHON_ENV_PATH")
+    if configured:
+        candidate = Path(configured) / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        if candidate.is_file():
+            return candidate
+
+    probe = subprocess.run(
+        [sys.executable, "-c", "import click"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if probe.returncode == 0:
+        return Path(sys.executable)
+
+    env_root = Path.home() / ".espressif" / "python_env"
+    executable = "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    candidates = sorted(env_root.glob(f"idf*_env/{executable}"), reverse=True)
+    if candidates:
+        return candidates[0]
+    return Path(sys.executable)
+
+
+def idf_environment(idf_path: Path, python: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("IDF_PYTHON_ENV_PATH", str(python.parent.parent))
+    if not env.get("ESP_IDF_VERSION"):
+        version_file = idf_path / "tools" / "cmake" / "version.cmake"
+        if version_file.is_file():
+            text = version_file.read_text(encoding="utf-8")
+            values = dict(re.findall(r"set\(IDF_VERSION_(MAJOR|MINOR|PATCH)\s+(\d+)\)", text))
+            if all(part in values for part in ("MAJOR", "MINOR", "PATCH")):
+                env["ESP_IDF_VERSION"] = ".".join(
+                    values[part] for part in ("MAJOR", "MINOR", "PATCH")
+                )
+    return env
+
+
+def firmware_version() -> str:
+    text = (REPO / "src" / "lib" / "nrl_version.h").read_text(encoding="utf-8")
+    match = re.search(r'#define\s+NRL_FIRMWARE_VERSION\s+"([^"]+)"', text)
+    if not match:
+        raise RuntimeError("NRL_FIRMWARE_VERSION is missing from src/lib/nrl_version.h")
+    return match.group(1)
 
 
 def patch_managed_components():
@@ -108,7 +165,10 @@ def main():
         print("error: IDF_PATH is not set. Source the ESP-IDF 6.2 environment "
               "first (export.ps1 / export.sh), then re-run.")
         sys.exit(2)
-    idf_py = Path(idf_path) / "tools" / "idf.py"
+    idf_root = Path(idf_path)
+    idf_py = idf_root / "tools" / "idf.py"
+    python = idf_python()
+    build_env = idf_environment(idf_root, python)
 
     build_dir = f"build/{board}"
     # Invoke idf.py through the current Python with shell=False: this resolves
@@ -116,18 +176,19 @@ def main():
     # semicolon-separated SDKCONFIG_DEFAULTS list intact (a Windows shell would
     # otherwise split it on ';').
     cmd = [
-        sys.executable, str(idf_py),
+        str(python), str(idf_py),
         "-B", build_dir,
         "-DIDF_TARGET=" + cfg["target"],
         "-DNRL_NATIVE_BUILD=1",
         "-DNRL_BOARD_ID=" + cfg["macro"],
+        "-DNRL_FW_VERSION=" + firmware_version(),
         "-DSDKCONFIG=" + build_dir + "/sdkconfig",
         "-DSDKCONFIG_DEFAULTS=" + ";".join(cfg["sdkconfig"]),
         *cfg["extra"],
         *passthrough,
     ]
     print("+ " + " ".join(cmd), flush=True)
-    result = subprocess.run(cmd, cwd=REPO)
+    result = subprocess.run(cmd, cwd=REPO, env=build_env)
     # Publishing is opt-in: CI/developer environments that define both server URL
     # and upload token publish every successful firmware build. This keeps normal
     # local builds offline while making the release pipeline one command. The

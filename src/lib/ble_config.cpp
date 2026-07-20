@@ -41,10 +41,6 @@ constexpr char kServiceUuid[] = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kRxUuid[] = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kTxUuid[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr size_t kCommandBufferSize = 160;
-// IDF's nimble_port_freertos_init() aborts the whole app if the host task
-// cannot be created. NimBLEDevice::init() consumes controller/host memory
-// before that task is created, so check the whole BLE startup budget up front
-// and fail closed under DRAM pressure instead of reboot-looping.
 constexpr size_t kBleHostStackBytes =
 #if defined(CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE)
     CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE;

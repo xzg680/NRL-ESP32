@@ -514,9 +514,14 @@ static bool parseIoConfigValue(const char *text, int *out_rx, int *out_tx)
     char *tx_text = comma + 1;
     trimText(rx_text);
     trimText(tx_text);
-    unsigned long rx = 0u, tx = 0u;
-    if (!parseUnsignedValue(rx_text, &rx) || !parseUnsignedValue(tx_text, &tx) ||
-        rx > 127u || tx > 127u) {
+    char *rx_end = nullptr;
+    char *tx_end = nullptr;
+    const long rx = strtol(rx_text, &rx_end, 10);
+    const long tx = strtol(tx_text, &tx_end, 10);
+    if (rx_end == rx_text || tx_end == tx_text ||
+        rx_end == nullptr || tx_end == nullptr ||
+        *rx_end != '\0' || *tx_end != '\0' ||
+        rx < -1L || rx > 127L || tx < -1L || tx > 127L) {
         return false;
     }
     *out_rx = static_cast<int>(rx);
@@ -2312,10 +2317,10 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             else updated.uart2_enabled = enabled;
         }
         ok = ok && SERIAL_PORT_CONFIG_Set(&updated, true) &&
-             (uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+             SERIAL_PORT_CONFIG_ReloadDrivers();
         if (!ok) {
             (void)SERIAL_PORT_CONFIG_Set(&old_config, true);
-            (void)(uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+            (void)SERIAL_PORT_CONFIG_ReloadDrivers();
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                                "ERR", reply_key);
             return;
@@ -2350,10 +2355,10 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             updated.uart2_tx_pin = tx;
         }
         ok = ok && SERIAL_PORT_CONFIG_Set(&updated, true) &&
-             (uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+             SERIAL_PORT_CONFIG_ReloadDrivers();
         if (!ok) {
             (void)SERIAL_PORT_CONFIG_Set(&old_config, true);
-            (void)(uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+            (void)SERIAL_PORT_CONFIG_ReloadDrivers();
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                                "ERR", uart1 ? "UART1_IO" : "UART2_IO");
             return;
@@ -2383,10 +2388,11 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         bool ok = parseSciConfigValue(command.value, &updated.uart2_baud,
                                       &updated.uart2_data_bits, &updated.uart2_parity,
                                       &updated.uart2_stop_bits) &&
-                  SERIAL_PORT_CONFIG_Set(&updated, true) && GPS_SERIAL_ReloadConfig();
+                  SERIAL_PORT_CONFIG_Set(&updated, true) &&
+                  SERIAL_PORT_CONFIG_ReloadDrivers();
         if (!ok) {
             (void)SERIAL_PORT_CONFIG_Set(&old_config, true);
-            (void)GPS_SERIAL_ReloadConfig();
+            (void)SERIAL_PORT_CONFIG_ReloadDrivers();
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                                "ERR", "UART2");
             return;

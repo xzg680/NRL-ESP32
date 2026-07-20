@@ -1,7 +1,17 @@
 {
-  "idf.customExtraVars": {},
-  "idf.currentSetup": "C:\\esp\\esp-idf",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32s3"
+  },
+  "idf.currentSetup": "D:\\esp\\v6.0.2\\esp-idf",
   "idf.openOcdConfigs": [
-    "board/esp32s31-builtin.cfg"
+    "board/esp32s3-builtin.cfg"
+  ],
+  "idf.portWin": "COM5",
+  "idf.flashType": "JTAG",
+  "clangd.path": "D:\\Espressif\\tools\\esp-clang\\esp-20.1.1_20250829\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=c:\\Users\\Zheng\\Desktop\\NRL-ESP32-main\\build"
   ]
 }

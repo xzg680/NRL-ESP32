@@ -1,5 +1,7 @@
 #include "cellular_rndis_service.h"
 
+// USER CUSTOM BEGIN: optional USB RNDIS cellular network adaptation.
+
 #include "../app/driver/board_pins.h"
 
 #if defined(NRL_HAS_USB_RNDIS_4G) && NRL_HAS_USB_RNDIS_4G
@@ -176,3 +178,4 @@ bool CELLULAR_RNDIS_HasIp(void) { return false; }
 uint32_t CELLULAR_RNDIS_Ip(void) { return 0u; }
 
 #endif
+// USER CUSTOM END: optional USB RNDIS cellular network adaptation.

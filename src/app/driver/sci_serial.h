@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 bool SCI_SERIAL_Init(void);
+void SCI_SERIAL_Stop(void);
 bool SCI_SERIAL_ApplyConfig(uint32_t baud, uint8_t data_bits, char parity, uint8_t stop_bits);
 bool SCI_SERIAL_ReloadPins(void);
 int SCI_SERIAL_Available(void);

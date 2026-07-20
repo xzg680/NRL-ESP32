@@ -37,6 +37,18 @@ jobs:
             sdkconfig: sdkconfig.gezipai.defaults
             lvgl: "true"
             extra_args: ""
+          - board: gezipai_4g
+            target: esp32s3
+            board_macro: NRL_BOARD_GEZIPAI_4G
+            sdkconfig: sdkconfig.gezipai.defaults
+            lvgl: "true"
+            extra_args: ""
+          - board: bi4umd
+            target: esp32s3
+            board_macro: NRL_BOARD_BI4UMD
+            sdkconfig: sdkconfig.bi4umd.defaults
+            lvgl: "true"
+            extra_args: ""
           - board: bh4tdv
             target: esp32s3
             board_macro: NRL_BOARD_BH4TDV
@@ -129,7 +141,7 @@ jobs:
           fail_on_unmatched_files: true
           files: dist/*-${{ matrix.board }}.bin
 
-  # USB browser flasher (esp-web-tools) for the released ESP32-S3 boards only:
+  # USB browser flasher (esp-web-tools) for the three ESP32-S3 boards only:
   # esptool-js has no ESP32-S31 support, so s31_korvo is serial-only. Builds both
   # S3 boards into separate build/<board>/ dirs, then scripts/stage_web_flasher.py
   # reads each build/<board>/flasher_args.json to copy the images + write the
@@ -160,7 +172,7 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Build gezipai + bh4tdv (ESP-IDF)
+      - name: Build gezipai + Gezipai 4G + BI4UMD + bh4tdv (ESP-IDF)
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: latest
@@ -169,6 +181,14 @@ jobs:
             idf.py -B build/gezipai -DIDF_TARGET=esp32s3 -DNRL_NATIVE_BUILD=1
             -DNRL_BOARD_ID=NRL_BOARD_GEZIPAI -DSDKCONFIG=build/gezipai/sdkconfig
             -DSDKCONFIG_DEFAULTS=sdkconfig.gezipai.defaults
+            -DNRL_FW_VERSION=${{ steps.ver.outputs.version }} build &&
+            idf.py -B build/gezipai_4g -DIDF_TARGET=esp32s3 -DNRL_NATIVE_BUILD=1
+            -DNRL_BOARD_ID=NRL_BOARD_GEZIPAI_4G -DSDKCONFIG=build/gezipai_4g/sdkconfig
+            -DSDKCONFIG_DEFAULTS=sdkconfig.gezipai.defaults
+            -DNRL_FW_VERSION=${{ steps.ver.outputs.version }} build &&
+            idf.py -B build/bi4umd -DIDF_TARGET=esp32s3 -DNRL_NATIVE_BUILD=1
+            -DNRL_BOARD_ID=NRL_BOARD_BI4UMD -DSDKCONFIG=build/bi4umd/sdkconfig
+            -DSDKCONFIG_DEFAULTS=sdkconfig.bi4umd.defaults
             -DNRL_FW_VERSION=${{ steps.ver.outputs.version }} build &&
             idf.py -B build/bh4tdv -DIDF_TARGET=esp32s3 -DNRL_NATIVE_BUILD=1
             -DNRL_BOARD_ID=NRL_BOARD_BH4TDV -DSDKCONFIG=build/bh4tdv/sdkconfig
@@ -192,8 +212,12 @@ jobs:
             web-flasher-${{ steps.ver.outputs.version }}.zip
             web-flasher/index.html
             web-flasher/manifest-gezipai.json
+            web-flasher/manifest-gezipai_4g.json
+            web-flasher/manifest-bi4umd.json
             web-flasher/manifest-bh4tdv.json
             web-flasher/firmware/gezipai/*.bin
+            web-flasher/firmware/gezipai_4g/*.bin
+            web-flasher/firmware/bi4umd/*.bin
             web-flasher/firmware/bh4tdv/*.bin
 
       - name: Publish web-flasher to Release

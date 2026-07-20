@@ -30,6 +30,8 @@ set(app_sources
     app/driver/fonts/lv_font_cjk_20.c
     app/driver/eeprom.cpp
     app/driver/display.cpp
+    app/driver/display_bi4umd.cpp
+    app/driver/touch_bi4umd.cpp
     app/driver/display_s31.cpp
     app/driver/es7210.cpp
     app/driver/es8311.cpp
@@ -94,6 +96,8 @@ set(app_priv_requires
     esp_psram
     esp_timer
     esp_wifi
+    fatfs
+    sdmmc
     espressif__esp-sr
     lwip
     nvs_flash
@@ -121,8 +125,8 @@ if(IDF_TARGET STREQUAL "esp32s31")
                                   espressif__esp_websocket_client espressif__cjson)
 endif()
 
-# USB RNDIS support is kept as an implementation option, but no current board
-# enables it by default. The Gezipai 4G hardware uses ML307 over UART instead.
+# Optional USB-RNDIS backend. Current production boards leave this disabled;
+# enabling the experimental board macro pulls the driver dependencies in.
 if(NRL_BOARD_ID STREQUAL "NRL_BOARD_USB_RNDIS_EXPERIMENT")
     list(APPEND app_priv_requires usb espressif__iot_eth espressif__iot_usbh_cdc
                                   espressif__iot_usbh_rndis)
@@ -143,10 +147,7 @@ idf_component_register(
     WHOLE_ARCHIVE
 )
 
-# Vendored APRS sources (aprsc parser / VP-Digi modem, see file headers) keep
-# their upstream style; exempt them from the warnings -Werror would trip on.
-# Must come after idf_component_register: the early component requirement scan
-# runs this file in script mode where set_source_files_properties is invalid.
+# Vendored APRS sources retain upstream warning patterns.
 set_source_files_properties(
     lib/aprs/parse_aprs.cpp
     lib/aprs/aprs_ax25.cpp

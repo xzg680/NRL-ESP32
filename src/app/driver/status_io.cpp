@@ -64,9 +64,7 @@ static void writeLed(const int pin, const bool on)
 
 [[maybe_unused]] static void initInputPullupPin(const int pin)
 {
-    if (pin < 0) {
-        return;
-    }
+    if (pin < 0) return;
     gpio_reset_pin((gpio_num_t)pin);
     gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT);
     gpio_set_pull_mode((gpio_num_t)pin, GPIO_PULLUP_ONLY);
@@ -74,9 +72,7 @@ static void writeLed(const int pin, const bool on)
 
 [[maybe_unused]] static void initOutputPin(const int pin)
 {
-    if (pin < 0) {
-        return;
-    }
+    if (pin < 0) return;
     gpio_reset_pin((gpio_num_t)pin);
     gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
 }

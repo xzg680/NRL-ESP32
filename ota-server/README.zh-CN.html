@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NRL OTA 服务器文档</title>
+  <style>
+    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    body { max-width: 920px; margin: 0 auto; padding: 32px 22px 56px; line-height: 1.7; color: #1f2937; background: #f8fafc; }
+    article { padding: 28px 34px; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; box-shadow: 0 8px 30px rgb(15 23 42 / 6%); }
+    h1, h2 { color: #0f172a; line-height: 1.3; } h1 { margin-top: 0; } h2 { margin-top: 2.2em; border-bottom: 1px solid #e2e8f0; padding-bottom: .35em; }
+    code, pre { font-family: Consolas, "Cascadia Code", monospace; } code { padding: .12em .34em; border-radius: 4px; background: #eff6ff; color: #1d4ed8; }
+    pre { overflow-x: auto; padding: 16px; border-radius: 8px; color: #e2e8f0; background: #0f172a; line-height: 1.55; } pre code { padding: 0; color: inherit; background: transparent; }
+    li { margin: .35em 0; } strong { color: #0f172a; }
+    @media (prefers-color-scheme: dark) { body { color: #d1d5db; background: #111827; } article { background: #1f2937; border-color: #374151; } h1, h2, strong { color: #f8fafc; } h2 { border-color: #374151; } code { background: #172554; color: #bfdbfe; } }
+    @media (max-width: 600px) { body { padding: 0; } article { border: 0; border-radius: 0; padding: 22px; } }
+  </style>
+</head>
+<body>
+  <article>
+    <h1>NRL OTA 服务器（Go + SQLite + 内嵌 Vue）</h1>
+    <p>可执行文件会内嵌 <code>frontend/dist</code>，因此部署时只需要一个 Go 二进制文件及其数据目录。以下四种板卡共用同一套 API：<code>gezipai</code>、<code>bh4tdv</code>、<code>s31_korvo</code> 和 <code>s31_function_coreboard</code>。</p>
+    <p>先构建一次内嵌的 Vue 管理站点，再构建 Go 服务：</p>
+    <p>Vite+（<code>vp</code>）使用 <code>PATH</code> 中的 <code>node</code> 运行，要求 <strong>Node 24 或更高版本</strong>（见 <code>frontend/.node-version</code>）。较低版本的 Node 运行 <code>vp</code> 启动器时会报 <code>ERR_UNKNOWN_FILE_EXTENSION</code>；请先切换至 Node 24，例如执行 <code>nvm use 24</code>。</p>
+    <pre><code class="language-powershell">cd ota-server/frontend
+vp install --frozen-lockfile
+vp check
+vp build
+cd ..
+go build -o nrl-ota.exe .
+$env:OTA_ADMIN_TOKEN = 'long-random-admin-secret'      # 自动发布流水线使用的机器令牌
+$env:OTA_ADMIN_USER = 'admin'                          # Web 登录用户名（默认：admin）
+$env:OTA_ADMIN_PASSWORD = 'long-random-admin-password' # Web 登录密码（启用管理界面登录所必需）
+$env:OTA_DEVICE_TOKEN = 'optional-device-access-token'
+.\nrl-ota.exe -listen 127.0.0.1:8080 -data-dir D:\ota-data</code></pre>
+    <p>修改 Vue 前端后，重启服务之前必须重新执行 <code>vp build</code> 和 <code>go build</code>：Go 可执行文件会在构建时将 <code>frontend/dist</code> 内嵌进去。</p>
+    <p>设备端同时接受 <code>http://</code> 和 <code>https://</code> OTA 地址。HTTP 仅适用于测试或可信的私有局域网，因为固件和设备上报数据不会加密，也无法验证服务器身份。其他部署请使用 Caddy 或 nginx 配置 HTTPS 反向代理。内网私有部署时 <code>OTA_DEVICE_TOKEN</code> 可选；面向互联网部署时强烈建议设置。</p>
+    <p>网站是菜单式单页应用（SPA），提供以下页面：</p>
+    <ul><li><strong>首页</strong>：板卡介绍。</li><li><strong>固件</strong>：按板卡展示版本历史和更新日志。</li><li><strong>USB 烧录</strong>：浏览器内 USB 全量烧录。</li><li><strong>设备</strong>：管理员登录后可见的设备管理面板，显示每台设备的在线状态、板卡型号、固件版本（含可升级标记）、NRL 呼号、SSID、IP 地址和最后在线时间。</li></ul>
+    <p>管理员通过页面右上角使用 <code>OTA_ADMIN_USER</code> / <code>OTA_ADMIN_PASSWORD</code> 登录。登录成功后会返回一个有效期为 12 小时、用于授权管理 API 的签名会话令牌。长期有效的 <code>OTA_ADMIN_TOKEN</code> 仍可直接用于 API，自动发布脚本正是使用该令牌。未设置 <code>OTA_ADMIN_PASSWORD</code> 时，密码登录功能会被禁用并返回 HTTP 503。会话令牌使用每次进程启动时生成的密钥签名，因此重启服务器会使所有管理员退出登录。</p>
+    <p>要在原生固件构建成功后自动发布，请在构建环境中设置以下变量（只有同时设置前两个变量才会执行上传）：</p>
+    <pre><code class="language-powershell">$env:OTA_SERVER_URL = 'https://ota.example.com'
+$env:OTA_UPLOAD_TOKEN = $env:OTA_ADMIN_TOKEN
+$env:OTA_VERSION = '0.5.2'       # 可选；默认从 nrl_version.h 读取
+$env:OTA_RELEASE_NOTES = '修复说明'
+python scripts/build.py s31_korvo build</code></pre>
+    <p>要用一条命令发布四种板卡的完整刷机包及 OTA 版本，请运行 <code>python scripts/publish_ota.py</code>。如只需发布部分板卡，可在命令后指定一个或多个板卡标识。脚本会从各构建目录的 <code>flasher_args.json</code> 读取全部镜像及其烧录地址，不再需要单独上传应用固件。</p>
+    <p>容器化部署时，请在 <code>ota-server/</code> 目录中构建镜像，持久化挂载 <code>/data</code>，并设置两个令牌环境变量。项目提供的 <code>Caddyfile.example</code> 会终止 TLS 并将流量反向代理到容器本地端口。</p>
+    <h2>USB 网页烧录器</h2>
+    <p>网站内置浏览器 USB 烧录器（esp-web-tools / Web Serial），可用于首次进行全量烧录。它只支持通过 HTTPS（或 localhost）访问的 Chrome/Edge，并且 <strong>仅支持两种 ESP32-S3 板卡</strong>：<code>gezipai</code> 与 <code>bh4tdv</code>。由于 esptool-js 不支持 ESP32-S31，<code>s31_korvo</code> 和 <code>s31_function_coreboard</code> 只能使用串口烧录，页面会给出相应提示。</p>
+    <p>esp-web-tools 资源会内嵌进二进制文件。完整刷机包按版本存储在 <code>&lt;data-dir&gt;/packages/&lt;board&gt;/&lt;version&gt;/</code>，服务器会动态生成各板卡的 <code>manifest-&lt;board&gt;.json</code>，因此发布新的可烧录固件时无需重新构建 Go 二进制文件。</p>
+    <p>先构建所有板卡，再用一条命令发布全部完整包及其中的 OTA 应用固件：</p>
+    <pre><code class="language-powershell">python scripts/build.py gezipai build
+python scripts/build.py bh4tdv build
+python scripts/build.py s31_korvo build
+python scripts/build.py s31_function_coreboard build
+python scripts/publish_ota.py</code></pre>
+    <p>如果原生构建时已经设置 <code>OTA_SERVER_URL</code> 和 <code>OTA_UPLOAD_TOKEN</code>，<code>scripts/build.py</code> 会在构建成功后自动发布该板卡的完整包。</p>
+    <h2>设备端升级控制</h2>
+    <p>所有板卡（包括没有屏幕的板卡）都在各自的配置服务器中提供 <code>/update</code> 页面。完成 HTTP 或 HTTPS OTA 服务器配置后，串口 AT 控制台支持以下命令：</p>
+    <pre><code class="language-text">AT+OTAURL=https://ota.example.com,device-token  # 配置服务器地址和令牌
+AT+OTAURL=?                                     # 显示地址和最新版本
+AT+OTACHECK=1                                   # 获取当前固件列表
+AT+OTALIST=?                                    # 列出兼容版本
+AT+OTA=LATEST                                   # 检查并安装最新版本
+AT+OTA=0.5.1                                    # 安装列表中的历史版本
+AT+OTA=?                                        # 显示 OTA 状态</code></pre>
+    <p>OTA 配置与安装命令只接受本地串口 AT 控制台请求。无触摸屏的 Gezipai 会在 LCD 上提示有新固件；同时长按 <code>VOL+</code> 和 <code>VOL-</code> 会检查并安装最新的兼容版本。</p>
+  </article>
+</body>
+</html>

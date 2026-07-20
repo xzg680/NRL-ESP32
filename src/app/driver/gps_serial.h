@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 bool GPS_SERIAL_Init(void);
+void GPS_SERIAL_Stop(void);
 bool GPS_SERIAL_ReloadConfig(void);
 size_t GPS_SERIAL_Read(uint8_t *buffer, size_t buffer_size);
 

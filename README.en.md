@@ -2,13 +2,15 @@
 
 [Chinese manual](README.md) · HTML: [Chinese](README.html) / [English](README.en.html)
 
-Current firmware version: `0.8.9`
+Current firmware version: `0.8.10`
 
 This project is an NRL network-radio bridge firmware primarily targeting ESP32-S31, while retaining support for ESP32-S3 boards. It brings radio audio, PTT, SQL, channel selection, SCI serial passthrough, and network configuration into one embedded application. Board targets use the appropriate audio codec, including ES8311 or ES8389; the project covers Moto3188/NRL hardware and ESP32-S31 development boards.
 
 ## Supported Boards
 
 Every target shares the NRL network-voice stack, Wi-Fi provisioning portal, remote AT commands, and Wi-Fi OTA updates. BLE provisioning is available on ESP32-S3; ESP32-S31 uses the touch configuration UI (Korvo) or the SoftAP portal. Select the build target that matches the physical board; board-specific capabilities are listed below.
+
+The complete build matrix is `gezipai`, `gezipai_4g`, `bi4umd`, `bh4tdv`, `s31_korvo`, and `s31_function_coreboard`. The `gezipai_4g` target adds the ML307R modem hardware mapping while retaining the Gezipai audio/display stack; `bi4umd` retains its touch display and TF-card extensions.
 
 | Build target | Board / SoC | On-board and supported functions | Intended use |
 | --- | --- | --- | --- |
@@ -76,7 +78,7 @@ The following capabilities are implemented in the current codebase. Features mar
   - The OTA management system now lives in the separate [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) repository: a Go server with a Vue admin UI and SQLite registry for firmware releases and release notes, organized by board, version, and release channel (such as `stable` / `beta`).
   - The management UI provides board introductions, per-board firmware history and changelogs, USB flashing, and a device dashboard. During an update check, a device reports its board, firmware version, callsign, SSID, IP address, and last-seen time, allowing the dashboard to flag devices with an available update.
   - The **complete flash package** is the single release source. One upload contains the bootloader, partition table, OTA data, application, and required resource images. The server registers the application slice as the device OTA release and, for ESP32-S3 boards, serves a USB web-flasher manifest from the same package, preventing drift between the two delivery paths.
-  - All four build targets can use the OTA management system. `gezipai` and `bh4tdv` additionally support first-time full USB web flashing in Chrome/Edge; `s31_korvo` and `s31_function_coreboard` require serial flashing for the first install, then can use device OTA.
+  - All six build targets can use the OTA management system. The four ESP32-S3 targets additionally support first-time full USB web flashing in Chrome/Edge; `s31_korvo` and `s31_function_coreboard` require serial flashing for the first install, then can use device OTA.
   - A device persists its OTA service URL and device token, checks a compatible-release manifest periodically or on demand, and can install the latest or a specified historical version. Production OTA downloads accept HTTPS only. Use local serial AT commands `AT+OTAURL`, `AT+OTACHECK`, `AT+OTALIST`, and `AT+OTA` to configure and run updates.
   - Administrators manage releases with web login or an admin token. When `OTA_SERVER_URL`, `OTA_UPLOAD_TOKEN`, and related release variables are present, `scripts/build.py` uploads the release package automatically after a successful build.
   - Use `scripts/publish_ota_mcp.py` for reviewed production releases. It creates a one-time MCP upload, transfers the complete flash package, checks the staged status, and explicitly confirms publication. Re-running it verifies the application size and SHA-256 instead of creating a duplicate release.
@@ -84,9 +86,9 @@ The following capabilities are implemented in the current codebase. Features mar
 ```powershell
 $env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
 $env:OTA_ADMIN_TOKEN = '<admin token>'
-python scripts/publish_ota_mcp.py --notes 'release notes'
-# Verify all four published board packages without writing:
-python scripts/publish_ota_mcp.py --verify-only
+python scripts/publish_ota_mcp.py --version 0.8.10 --notes 'release notes'
+# Verify all six published board packages without writing:
+python scripts/publish_ota_mcp.py --version 0.8.10 --verify-only
 ```
 
 ## Features
@@ -251,7 +253,7 @@ python scripts/build.py gezipai menuconfig                # change config
 
 Each board has its own `build/<board>/` directory, generated `sdkconfig`, and one complete `sdkconfig.<board>.defaults` file. Board configurations are not layered on shared defaults. `NRL_BOARD` is passed per board via `-DNRL_BOARD_ID`.
 
-GitHub Actions builds all four boards natively with the official ESP-IDF image on every push, pull request, or manual run, uploading each board's `firmware` / `partition-table` / `bootloader` as artifacts and publishing to a Release on tags.
+GitHub Actions builds all six boards natively with the official ESP-IDF image on every push, pull request, or manual run, uploading each board's `firmware` / `partition-table` / `bootloader` as artifacts and publishing to a Release on tags.
 
 ## Firmware Flashing
 
@@ -259,7 +261,7 @@ GitHub Actions builds all four boards natively with the official ESP-IDF image o
 
 The `web-flasher/` page is intended for first installation or recovery. It writes the bootloader, partition table, OTA data, application firmware, and esp-sr models.
 
-> Only the two ESP32-S3 boards (`gezipai` / `bh4tdv`) are supported. The ESP32-S31
+> The four ESP32-S3 boards (`gezipai`, `gezipai_4g`, `bi4umd`, and `bh4tdv`) are supported. The ESP32-S31
 > is not supported by esptool-js, so flash `s31_korvo` and `s31_function_coreboard`
 > over serial.
 
