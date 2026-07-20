@@ -46,6 +46,9 @@ const translations = {
         server: 'Server',
         serverHost: 'Server Host / IP',
         serverPort: 'Server Port',
+        serverListLoading: 'Loading server list...',
+        serverListLoaded: 'Loaded {count} servers',
+        serverListFailed: 'Could not load the server list; the current server is retained.',
         saveWifi: 'Save WiFi Config',
         radio: 'Radio',
         channel: 'Channel (0-7)',
@@ -341,6 +344,9 @@ const translations = {
         server: '服务器',
         serverHost: '服务器地址 / IP',
         serverPort: '服务器端口',
+        serverListLoading: '正在加载服务器列表...',
+        serverListLoaded: '已加载 {count} 个服务器',
+        serverListFailed: '服务器列表加载失败，已保留当前服务器。',
         saveWifi: '保存WiFi配置',
         radio: '电台',
         channel: '信道 (0-7)',
@@ -1119,9 +1125,88 @@ const translations = {
       if (select) select.value = selected;
     }
 
+    function platformServerHost(value) {
+      const host = String(value || '').trim();
+      const withReportingPort = host.match(/^(.+):(\d+)$/);
+      return withReportingPort ? withReportingPort[1] : host;
+    }
+
+    function setServerListStatus(key, count) {
+      const status = document.getElementById('nrl-server-status');
+      if (!status) return;
+      status.removeAttribute('data-i18n');
+      status.textContent = t(key).replace('{count}', String(count || 0));
+    }
+
+    function syncNrlServerPort() {
+      const select = document.getElementById('nrl-server-select');
+      const port = document.getElementById('nrl-server-port');
+      if (!select || !port || select.selectedIndex < 0) return;
+      const selected = select.options[select.selectedIndex];
+      if (selected && selected.dataset.port) port.value = selected.dataset.port;
+    }
+
+    async function loadNrlServers() {
+      const select = document.getElementById('nrl-server-select');
+      const port = document.getElementById('nrl-server-port');
+      if (!select || !port) return;
+      const currentHost = select.value;
+      const currentPort = port.value;
+      select.addEventListener('change', syncNrlServerPort);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch('https://www.nrlptt.com/api/platform-servers', {
+          cache: 'no-store',
+          credentials: 'omit',
+          referrerPolicy: 'no-referrer',
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const payload = await response.json();
+        const servers = (payload && Array.isArray(payload.data) ? payload.data : [])
+          .filter((item) => item && !item.hidden && platformServerHost(item.host) &&
+                            Number(item.port) > 0 && Number(item.port) <= 65535)
+          .sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0));
+        if (!servers.length) throw new Error('empty server list');
+
+        select.innerHTML = '';
+        let matched = false;
+        servers.forEach((server) => {
+          const host = platformServerHost(server.host);
+          const serverPort = String(server.port);
+          const option = document.createElement('option');
+          option.value = host;
+          option.dataset.port = serverPort;
+          option.textContent = String(server.name || host) + ' · ' + host + ':' + serverPort +
+                               ' · ' + String(Number(server.online) || 0) + '/' +
+                               String(Number(server.total) || 0);
+          if (!matched && host === platformServerHost(currentHost) && serverPort === currentPort) {
+            option.selected = true;
+            matched = true;
+          }
+          select.appendChild(option);
+        });
+        if (!matched && currentHost) {
+          const option = document.createElement('option');
+          option.value = currentHost;
+          option.dataset.port = currentPort;
+          option.textContent = currentHost + ':' + currentPort;
+          option.selected = true;
+          select.insertBefore(option, select.firstChild);
+        }
+        setServerListStatus('serverListLoaded', servers.length);
+      } catch (error) {
+        setServerListStatus('serverListFailed', 0);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
     function initPortal() {
       applyLanguage(currentLang());
       syncDhcpFields();
+      loadNrlServers();
       if (window.RADIO_FAVS) {
         renderRadioFavs(window.RADIO_FAVS, window.RADIO_FAV_CUR);
         applyLanguage(currentLang()); // translate the freshly rendered rows
