@@ -10,18 +10,25 @@
 
 #include "../app/driver/es8311.h"
 #include "../app/driver/external_radio.h"
+#include "../app/driver/gps_serial.h"
+#include "../app/driver/sci_serial.h"
+#include "../app/driver/serial_port_config.h"
 #include "../app/driver/board_pins.h"
 #include "../app/driver/display.h"
 #include "../services/ai_assistant.h"
+#include "../services/aprs_service.h"
+#include "../services/signaling_service.h"
 #include "../services/display_notice.h"
 #include "../services/espnow_link.h"
 #include "../services/music_player.h"
+#include "../services/music_playlist.h"
 #include "../services/nanny.h"
 #include "../services/radio_favorites.h"
 #include "../services/storage_service.h"
 
 #include <driver/gpio.h>
 #include <esp_http_server.h>
+#include <math.h>
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_ota_ops.h>
@@ -1070,7 +1077,9 @@ static void sendConfigPage(const char *title,
                            const bool device_active,
                            const bool audio_active,
                            const std::string &footer,
-                           const bool media_active = false)
+                           const bool media_active = false,
+                           const bool aprs_active = false,
+                           const bool signaling_active = false)
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     const WifiConfigPortalPageState state = {
@@ -1084,6 +1093,8 @@ static void sendConfigPage(const char *title,
         .device_active = device_active,
         .audio_active = audio_active,
         .media_active = media_active,
+        .aprs_active = aprs_active,
+        .signaling_active = signaling_active,
         .footer = footer,
     };
     sendChunkedHtml(200, WifiConfigPortalView_BuildConfigPage(config, state, form_sections));
@@ -1166,6 +1177,404 @@ static esp_err_t handleMediaPage(httpd_req_t *req)
                    false,
                    "",
                    true);
+    return ESP_OK;
+}
+
+static bool parseUIntArg(const std::string &text, unsigned long *out_value);
+
+static bool parseHexArg(const std::string &text, unsigned long *out_value)
+{
+    if (out_value == nullptr || text.empty()) return false;
+    char *end = nullptr;
+    const unsigned long value = strtoul(text.c_str(), &end, 16);
+    if (end == text.c_str() || (end != nullptr && *end != '\0')) return false;
+    *out_value = value;
+    return true;
+}
+
+static esp_err_t handleAprsPage(httpd_req_t *req)
+{
+    s_server.bind(req);
+    sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " APRS").c_str(),
+                   "APRS",
+                   "aprsHeadline",
+                   "GPS beacons to APRS-IS and AFSK over the radio; stations heard are listed below.",
+                   "aprsIntro",
+                   "/save_aprs",
+                   WifiConfigPortalView_BuildAprsSections(),
+                   false,
+                   false,
+                   false,
+                   "",
+                   false,
+                   true);
+    return ESP_OK;
+}
+
+static esp_err_t handleSignalingPage(httpd_req_t *req)
+{
+    s_server.bind(req);
+    sendConfigPage((std::string(NRL_FIRMWARE_NAME) + " Signaling").c_str(),
+                   "MDC1200 / DTMF / CTCSS",
+                   "signalingHeadline",
+                   "Configure signaling decode sources and voice-tail transmit destinations.",
+                   "signalingIntro",
+                   "/save_signaling",
+                   WifiConfigPortalView_BuildSignalingSections(),
+                   false, false, false, "", false, false, true);
+    return ESP_OK;
+}
+
+static void sendSignalingSavedJson(const bool ok)
+{
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    char op[3], arg[3], unit_id[5];
+    snprintf(op, sizeof(op), "%02X", cfg.mdc_opcode);
+    snprintf(arg, sizeof(arg), "%02X", cfg.mdc_argument);
+    snprintf(unit_id, sizeof(unit_id), "%04X", cfg.mdc_unit_id);
+    std::string body = std::string("{\"ok\":") + (ok ? "true" : "false") + ",\"fields\":{";
+    auto append = [&body](const char *name, const char *value, bool first = false) {
+        if (!first) body += ",";
+        body += "\"" + std::string(name) + "\":\"" + jsonEscape(value) + "\"";
+    };
+    append("ctcss_rx_mic", cfg.ctcss_rx_mic ? "1" : "0", true);
+    append("ctcss_rx_nrl", cfg.ctcss_rx_nrl ? "1" : "0");
+    append("mdc_rx_mic", cfg.mdc_rx_mic ? "1" : "0");
+    append("mdc_rx_nrl", cfg.mdc_rx_nrl ? "1" : "0");
+    append("mdc_tx_nrl", cfg.mdc_tx_nrl ? "1" : "0");
+    append("mdc_tx_speaker", cfg.mdc_tx_speaker ? "1" : "0");
+    append("dtmf_rx_mic", cfg.dtmf_rx_mic ? "1" : "0");
+    append("dtmf_rx_nrl", cfg.dtmf_rx_nrl ? "1" : "0");
+    append("dtmf_tx_nrl", cfg.dtmf_tx_nrl ? "1" : "0");
+    append("dtmf_tx_speaker", cfg.dtmf_tx_speaker ? "1" : "0");
+    append("mdc_opcode", op);
+    append("mdc_argument", arg);
+    append("mdc_unit_id", unit_id);
+    append("dtmf_digits", cfg.dtmf_digits);
+    body += "}}";
+    s_server.send(200, "application/json; charset=utf-8", body);
+}
+
+static esp_err_t handleSaveSignaling(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    bool ok = true;
+    if (s_server.hasArg("ctcss_rx_mic_present")) {
+        ok = SIGNALING_SetCtcssRoute(SIGNAL_ROUTE_RX_MIC,
+                                     s_server.hasArg("ctcss_rx_mic"));
+    }
+    if (ok && s_server.hasArg("ctcss_rx_nrl_present")) {
+        ok = SIGNALING_SetCtcssRoute(SIGNAL_ROUTE_RX_NRL,
+                                     s_server.hasArg("ctcss_rx_nrl"));
+    }
+    struct RouteField { const char *present; const char *name; bool mdc; SignalingRoute route; };
+    static const RouteField routes[] = {
+        {"mdc_rx_mic_present", "mdc_rx_mic", true, SIGNAL_ROUTE_RX_MIC},
+        {"mdc_rx_nrl_present", "mdc_rx_nrl", true, SIGNAL_ROUTE_RX_NRL},
+        {"mdc_tx_nrl_present", "mdc_tx_nrl", true, SIGNAL_ROUTE_TX_NRL},
+        {"mdc_tx_speaker_present", "mdc_tx_speaker", true, SIGNAL_ROUTE_TX_SPEAKER},
+        {"dtmf_rx_mic_present", "dtmf_rx_mic", false, SIGNAL_ROUTE_RX_MIC},
+        {"dtmf_rx_nrl_present", "dtmf_rx_nrl", false, SIGNAL_ROUTE_RX_NRL},
+        {"dtmf_tx_nrl_present", "dtmf_tx_nrl", false, SIGNAL_ROUTE_TX_NRL},
+        {"dtmf_tx_speaker_present", "dtmf_tx_speaker", false, SIGNAL_ROUTE_TX_SPEAKER},
+    };
+    for (const RouteField &field : routes) {
+        if (!ok || !s_server.hasArg(field.present)) continue;
+        const bool enabled = s_server.hasArg(field.name);
+        ok = field.mdc ? SIGNALING_SetMdcRoute(field.route, enabled)
+                       : SIGNALING_SetDtmfRoute(field.route, enabled);
+    }
+    if (ok && (s_server.hasArg("mdc_opcode") || s_server.hasArg("mdc_argument") ||
+               s_server.hasArg("mdc_unit_id"))) {
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        unsigned long op = cfg.mdc_opcode, arg = cfg.mdc_argument, unit_id = cfg.mdc_unit_id;
+        if (s_server.hasArg("mdc_opcode")) ok = parseHexArg(s_server.arg("mdc_opcode"), &op) && op <= 0xFFUL;
+        if (ok && s_server.hasArg("mdc_argument")) ok = parseHexArg(s_server.arg("mdc_argument"), &arg) && arg <= 0xFFUL;
+        if (ok && s_server.hasArg("mdc_unit_id")) ok = parseHexArg(s_server.arg("mdc_unit_id"), &unit_id) && unit_id <= 0xFFFFUL;
+        if (ok) ok = SIGNALING_SetMdcPacket(static_cast<uint8_t>(op), static_cast<uint8_t>(arg),
+                                             static_cast<uint16_t>(unit_id));
+    }
+    if (ok && s_server.hasArg("dtmf_digits")) {
+        ok = SIGNALING_SetDtmfDigits(s_server.arg("dtmf_digits").c_str());
+    }
+    if (!ok) ESP_LOGE(TAG, "signaling config save via web failed");
+    sendSignalingSavedJson(ok);
+    return ESP_OK;
+}
+
+static void sendSerialSavedJson(const bool ok)
+{
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    const ExternalRadioConfig *radio = EXTERNAL_RADIO_GetConfig();
+    char body[512];
+    snprintf(body, sizeof(body),
+             "{\"ok\":%s,\"fields\":{"
+             "\"uart1_enabled\":\"%u\",\"uart2_enabled\":\"%u\","
+             "\"uart1_rx_pin\":\"%d\",\"uart1_tx_pin\":\"%d\","
+             "\"uart1_baud\":\"%lu\",\"uart1_data_bits\":\"%u\","
+             "\"uart1_parity\":\"%c\",\"uart1_stop_bits\":\"%u\","
+             "\"uart2_rx_pin\":\"%d\",\"uart2_tx_pin\":\"%d\","
+             "\"uart2_baud\":\"%lu\",\"uart2_data_bits\":\"%u\","
+             "\"uart2_parity\":\"%c\",\"uart2_stop_bits\":\"%u\"}}",
+             ok ? "true" : "false",
+             serial.uart1_enabled ? 1u : 0u, serial.uart2_enabled ? 1u : 0u,
+             serial.uart1_rx_pin, serial.uart1_tx_pin,
+             static_cast<unsigned long>(radio != nullptr ? radio->sci.baud : 9600u),
+             static_cast<unsigned>(radio != nullptr ? radio->sci.data_bits : 8u),
+             radio != nullptr ? radio->sci.parity : 'N',
+             static_cast<unsigned>(radio != nullptr ? radio->sci.stop_bits : 1u),
+             serial.uart2_rx_pin, serial.uart2_tx_pin,
+             static_cast<unsigned long>(serial.uart2_baud),
+             static_cast<unsigned>(serial.uart2_data_bits), serial.uart2_parity,
+             static_cast<unsigned>(serial.uart2_stop_bits));
+    s_server.send(ok ? 200 : 400, "application/json; charset=utf-8", body);
+}
+
+static esp_err_t handleSaveSerial(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+
+    SerialPortConfig before{};
+    SERIAL_PORT_CONFIG_Get(&before);
+    SerialPortConfig updated = before;
+    const ExternalRadioConfig *radio = EXTERNAL_RADIO_GetConfig();
+    const SciSerialConfig old_sci = radio != nullptr ? radio->sci : SciSerialConfig{9600u, 8u, 'N', 1u};
+    SciSerialConfig new_sci = old_sci;
+
+    if (s_server.hasArg("uart1_enabled_present")) {
+        updated.uart1_enabled = s_server.hasArg("uart1_enabled");
+    }
+    if (s_server.hasArg("uart2_enabled_present")) {
+        updated.uart2_enabled = s_server.hasArg("uart2_enabled");
+    }
+
+    auto parseNumber = [](const std::string &text, unsigned long max, unsigned long *out) {
+        return parseUIntArg(text, out) && *out <= max;
+    };
+    unsigned long value = 0u;
+    bool ok =
+        parseNumber(s_server.arg("uart1_rx_pin"), 127u, &value);
+    if (ok) updated.uart1_rx_pin = static_cast<int>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart1_tx_pin"), 127u, &value);
+    if (ok) updated.uart1_tx_pin = static_cast<int>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart1_baud"), 921600u, &value) && value >= 300u;
+    if (ok) new_sci.baud = static_cast<uint32_t>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart1_data_bits"), 8u, &value) && value >= 5u;
+    if (ok) new_sci.data_bits = static_cast<uint8_t>(value);
+    if (ok) {
+        const std::string parity = s_server.arg("uart1_parity");
+        ok = parity.size() == 1u;
+        if (ok) new_sci.parity = static_cast<char>(toupper(static_cast<unsigned char>(parity[0])));
+    }
+    if (ok) ok = parseNumber(s_server.arg("uart1_stop_bits"), 2u, &value) && value >= 1u;
+    if (ok) new_sci.stop_bits = static_cast<uint8_t>(value);
+
+    if (ok) ok = parseNumber(s_server.arg("uart2_rx_pin"), 127u, &value);
+    if (ok) updated.uart2_rx_pin = static_cast<int>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart2_tx_pin"), 127u, &value);
+    if (ok) updated.uart2_tx_pin = static_cast<int>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart2_baud"), 921600u, &value) && value >= 300u;
+    if (ok) updated.uart2_baud = static_cast<uint32_t>(value);
+    if (ok) ok = parseNumber(s_server.arg("uart2_data_bits"), 8u, &value) && value >= 5u;
+    if (ok) updated.uart2_data_bits = static_cast<uint8_t>(value);
+    if (ok) {
+        const std::string parity = s_server.arg("uart2_parity");
+        ok = parity.size() == 1u;
+        if (ok) updated.uart2_parity = static_cast<char>(toupper(static_cast<unsigned char>(parity[0])));
+    }
+    if (ok) ok = parseNumber(s_server.arg("uart2_stop_bits"), 2u, &value) && value >= 1u;
+    if (ok) updated.uart2_stop_bits = static_cast<uint8_t>(value);
+
+    if (ok) ok = SERIAL_PORT_CONFIG_Validate(&updated);
+    if (ok) ok = EXTERNAL_RADIO_SetSciConfig(new_sci.baud, new_sci.data_bits,
+                                               new_sci.parity, new_sci.stop_bits, false);
+    if (ok) ok = SERIAL_PORT_CONFIG_Set(&updated, true);
+    if (ok) ok = EXTERNAL_RADIO_SaveConfig();
+    // Reload UART1 unconditionally because its GPIOs may have changed even
+    // when baud/data/parity/stop are unchanged.
+    if (ok) ok = SCI_SERIAL_ReloadPins() && GPS_SERIAL_ReloadConfig();
+    if (!ok) {
+        (void)EXTERNAL_RADIO_SetSciConfig(old_sci.baud, old_sci.data_bits,
+                                          old_sci.parity, old_sci.stop_bits, false);
+        (void)EXTERNAL_RADIO_SaveConfig();
+        (void)SERIAL_PORT_CONFIG_Set(&before, true);
+        (void)SCI_SERIAL_ReloadPins();
+        (void)GPS_SERIAL_ReloadConfig();
+        ESP_LOGE(TAG, "serial config save via web failed (invalid/conflicting GPIO or UART params)");
+    }
+    sendSerialSavedJson(ok);
+    return ESP_OK;
+}
+
+static void sendAprsSavedJson(const bool ok)
+{
+    AprsConfig cfg;
+    APRS_SERVICE_GetConfig(&cfg);
+    std::string body;
+    body.reserve(384);
+    body += "{\"ok\":";
+    body += ok ? "true" : "false";
+    body += ",\"fields\":{";
+    auto appendField = [&body](const char *name, const std::string &value, const bool first = false) {
+        if (!first) {
+            body += ",";
+        }
+        body += "\"";
+        body += name;
+        body += "\":\"";
+        body += jsonEscape(value);
+        body += "\"";
+    };
+    appendField("aprs_enabled", cfg.enabled ? "1" : "0", true);
+    appendField("aprs_net", cfg.net_enabled ? "1" : "0");
+    appendField("aprs_tx", cfg.rf_tx_enabled ? "1" : "0");
+    appendField("aprs_rx", cfg.rf_rx_enabled ? "1" : "0");
+    appendField("aprs_auto", cfg.auto_interval ? "1" : "0");
+    char lat[16] = {};
+    char lon[16] = {};
+    APRS_SERVICE_FormatAprsCoord(static_cast<double>(cfg.default_lat_e6) / 1e6,
+                                 true, lat, sizeof(lat));
+    APRS_SERVICE_FormatAprsCoord(static_cast<double>(cfg.default_lon_e6) / 1e6,
+                                 false, lon, sizeof(lon));
+    appendField("aprs_lat", lat);
+    appendField("aprs_lon", lon);
+    body += "}}";
+    s_server.send(200, "application/json; charset=utf-8", body);
+}
+
+static esp_err_t handleSaveAprs(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    bool ok = true;
+
+    if (s_server.hasArg("aprs_present")) {
+        ok = APRS_SERVICE_SetEnabled(s_server.hasArg("aprs_enabled"));
+    }
+    if (ok && s_server.hasArg("aprs_net_present")) {
+        ok = APRS_SERVICE_SetNetEnabled(s_server.hasArg("aprs_net"));
+    }
+    if (ok && s_server.hasArg("aprs_tx_present")) {
+        ok = APRS_SERVICE_SetRfTxEnabled(s_server.hasArg("aprs_tx"));
+    }
+    if (ok && s_server.hasArg("aprs_rx_present")) {
+        ok = APRS_SERVICE_SetRfRxEnabled(s_server.hasArg("aprs_rx"));
+    }
+    if (ok && s_server.hasArg("aprs_auto_present")) {
+        ok = APRS_SERVICE_SetAutoInterval(s_server.hasArg("aprs_auto"));
+    }
+    if (ok && s_server.hasArg("aprs_server")) {
+        unsigned long port = 14580UL;
+        ok = parseUIntArg(s_server.arg("aprs_port"), &port) && port > 0UL && port <= 65535UL &&
+             APRS_SERVICE_SetServer(s_server.arg("aprs_server").c_str(),
+                                    static_cast<uint16_t>(port));
+    }
+    if (ok && s_server.hasArg("aprs_ssid")) {
+        unsigned long ssid = 0UL;
+        ok = parseUIntArg(s_server.arg("aprs_ssid"), &ssid) && ssid <= 15UL &&
+             APRS_SERVICE_SetSsid(static_cast<uint8_t>(ssid));
+    }
+    if (ok && s_server.hasArg("aprs_symbol")) {
+        const std::string symbol = s_server.arg("aprs_symbol");
+        ok = symbol.size() == 2u && APRS_SERVICE_SetSymbol(symbol[0], symbol[1]);
+    }
+    if (ok && s_server.hasArg("aprs_interval")) {
+        unsigned long seconds = 0UL;
+        ok = parseUIntArg(s_server.arg("aprs_interval"), &seconds) && seconds <= 65535UL &&
+             APRS_SERVICE_SetBeaconInterval(static_cast<uint16_t>(seconds));
+    }
+    if (ok && s_server.hasArg("aprs_lat") && s_server.hasArg("aprs_lon")) {
+        double lat = 0.0;
+        double lon = 0.0;
+        ok = APRS_SERVICE_ParseAprsCoord(s_server.arg("aprs_lat").c_str(), true, &lat) &&
+             APRS_SERVICE_ParseAprsCoord(s_server.arg("aprs_lon").c_str(), false, &lon) &&
+             APRS_SERVICE_SetDefaultPosition(lat, lon);
+    }
+    if (ok && s_server.hasArg("aprs_path")) {
+        ok = APRS_SERVICE_SetPath(s_server.arg("aprs_path").c_str());
+    }
+    if (ok && s_server.hasArg("aprs_comment")) {
+        ok = APRS_SERVICE_SetComment(s_server.arg("aprs_comment").c_str());
+    }
+    if (ok && s_server.hasArg("aprs_beacon")) {
+        ok = APRS_SERVICE_SendBeaconNow();
+    }
+
+    if (!ok) {
+        ESP_LOGE(TAG, "APRS config save via web failed (invalid params)");
+    }
+    sendAprsSavedJson(ok);
+    return ESP_OK;
+}
+
+// JSON feed for the stations-heard table: full APRS info per station plus
+// service status, polled by the /aprs page every few seconds.
+static esp_err_t handleAprsStations(httpd_req_t *req)
+{
+    s_server.bind(req);
+    static AprsStationInfo stations[32];
+    const size_t count = APRS_SERVICE_GetStations(stations, 32);
+
+    std::string body;
+    body.reserve(1024);
+    body += "{\"net\":";
+    body += APRS_SERVICE_IsNetConnected() ? "true" : "false";
+    body += ",\"gps\":";
+    body += APRS_SERVICE_GpsHasFix() ? "true" : "false";
+    body += ",\"rx\":" + std::to_string(APRS_SERVICE_GetRxCount());
+    body += ",\"tx\":" + std::to_string(APRS_SERVICE_GetTxCount());
+    body += ",\"stations\":[";
+    char num[32];
+    for (size_t i = 0; i < count; ++i) {
+        const AprsStationInfo &s = stations[i];
+        if (i > 0) {
+            body += ",";
+        }
+        body += "{\"name\":\"" + jsonEscape(s.name) + "\"";
+        snprintf(num, sizeof(num), ",\"lat\":%.5f,\"lon\":%.5f",
+                 static_cast<double>(s.lat), static_cast<double>(s.lon));
+        body += num;
+        if (!isnan(s.altitude_m)) {
+            snprintf(num, sizeof(num), ",\"alt\":%.0f", static_cast<double>(s.altitude_m));
+            body += num;
+        }
+        if (!isnan(s.distance_km)) {
+            snprintf(num, sizeof(num), ",\"dist\":%.1f,\"brg\":%u",
+                     static_cast<double>(s.distance_km), static_cast<unsigned>(s.bearing_deg));
+            body += num;
+        }
+        if (!isnan(s.speed_kmh)) {
+            snprintf(num, sizeof(num), ",\"spd\":%.1f", static_cast<double>(s.speed_kmh));
+            body += num;
+        }
+        if (!isnan(s.derived_speed_kmh)) {
+            snprintf(num, sizeof(num), ",\"dspd\":%.1f", static_cast<double>(s.derived_speed_kmh));
+            body += num;
+        }
+        if (s.course_deg > 0) {
+            snprintf(num, sizeof(num), ",\"crs\":%u", static_cast<unsigned>(s.course_deg));
+            body += num;
+        }
+        body += ",\"rf\":";
+        body += s.via_rf ? "true" : "false";
+        body += ",\"age\":" + std::to_string(s.age_s);
+        body += ",\"pkts\":" + std::to_string(s.pkt_count);
+        body += ",\"cmt\":\"" + jsonEscape(s.comment) + "\"";
+        body += ",\"sym\":\"" + jsonEscape(s.symbol) + "\"}";
+    }
+    body += "]}";
+    s_server.send(200, "application/json; charset=utf-8", body);
     return ESP_OK;
 }
 
@@ -1961,6 +2370,151 @@ static esp_err_t handleSaveMedia(httpd_req_t *req)
     return ESP_OK;
 }
 
+constexpr size_t kWebPlaylistPageSize = 64u;
+
+static const char *pathBasename(const char *path)
+{
+    if (path == nullptr) {
+        return "";
+    }
+    const char *slash = strrchr(path, '/');
+    return (slash != nullptr) ? slash + 1 : path;
+}
+
+static void sendPlaylistJson(const bool ok, size_t offset, const bool include_entries)
+{
+    const bool scanning = PLAYLIST_IsScanning();
+    const size_t track_count = PLAYLIST_Count();
+    const size_t dir_count = PLAYLIST_DirCount();
+    const size_t total = dir_count + track_count;
+    if (offset >= total && total > 0u) {
+        offset = ((total - 1u) / kWebPlaylistPageSize) * kWebPlaylistPageSize;
+    }
+    const size_t end = (offset + kWebPlaylistPageSize < total)
+                           ? offset + kWebPlaylistPageSize
+                           : total;
+    const char *playing_path = MUSIC_CurrentPath();
+    const bool playing = MUSIC_IsPlaying();
+
+    std::string body;
+    body.reserve(include_entries ? 16384u : 768u);
+    body += "{\"ok\":";
+    body += ok ? "true" : "false";
+    body += ",\"scanning\":";
+    body += scanning ? "true" : "false";
+    body += ",\"scan_ok\":";
+    body += PLAYLIST_LastScanOk() ? "true" : "false";
+    body += ",\"root\":";
+    body += PLAYLIST_AtRoot() ? "true" : "false";
+    body += ",\"dir\":\"" + jsonEscape(PLAYLIST_CurrentDir()) + "\"";
+    body += ",\"playing\":";
+    body += playing ? "true" : "false";
+    body += ",\"playing_path\":\"" + jsonEscape(playing_path) + "\"";
+    body += ",\"repeat\":" + std::to_string(static_cast<int>(PLAYLIST_GetRepeatMode()));
+    body += ",\"offset\":" + std::to_string(offset);
+    body += ",\"page_size\":" + std::to_string(kWebPlaylistPageSize);
+    body += ",\"total\":" + std::to_string(total);
+    body += ",\"favorite_supported\":";
+    body += STORAGE_SdMounted() ? "true" : "false";
+
+    if (include_entries) {
+        body += ",\"dirs\":[";
+        const size_t dir_begin = offset < dir_count ? offset : dir_count;
+        const size_t dir_end = end < dir_count ? end : dir_count;
+        for (size_t i = dir_begin; i < dir_end; ++i) {
+            const char *name = PLAYLIST_GetDirName(i);
+            if (i > dir_begin) {
+                body += ",";
+            }
+            body += "{\"index\":" + std::to_string(i) +
+                    ",\"name\":\"" + jsonEscape(name != nullptr ? name : "(dir)") + "\"}";
+        }
+        body += "],\"tracks\":[";
+        bool first = true;
+        const size_t track_begin = offset > dir_count ? offset - dir_count : 0u;
+        const size_t track_end = end > dir_count
+                                     ? ((end - dir_count < track_count)
+                                            ? end - dir_count : track_count)
+                                     : 0u;
+        for (size_t i = track_begin; i < track_end; ++i) {
+            const char *path = PLAYLIST_GetPath(i);
+            if (path == nullptr) {
+                continue;
+            }
+            if (!first) {
+                body += ",";
+            }
+            first = false;
+            body += "{\"index\":" + std::to_string(i) +
+                    ",\"name\":\"" + jsonEscape(pathBasename(path)) +
+                    "\",\"favorite\":" + (PLAYLIST_IsFavorite(path) ? "true" : "false") +
+                    ",\"current\":" +
+                    ((playing && playing_path != nullptr && strcmp(path, playing_path) == 0)
+                         ? "true" : "false") + "}";
+        }
+        body += "]";
+    }
+    body += "}";
+    s_server.send(ok ? 200 : 400, "application/json; charset=utf-8", body);
+}
+
+static esp_err_t handlePlaylistControl(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+
+    const std::string action = s_server.arg("action");
+    unsigned long parsed_offset = 0UL;
+    if (s_server.hasArg("offset")) {
+        (void)parseUIntArg(s_server.arg("offset"), &parsed_offset);
+    }
+    size_t offset = static_cast<size_t>(parsed_offset);
+    bool ok = true;
+
+    const bool navigation_action = action == "enter" || action == "up" ||
+                                   action == "refresh";
+    if (PLAYLIST_IsScanning() && !navigation_action &&
+        action != "snapshot" && action != "status") {
+        ok = false;
+    } else if (action == "enter" || action == "play" || action == "favorite") {
+        unsigned long index = 0UL;
+        ok = parseUIntArg(s_server.arg("index"), &index);
+        if (ok && action == "enter") {
+            ok = PLAYLIST_EnterDirAsync(static_cast<size_t>(index));
+            offset = 0u;
+        } else if (ok && action == "play") {
+            ok = PLAYLIST_PlayIndex(static_cast<size_t>(index));
+        } else if (ok) {
+            const char *path = PLAYLIST_GetPath(static_cast<size_t>(index));
+            ok = path != nullptr && PLAYLIST_ToggleFavorite(path);
+        }
+    } else if (action == "up") {
+        ok = PLAYLIST_UpAsync();
+        offset = 0u;
+    } else if (action == "refresh") {
+        ok = PLAYLIST_ScanAsync();
+        offset = 0u;
+    } else if (action == "prev") {
+        ok = PLAYLIST_Prev();
+    } else if (action == "next") {
+        ok = PLAYLIST_Next();
+    } else if (action == "stop") {
+        MUSIC_Stop();
+    } else if (action == "repeat") {
+        (void)PLAYLIST_ToggleRepeatMode();
+    } else if (action != "snapshot" && action != "status") {
+        ok = false;
+    }
+
+    if (!ok) {
+        ESP_LOGW(TAG, "web playlist action failed: %s", action.c_str());
+    }
+    sendPlaylistJson(ok, offset, action != "status");
+    return ESP_OK;
+}
+
 static esp_err_t handleUpdatePage(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -1981,6 +2535,9 @@ static esp_err_t handleOtaStatus(httpd_req_t *req)
                        "\",\"configured\":" + (status.configured ? "true" : "false") +
                        ",\"checking\":" + (status.checking ? "true" : "false") +
                        ",\"updating\":" + (status.updating ? "true" : "false") +
+                       ",\"update_bytes\":" + std::to_string(status.update_bytes) +
+                       ",\"update_size\":" + std::to_string(status.update_size) +
+                       ",\"update_percent\":" + std::to_string(status.update_percent) +
                        ",\"last_check_ms\":" + std::to_string(status.last_check_ms) +
                        ",\"latest_version\":\"" + jsonEscape(status.latest_version) +
                        "\",\"last_error\":\"" + jsonEscape(status.last_error) +
@@ -2147,9 +2704,10 @@ static void sendChunkedAsset(httpd_req_t *req, const char *content_type,
 {
     httpd_resp_set_status(req, "200 OK");
     httpd_resp_set_type(req, content_type);
-    // Long cache lifetime is safe because every reference is versioned via the
-    // ?v={{VERSION}} query string in the HTML template.
-    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=2592000, immutable");
+    // Development builds are often flashed repeatedly without changing the
+    // firmware version. Revalidate assets so a normal page refresh cannot keep
+    // an older portal.js that does not match the newly flashed HTML.
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     constexpr size_t kChunkSize = 1024;
     size_t remaining = length;
     const char *cursor = body;
@@ -2216,7 +2774,7 @@ static void ensureServerRunning()
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
-    cfg.max_uri_handlers = 24;
+    cfg.max_uri_handlers = 32;
     // Templated audio config page builds via std::string concatenation can
     // exceed the default 4 KB worker stack.
     cfg.stack_size = 8192;
@@ -2245,6 +2803,13 @@ static void ensureServerRunning()
         { "/save_nrl",             HTTP_POST, handleSaveNrl },
         { "/media",                HTTP_GET,  handleMediaPage },
         { "/save_media",           HTTP_POST, handleSaveMedia },
+        { "/media/playlist",       HTTP_POST, handlePlaylistControl },
+        { "/aprs",                 HTTP_GET,  handleAprsPage },
+        { "/save_aprs",            HTTP_POST, handleSaveAprs },
+        { "/aprs/stations",        HTTP_GET,  handleAprsStations },
+        { "/signaling",            HTTP_GET,  handleSignalingPage },
+        { "/save_signaling",       HTTP_POST, handleSaveSignaling },
+        { "/save_serial",          HTTP_POST, handleSaveSerial },
         { "/update",               HTTP_GET,  handleUpdatePage },
         { "/update",               HTTP_POST, handleUpdate },
         { "/ota/status",           HTTP_GET,  handleOtaStatus },

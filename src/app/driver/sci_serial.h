@@ -11,6 +11,7 @@ extern "C" {
 
 bool SCI_SERIAL_Init(void);
 bool SCI_SERIAL_ApplyConfig(uint32_t baud, uint8_t data_bits, char parity, uint8_t stop_bits);
+bool SCI_SERIAL_ReloadPins(void);
 int SCI_SERIAL_Available(void);
 size_t SCI_SERIAL_Read(uint8_t *buffer, size_t buffer_size);
 size_t SCI_SERIAL_Write(const uint8_t *data, size_t data_size);

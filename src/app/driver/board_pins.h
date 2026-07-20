@@ -50,6 +50,8 @@
 #define NRL_PIN_SCI_RX          4
 #define NRL_PIN_SCI_TX          5
 #define NRL_HAS_SCI_SERIAL      1
+#define NRL_PIN_GPS_RX          6
+#define NRL_PIN_GPS_TX          7
 
 // Radio control / status
 #define NRL_PIN_PTT_OUT         8
@@ -104,6 +106,8 @@
 #define NRL_PIN_SCI_RX          44
 #define NRL_PIN_SCI_TX          43
 #define NRL_HAS_SCI_SERIAL      1
+#define NRL_PIN_GPS_RX          8
+#define NRL_PIN_GPS_TX          9
 
 // User controls -- 3 push buttons (press-to-GND, read with INPUT_PULLUP)
 #define NRL_PIN_BTN_VOL_UP      1    // IO1  -- volume up
@@ -167,6 +171,8 @@
 #define NRL_PIN_SCI_RX          43
 #define NRL_PIN_SCI_TX          44
 #define NRL_HAS_SCI_SERIAL      1
+#define NRL_PIN_GPS_RX          45
+#define NRL_PIN_GPS_TX          46
 
 // There are no user volume/PTT keys on this board (only RESET and BOOT).
 // Soft PTT remains available through the network/UI APIs; applications that
@@ -230,11 +236,14 @@
 // ESP32-S31-Korvo-1 official BSP pin map:
 // https://github.com/espressif/esp-bsp/tree/master/bsp/esp32_s31_korvo_1
 
-// SCI radio-control serial. These are provisional free GPIOs from the board
-// IO map; verify against the final carrier/header schematic before bring-up.
-#define NRL_PIN_SCI_RX          26
-#define NRL_PIN_SCI_TX          27
-#define NRL_HAS_SCI_SERIAL      0
+// UART1 SCI and UART2 GPS use four otherwise-idle DVP camera signals. GPIO26
+// through GPIO32 belong to the module flash interface and must not be used.
+// A parallel DVP camera cannot be enabled while these serial ports are wired.
+#define NRL_PIN_SCI_RX          46
+#define NRL_PIN_SCI_TX          47
+#define NRL_HAS_SCI_SERIAL      1
+#define NRL_PIN_GPS_RX          48
+#define NRL_PIN_GPS_TX          49
 
 // User controls are ADC buttons on ADC1 channel 0. SET is mapped to NRL PTT.
 #define NRL_HAS_ADC_BUTTONS     1

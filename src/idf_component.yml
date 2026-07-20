@@ -32,11 +32,9 @@ dependencies:
       - if: "target == esp32s31"
   # SMB2/3 client for playing audio from network shares (NAS / Windows
   # folder), mounted at /smb through the esp_vfs adapter in
-  # services/smb_vfs.cpp. S31-only like the rest of the media stack.
+  # services/smb_vfs.cpp. Available on all four boards.
   sahlberg/libsmb2:
     version: "^3.0.1"
-    rules:
-      - if: "target == esp32s31"
   # WebSocket client for the xiaozhi AI assistant link (services/ai_assistant).
   espressif/esp_websocket_client:
     version: "^1.5.0"

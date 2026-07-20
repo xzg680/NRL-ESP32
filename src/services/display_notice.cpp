@@ -9,9 +9,8 @@ namespace {
 portMUX_TYPE s_notice_lock = portMUX_INITIALIZER_UNLOCKED;
 DisplayNoticeSnapshot s_notice = {};
 
-} // namespace
-
-void DISPLAY_NOTICE_Post(const char *text, DisplayNoticeLevel level, uint32_t duration_ms)
+void postNotice(const char *text, DisplayNoticeLevel level, uint32_t duration_ms,
+                int8_t progress_percent)
 {
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     const char *source = text != nullptr ? text : "";
@@ -25,8 +24,23 @@ void DISPLAY_NOTICE_Post(const char *text, DisplayNoticeLevel level, uint32_t du
     s_notice.level = level;
     s_notice.posted_ms = now;
     s_notice.duration_ms = duration_ms;
+    s_notice.progress_percent = progress_percent;
     ++s_notice.sequence;
     portEXIT_CRITICAL(&s_notice_lock);
+}
+
+} // namespace
+
+void DISPLAY_NOTICE_Post(const char *text, DisplayNoticeLevel level, uint32_t duration_ms)
+{
+    postNotice(text, level, duration_ms, -1);
+}
+
+void DISPLAY_NOTICE_PostProgress(const char *text, DisplayNoticeLevel level,
+                                 uint32_t duration_ms, uint8_t progress_percent)
+{
+    if (progress_percent > 100u) progress_percent = 100u;
+    postNotice(text, level, duration_ms, static_cast<int8_t>(progress_percent));
 }
 
 void DISPLAY_NOTICE_Get(DisplayNoticeSnapshot *out)

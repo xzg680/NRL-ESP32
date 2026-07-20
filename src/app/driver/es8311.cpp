@@ -6,6 +6,7 @@
 #include "driver/i2c1.h"
 
 #include <driver/gpio.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -92,6 +93,8 @@ constexpr uint8_t kDefaultDacRamprate = 0x00;
 constexpr uint32_t kDacEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint32_t kAdcEqCoefficientMask = 0x3FFFFFFFUL;
 constexpr uint8_t kEs8311DacUnmute = 0x00;
+constexpr uint8_t kEs8311DacMuteMask = 0x60;
+constexpr uint32_t kVoiceSampleRate = 16000u;
 
 struct Es8311ClockConfig {
     uint8_t pre_div;
@@ -107,6 +110,12 @@ struct Es8311ClockConfig {
 };
 
 static bool s_es8311_ready = false;
+// Set for the entire acquire/reconfigure/play/release interval. Receive-mode
+// requests arriving from NRL voice during this interval must not restart the
+// 16 kHz passthrough underneath the media task.
+static volatile bool s_hifi_active = false;
+static int16_t *s_hifi_mix_buffer = nullptr;
+static size_t s_hifi_mix_capacity = 0u;
 static uint8_t s_mic_volume = kEs8311AdcVolumeDefault;
 static uint8_t s_line_out_volume = kEs8311DacVolumeDefault;
 static bool s_hp_drive_enabled = false;
@@ -284,6 +293,112 @@ static bool es8311_config_i2s_format(const int bits) {
     if (!es8311_write_reg(ES8311_REG0A_SDPOUT, reg_value)) {
         return false;
     }
+    return true;
+}
+
+static bool es8311_clock_config_for_rate(const uint32_t sample_rate_hz,
+                                         Es8311ClockConfig *cfg) {
+    if (cfg == nullptr) {
+        return false;
+    }
+
+    // AUDIO_ReconfigureOutput supplies MCLK=256*Fs. These values are the
+    // matching rows from Espressif's ES8311 coefficient table. For the
+    // common 8..64 kHz rows the divider topology is identical; only the DAC
+    // oversampling ratio changes above 16 kHz.
+    switch (sample_rate_hz) {
+        case 8000u:
+        case 11025u:
+        case 12000u:
+        case 16000u:
+            *cfg = {
+                .pre_div = 0x01,
+                .pre_mult = 0x01,
+                .adc_div = 0x01,
+                .dac_div = 0x01,
+                .fs_mode = 0x00,
+                .lrck_h = 0x00,
+                .lrck_l = 0xFF,
+                .bclk_div = 0x04,
+                .adc_osr = 0x10,
+                .dac_osr = 0x20,
+            };
+            return true;
+
+        case 22050u:
+        case 24000u:
+        case 32000u:
+        case 44100u:
+        case 48000u:
+        case 64000u:
+            *cfg = {
+                .pre_div = 0x01,
+                .pre_mult = 0x01,
+                .adc_div = 0x01,
+                .dac_div = 0x01,
+                .fs_mode = 0x00,
+                .lrck_h = 0x00,
+                .lrck_l = 0xFF,
+                .bclk_div = 0x04,
+                .adc_osr = 0x10,
+                .dac_osr = 0x10,
+            };
+            return true;
+
+        case 96000u:
+            *cfg = {
+                .pre_div = 0x02,
+                .pre_mult = 0x02,
+                .adc_div = 0x01,
+                .dac_div = 0x01,
+                .fs_mode = 0x00,
+                .lrck_h = 0x00,
+                .lrck_l = 0xFF,
+                .bclk_div = 0x04,
+                .adc_osr = 0x10,
+                .dac_osr = 0x10,
+            };
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static bool es8311_apply_sample_format(const uint32_t sample_rate_hz,
+                                       const uint8_t bits_per_sample) {
+    Es8311ClockConfig cfg = {};
+    return bits_per_sample == 16u &&
+           es8311_clock_config_for_rate(sample_rate_hz, &cfg) &&
+           es8311_config_clock(cfg) &&
+           es8311_config_i2s_format(bits_per_sample);
+}
+
+static bool es8311_set_dac_mute(const bool muted) {
+    uint8_t reg31 = 0u;
+    if (!es8311_read_reg(ES8311_REG31_DAC, &reg31)) {
+        return false;
+    }
+    reg31 = muted ? static_cast<uint8_t>(reg31 | kEs8311DacMuteMask)
+                  : static_cast<uint8_t>(reg31 & ~kEs8311DacMuteMask);
+    return es8311_write_reg(ES8311_REG31_DAC, reg31);
+}
+
+static bool ensure_hifi_mix_capacity(const size_t bytes) {
+    if (s_hifi_mix_capacity >= bytes) {
+        return true;
+    }
+
+    void *grown = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (grown == nullptr) {
+        grown = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (grown == nullptr) {
+        return false;
+    }
+    heap_caps_free(s_hifi_mix_buffer);
+    s_hifi_mix_buffer = static_cast<int16_t *>(grown);
+    s_hifi_mix_capacity = bytes;
     return true;
 }
 
@@ -503,26 +618,8 @@ static bool es8311_configure_codec(void) {
         }
     }
 
-    const Es8311ClockConfig clock_cfg = {
-        .pre_div = 0x01,
-        .pre_mult = 0x01,
-        .adc_div = 0x01,
-        .dac_div = 0x01,
-        .fs_mode = 0x00,
-        .lrck_h = 0x00,
-        .lrck_l = 0xFF,
-        .bclk_div = 0x04,
-        .adc_osr = 0x10,
-        .dac_osr = 0x20,
-    };
-
-    if (!es8311_config_clock(clock_cfg)) {
-        ESP_LOGI(TAG, "clock configuration failed");
-        return false;
-    }
-
-    if (!es8311_config_i2s_format(16)) {
-        ESP_LOGI(TAG, "I2S format configuration failed");
+    if (!es8311_apply_sample_format(kVoiceSampleRate, 16u)) {
+        ESP_LOGI(TAG, "voice sample format configuration failed");
         return false;
     }
 
@@ -620,7 +717,7 @@ static bool es8311_configure_codec(void) {
 
 extern "C" bool ES8311_Init(void) {
     if (s_es8311_ready) {
-        return AUDIO_StartPassthrough();
+        return s_hifi_active || AUDIO_StartPassthrough();
     }
 
     AUDIO_SetMode(AUDIO_MODE_RECEIVE);
@@ -666,6 +763,13 @@ extern "C" bool ES8311_SetAudioMode(const AUDIO_Mode_t mode) {
         return false;
     }
 
+    // NRL voice has already asked the music player to stop. Keep its frames
+    // queued until the media task restores 16 kHz and restarts passthrough.
+    if (s_hifi_active) {
+        AUDIO_SetMode(mode);
+        return true;
+    }
+
     if (!es8311_config_dac_output_path(kEs8311PowerUpDac,
                                        es8311_output_drive_reg(),
                                        kEs8311DacUnmute,
@@ -680,6 +784,88 @@ extern "C" bool ES8311_SetAudioMode(const AUDIO_Mode_t mode) {
 
 extern "C" bool ES8311_SetReceiveMode(void) {
     return ES8311_SetAudioMode(AUDIO_MODE_RECEIVE);
+}
+
+extern "C" bool ES8311_HifiAcquire(const uint32_t sample_rate_hz,
+                                    const uint8_t bits_per_sample,
+                                    const uint8_t channels) {
+    Es8311ClockConfig unused = {};
+    if (!s_es8311_ready || s_hifi_active || bits_per_sample != 16u ||
+        channels != 2u ||
+        !es8311_clock_config_for_rate(sample_rate_hz, &unused)) {
+        return false;
+    }
+
+    // Claim the path before stopping the task so an NRL voice callback cannot
+    // restart passthrough in the middle of the clock transition.
+    s_hifi_active = true;
+    AUDIO_StopPassthrough();
+    AUDIO_ClearOutputQueue();
+    (void)es8311_set_dac_mute(true);
+
+    const bool configured =
+        AUDIO_ReconfigureOutput(sample_rate_hz, bits_per_sample) &&
+        es8311_apply_sample_format(sample_rate_hz, bits_per_sample);
+    if (!configured) {
+        ESP_LOGE(TAG, "hifi: configure %luHz/%ubit/%uch failed",
+                 static_cast<unsigned long>(sample_rate_hz),
+                 static_cast<unsigned>(bits_per_sample),
+                 static_cast<unsigned>(channels));
+        (void)AUDIO_ReconfigureOutput(kVoiceSampleRate, 16u);
+        (void)es8311_apply_sample_format(kVoiceSampleRate, 16u);
+        (void)es8311_set_dac_mute(false);
+        s_hifi_active = false;
+        (void)AUDIO_StartPassthrough();
+        return false;
+    }
+
+    (void)es8311_set_dac_mute(false);
+    ESP_LOGI(TAG, "hifi: acquired %luHz/%ubit/%uch (mono DAC downmix)",
+             static_cast<unsigned long>(sample_rate_hz),
+             static_cast<unsigned>(bits_per_sample),
+             static_cast<unsigned>(channels));
+    return true;
+}
+
+extern "C" bool ES8311_HifiWrite(const void *pcm, const size_t bytes) {
+    if (!s_hifi_active || pcm == nullptr || bytes == 0u ||
+        (bytes % (2u * sizeof(int16_t))) != 0u ||
+        !ensure_hifi_mix_capacity(bytes)) {
+        return false;
+    }
+
+    const int16_t *stereo = static_cast<const int16_t *>(pcm);
+    const size_t frames = bytes / (2u * sizeof(int16_t));
+    for (size_t i = 0u; i < frames; ++i) {
+        const int32_t mixed =
+            (static_cast<int32_t>(stereo[i * 2u]) +
+             static_cast<int32_t>(stereo[i * 2u + 1u])) / 2;
+        s_hifi_mix_buffer[i * 2u] = static_cast<int16_t>(mixed);
+        s_hifi_mix_buffer[i * 2u + 1u] = static_cast<int16_t>(mixed);
+    }
+    return AUDIO_WriteOutput(s_hifi_mix_buffer, bytes);
+}
+
+extern "C" bool ES8311_HifiRelease(void) {
+    if (!s_hifi_active) {
+        return true;
+    }
+
+    (void)es8311_set_dac_mute(true);
+    const bool output_restored = AUDIO_ReconfigureOutput(kVoiceSampleRate, 16u);
+    const bool codec_restored = es8311_apply_sample_format(kVoiceSampleRate, 16u);
+    (void)es8311_set_dac_mute(false);
+    s_hifi_active = false;
+    const bool restarted = AUDIO_StartPassthrough();
+
+    ESP_LOGI(TAG, "hifi: released (voice path %s)",
+             (output_restored && codec_restored && restarted)
+                 ? "restored" : "RESTORE FAILED");
+    return output_restored && codec_restored && restarted;
+}
+
+extern "C" bool ES8311_HifiActive(void) {
+    return s_hifi_active;
 }
 
 extern "C" bool ES8311_ApplyAudioConfig(const uint8_t mic_volume,

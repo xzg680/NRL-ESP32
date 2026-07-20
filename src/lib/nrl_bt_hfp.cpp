@@ -1378,9 +1378,20 @@ void NRL_BtHfp_Init(void)
     // still whole. This runs (main.cpp) before ES8311/AEC_Init's ~50 KB AFE
     // alloc, the SMB mount and the media/曲库 load fragment internal RAM down to
     // ~1.5 KB largest free block -- after which the controller could never get
-    // its pool. stackUp() frees this right before esp_bt_controller_init(). If BT
-    // is disabled in config the block is still held (cheap insurance for a later
-    // toggle-on); it is only ~40 KB and BT is a first-class feature on this board.
+    // its pool. stackUp() frees this right before esp_bt_controller_init().
+    //
+    // Only reserve when BT is actually enabled in config. Holding the idle
+    // block through the AEC/audio/signaling inits squeezed one production
+    // board so hard that the boot-tail main-loop stack fell into the slow
+    // RTCRAM heap region (~4x slower polls; see main.cpp). The first Poll()
+    // releases an idle reserve anyway, so an OFF boot never kept it -- a later
+    // toggle-on was already best-effort, and stays that way.
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr || !cfg->bt_enabled) {
+        ESP_LOGI(TAG, "BT disabled in config; skipping the %u B RAM reserve",
+                 (unsigned)kBtReserveBytes);
+        return;
+    }
     if (s_bt_reserve == nullptr) {
         s_bt_reserve = heap_caps_malloc(kBtReserveBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         ESP_LOGI(TAG, "BT RAM reserve %s (%u B); largest_internal now=%u",

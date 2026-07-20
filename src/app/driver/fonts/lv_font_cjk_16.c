@@ -4,7 +4,7 @@
  * (3872 glyphs). Used as fallback of the Montserrat fonts so ASCII
  * stays Latin-designed and only CJK comes from here. */
 #include "driver/board_pins.h"
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_GEZIPAI
 #include <lvgl.h>
 
 static LV_ATTRIBUTE_LARGE_CONST const uint8_t glyph_bitmap[] = {
@@ -39757,4 +39757,4 @@ const lv_font_t lv_font_cjk_16 = {
     .dsc = &font_dsc,
 };
 
-#endif /* NRL_BOARD_S31_KORVO */
+#endif /* NRL_BOARD_S31_KORVO || NRL_BOARD_GEZIPAI */

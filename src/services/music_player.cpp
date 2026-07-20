@@ -3,6 +3,8 @@
 #include "audio/audio_focus.h"
 #include "audio/voice_resampler.h"
 #include "services/config_notify.h"
+#include "driver/board_pins.h"
+#include "driver/es8311.h"
 #include "driver/es8389.h"
 #include "lib/nrl_audio_bridge.h"
 #include "lib/nrl_bt_hfp.h"
@@ -25,10 +27,54 @@ static const char *TAG = "MUSIC";
 namespace {
 
 constexpr size_t kMaxPathLen = 256; // long enough for net-radio URLs
+constexpr uint32_t kVoiceResumeDelayMs = 30000u;
+
+static bool speaker_hifi_acquire(const uint32_t sample_rate_hz,
+                                 const uint8_t bits_per_sample,
+                                 const uint8_t channels)
+{
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
+    return ES8311_HifiAcquire(sample_rate_hz, bits_per_sample, channels);
+#elif defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
+    return ES8389_HifiAcquire(sample_rate_hz, bits_per_sample, channels);
+#else
+    (void)sample_rate_hz;
+    (void)bits_per_sample;
+    (void)channels;
+    return false;
+#endif
+}
+
+static bool speaker_hifi_write(const void *pcm, const size_t bytes)
+{
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
+    return ES8311_HifiWrite(pcm, bytes);
+#elif defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
+    return ES8389_HifiWrite(pcm, bytes);
+#else
+    (void)pcm;
+    (void)bytes;
+    return false;
+#endif
+}
+
+static bool speaker_hifi_release(void)
+{
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
+    return ES8311_HifiRelease();
+#elif defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
+    return ES8389_HifiRelease();
+#else
+    return true;
+#endif
+}
 
 static TaskHandle_t s_player_task = nullptr;
 static volatile bool s_stop_requested = false;
 static volatile bool s_playing = false;
+static volatile bool s_focus_voice_active = false;
+static volatile bool s_focus_suspended = false;
+static volatile uint32_t s_focus_resume_at_ms = 0u;
 static char s_current_path[kMaxPathLen] = {};
 static MediaTrackInfo s_track_info = {};
 
@@ -220,6 +266,23 @@ static volatile MusicTrackEndCb_t s_track_end_cb = nullptr;
 static MediaDecoderInfo s_stream_info = {};
 static volatile bool s_stream_info_valid = false;
 
+static bool media_focus_blocks_playback()
+{
+    if (s_focus_voice_active) {
+        return true;
+    }
+    const uint32_t resume_at = s_focus_resume_at_ms;
+    if (resume_at == 0u) {
+        return false;
+    }
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    if (static_cast<int32_t>(now - resume_at) < 0) {
+        return true;
+    }
+    s_focus_resume_at_ms = 0u;
+    return false;
+}
+
 static void player_task(void *)
 {
     // Tags first (cheap header/tail reads), so the UI has title/cover as
@@ -244,12 +307,107 @@ static void player_task(void *)
     int64_t net_start_us = 0;
     uint64_t net_sent_samples = 0;
     MediaDecoder *decoder = MEDIA_DECODER_Open(s_current_path);
+    const bool live_stream = strncmp(s_current_path, "http://", 7) == 0 ||
+                             strncmp(s_current_path, "https://", 8) == 0;
+    bool media_uplink_active = false;
+
+    auto acquire_local_output = [&](const MediaDecoderInfo &info) -> bool {
+        if (!to_local) {
+            return true;
+        }
+        const bool speaker_24bit = info.bits_per_sample == 24u &&
+                                   info.channels == 2u && !to_net;
+        if (s_output == MUSIC_OUTPUT_BT && info.bits_per_sample == 16u &&
+            NRL_BtA2dp_RequestStart()) {
+            for (int i = 0; i < 40 && !NRL_BtA2dp_IsStreaming() &&
+                            !s_stop_requested; ++i) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            bt_active = NRL_BtA2dp_IsStreaming();
+            if (bt_active) {
+                bt_resampler_init(&bt_resampler, info.sample_rate_hz, info.channels);
+                return true;
+            }
+            ESP_LOGW(TAG, "A2DP not ready, falling back to speaker");
+        }
+        const uint8_t speaker_bits = speaker_24bit ? 32u : 16u;
+        if (!speaker_hifi_acquire(info.sample_rate_hz, speaker_bits, 2u)) {
+            ESP_LOGE(TAG, "hi-fi speaker unavailable (wrong board, or voice busy)");
+            return false;
+        }
+        hifi_acquired = true;
+        return true;
+    };
+
+    auto release_outputs = [&]() {
+        if (hifi_acquired) {
+            speaker_hifi_release();
+            hifi_acquired = false;
+        }
+        if (bt_active) {
+            NRL_BtA2dp_RequestStop();
+            bt_active = false;
+        }
+        if (media_uplink_active) {
+            NRLAudioBridge_SetMediaUplinkActive(false);
+            media_uplink_active = false;
+        }
+    };
 
     if (to_net && decoder != nullptr) {
         NRLAudioBridge_SetMediaUplinkActive(true);
+        media_uplink_active = true;
     }
 
-    while (decoder != nullptr && !s_stop_requested) {
+    while (!s_stop_requested) {
+        if (media_focus_blocks_playback()) {
+            if (!s_focus_suspended) {
+                release_outputs();
+                // A live stream cannot remain idle for the 30-second voice
+                // holdoff. Reconnect it at the current live point on resume;
+                // file decoders stay open and retain their exact position.
+                if (live_stream && decoder != nullptr) {
+                    MEDIA_DECODER_Close(decoder);
+                    decoder = nullptr;
+                    format_ready = false;
+                    s_stream_info_valid = false;
+                }
+                s_focus_suspended = true;
+                ESP_LOGI(TAG, "voice focus: playback paused");
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        if (s_focus_suspended) {
+            if (live_stream) {
+                decoder = MEDIA_DECODER_Open(s_current_path);
+                if (decoder == nullptr) {
+                    ESP_LOGE(TAG, "voice focus: stream reconnect failed: %s", s_current_path);
+                    break;
+                }
+            }
+            if (to_net && decoder != nullptr) {
+                NRLAudioBridge_SetMediaUplinkActive(true);
+                media_uplink_active = true;
+                net_start_us = esp_timer_get_time();
+                net_sent_samples = 0u;
+            }
+            if (format_ready && !acquire_local_output(s_stream_info)) {
+                if (media_focus_blocks_playback()) {
+                    release_outputs();
+                    continue;
+                }
+                break;
+            }
+            s_focus_suspended = false;
+            ESP_LOGI(TAG, "voice focus: playback resumed after 30 seconds idle");
+        }
+
+        if (decoder == nullptr) {
+            break;
+        }
+
         const uint8_t *pcm = nullptr;
         size_t bytes = 0;
         const int rc = MEDIA_DECODER_Decode(decoder, &pcm, &bytes);
@@ -278,29 +436,11 @@ static void player_task(void *)
                          static_cast<unsigned>(info.channels));
                 break;
             }
-            if (to_local) {
-                // Preferred local device: BT headset (A2DP) when selected and
-                // reachable, otherwise the onboard hi-fi speaker.
-                if (s_output == MUSIC_OUTPUT_BT && info.bits_per_sample == 16u &&
-                    NRL_BtA2dp_RequestStart()) {
-                    for (int i = 0; i < 40 && !NRL_BtA2dp_IsStreaming() && !s_stop_requested; ++i) {
-                        vTaskDelay(pdMS_TO_TICKS(100)); // connect + negotiate + start
-                    }
-                    bt_active = NRL_BtA2dp_IsStreaming();
-                    if (bt_active) {
-                        bt_resampler_init(&bt_resampler, info.sample_rate_hz, info.channels);
-                    } else {
-                        ESP_LOGW(TAG, "A2DP not ready, falling back to speaker");
-                    }
-                }
-                if (!bt_active) {
-                    const uint8_t speaker_bits = speaker_24bit ? 32u : 16u;
-                    if (!ES8389_HifiAcquire(info.sample_rate_hz, speaker_bits, 2u)) {
-                        ESP_LOGE(TAG, "hi-fi speaker unavailable (wrong board, or voice busy)");
-                        break;
-                    }
-                    hifi_acquired = true;
-                }
+            if (media_focus_blocks_playback()) {
+                continue;
+            }
+            if (!acquire_local_output(info)) {
+                break;
             }
             if (to_net) {
                 if (!VOICE_RESAMPLER_Init(&resampler, info.sample_rate_hz, info.channels)) {
@@ -373,13 +513,13 @@ static void player_task(void *)
                 }
                 const size_t converted = pcm24le_to_pcm32le_stereo(
                     pcm, bytes, reinterpret_cast<int32_t *>(s_stereo_buffer));
-                if (converted == 0u || !ES8389_HifiWrite(s_stereo_buffer, converted)) {
+                if (converted == 0u || !speaker_hifi_write(s_stereo_buffer, converted)) {
                     break;
                 }
                 continue;
             }
             if (info.channels == 2u) {
-                if (!ES8389_HifiWrite(pcm, bytes)) {
+                if (!speaker_hifi_write(pcm, bytes)) {
                     break;
                 }
             } else {
@@ -393,7 +533,7 @@ static void player_task(void *)
                     s_stereo_buffer[i * 2u] = mono[i];
                     s_stereo_buffer[i * 2u + 1u] = mono[i];
                 }
-                if (!ES8389_HifiWrite(s_stereo_buffer, samples * 2u * sizeof(int16_t))) {
+                if (!speaker_hifi_write(s_stereo_buffer, samples * 2u * sizeof(int16_t))) {
                     break;
                 }
             }
@@ -402,22 +542,13 @@ static void player_task(void *)
 
     ESP_LOGI(TAG, "%s: %s", s_current_path, s_stop_requested ? "stopped" : "finished");
 
-    if (to_net) {
-        NRLAudioBridge_SetMediaUplinkActive(false);
-    }
+    release_outputs();
     if (decoder != nullptr) {
         MEDIA_DECODER_Close(decoder);
     }
-    if (hifi_acquired) {
-        ES8389_HifiRelease();
-    }
-    if (bt_active) {
-        // Suspend the media channel so HFP voice (SCO) has the bandwidth;
-        // the A2DP connection stays for a quick restart on the next track.
-        NRL_BtA2dp_RequestStop();
-    }
 
     s_stream_info_valid = false;
+    s_focus_suspended = false;
     s_playing = false;
     s_player_task = nullptr;
 
@@ -434,11 +565,20 @@ static void player_task(void *)
 
 static void on_voice_start(void)
 {
-    // Interrupt policy: incoming NRL voice stops the music so the voice
-    // path (and the mic uplink) come back. Fire-and-forget by design.
+    s_focus_voice_active = true;
+    s_focus_resume_at_ms = 0u;
     if (s_playing) {
-        ESP_LOGI(TAG, "voice started, stopping music");
-        MUSIC_Stop();
+        ESP_LOGI(TAG, "voice focus acquired, pausing media");
+    }
+}
+
+static void on_voice_end(void)
+{
+    s_focus_voice_active = false;
+    s_focus_resume_at_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL) +
+                           kVoiceResumeDelayMs;
+    if (s_playing) {
+        ESP_LOGI(TAG, "voice focus released, media resumes after 30 seconds idle");
     }
 }
 
@@ -447,6 +587,7 @@ static void on_voice_start(void)
 extern "C" void MUSIC_Init(void)
 {
     AudioFocus_RegisterVoiceStart(on_voice_start);
+    AudioFocus_RegisterVoiceEnd(on_voice_end);
     media_config_load();
 }
 
@@ -505,7 +646,7 @@ extern "C" void MUSIC_Stop(void)
 
 extern "C" bool MUSIC_IsPlaying(void)
 {
-    return s_playing;
+    return s_playing && !s_focus_suspended;
 }
 
 extern "C" const char *MUSIC_CurrentPath(void)

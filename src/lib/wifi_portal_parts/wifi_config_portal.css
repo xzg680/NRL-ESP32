@@ -62,6 +62,15 @@
     .fav-text{flex:1;min-width:0;}
     .fav-name{display:block;font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .fav-url{display:block;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .music-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;}
+    .music-browser-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;margin-bottom:10px;}
+    .music-browser-path{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);}
+    .music-library-list{display:flex;flex-direction:column;gap:7px;min-height:48px;max-height:520px;overflow-y:auto;border:1px solid var(--line);border-radius:7px;padding:8px;background:#f8fafc;}
+    .music-entry{display:flex;gap:8px;align-items:center;}
+    .music-entry.current .music-entry-main{border-color:var(--accent);color:var(--accent);}
+    button.music-entry-main{flex:1;min-width:0;justify-content:flex-start;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#fff;color:var(--ink);border:1px solid var(--line);}
+    button.music-favorite{flex:0 0 42px;width:42px;padding:7px;font-size:20px;color:#b7791f;background:#fff;border:1px solid var(--line);}
+    .music-pagination{display:flex;gap:10px;justify-content:center;align-items:center;margin-top:10px;}
     @media(max-width:760px){
       .shell{padding:14px;}
       .topbar{display:block;}
@@ -85,4 +94,12 @@
       input.eq-value{font-size:12px;}
       .actions{justify-content:stretch;}
       button,.button{width:100%;}
+      .music-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));}
+      .music-browser-head{grid-template-columns:1fr 1fr;}
+      .music-browser-path{grid-column:1/-1;grid-row:1;}
+      .music-browser-head button{grid-row:2;}
+      .music-entry button.music-entry-main{width:auto;}
+      .music-entry button.music-favorite{width:42px;}
+      .music-pagination{display:grid;grid-template-columns:1fr 1fr;}
+      .music-pagination .hint{grid-column:1/-1;grid-row:1;text-align:center;}
     }

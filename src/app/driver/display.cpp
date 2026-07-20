@@ -36,15 +36,21 @@
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD == NRL_BOARD_GEZIPAI
 
 #include "../../lib/nrl_audio_bridge.h"
+#include "../../services/aprs_service.h"
 #include "../../services/espnow_link.h"
 #include "../../services/display_notice.h"
+#include "../../services/music_player.h"
 #include "../../services/ota_service.h"
+#include "../../services/radio_favorites.h"
+#include "../../services/signaling_service.h"
 #include "../../lib/nrl_version.h"
 #include "external_radio.h"
+#include "fonts/lv_font_cjk.h"
 #include "status_io.h"
 
 #include "../../lib/nrl_net_compat.h"
 
+#include <math.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,6 +65,8 @@
 #include <esp_heap_caps.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 static const char *TAG = "LCD";
 #include <esp_adc/adc_oneshot.h>
@@ -107,6 +115,10 @@ constexpr uint32_t kColorWeak     = 0xF87171;  // weak signal / low battery
 constexpr uint32_t kColorTx       = 0xFF6B6B;  // transmitting (PTT held)
 constexpr uint32_t kColorDuplex   = 0xA78BFA;  // transmitting + receiving
 
+// APRS packets may contain Chinese comments. Keep the normal Latin UI font,
+// but fall back to the bundled 16px GB2312 font for the ticker only.
+lv_font_t s_font_aprs_16;
+
 // Battery pack assumed to be a single Li-ion cell (3.0 V .. 4.2 V).
 constexpr int kBatteryMinMv = 3000;
 constexpr int kBatteryMaxMv = 4200;
@@ -139,8 +151,10 @@ lv_obj_t *s_lbl_wifi = nullptr;
 lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_batt = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
+lv_obj_t *s_lbl_cpu = nullptr;
 lv_obj_t *s_lbl_hint = nullptr;
 lv_obj_t *s_lbl_ota = nullptr;
+lv_obj_t *s_bar_ota = nullptr;
 lv_obj_t *s_content = nullptr;
 
 adc_oneshot_unit_handle_t s_adc = nullptr;
@@ -156,6 +170,13 @@ enum class MenuPage : uint8_t {
     Main,
     Ota,
     About,
+    Aprs,
+    AprsSettings,
+    AprsList,
+    Signaling,
+    Ctcss,
+    Mdc,
+    Dtmf,
 };
 
 // Written by STATUS_IO_Poll() and consumed only by Display_Poll(). Keeping
@@ -169,6 +190,8 @@ size_t s_menu_index = 0u;
 bool s_menu_ota_requested = false;
 uint32_t s_menu_ota_check_baseline_ms = 0u;
 uint32_t s_menu_ota_refresh_ms = 0u;
+uint32_t s_menu_aprs_refresh_ms = 0u;
+uint32_t s_menu_aprs_revision = 0u;
 char s_menu_ota_state[224] = {};
 char s_menu_message[64] = {};
 uint32_t s_menu_message_until_ms = 0u;
@@ -179,14 +202,19 @@ NrlOtaStatus *s_ota_ui_status = nullptr;
 
 // Cached on-screen text, so labels are only rewritten when a value changes.
 char s_shown_callsign[16] = {};
-char s_shown_ssid[16] = {};
+char s_shown_ssid[160] = {};
 char s_shown_time[16] = {};
 char s_shown_wifi[28] = {};
 char s_shown_vol[16] = {};
 char s_shown_batt[20] = {};
 char s_shown_ip[96] = {};
-char s_shown_ota[48] = {};
+char s_shown_cpu[12] = {};
+char s_shown_ota[160] = {}; // sized for a scrolling APRS monitor line
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
+bool s_shown_media = false;
+char s_cached_radio_path[256] = {};
+char s_cached_radio_name[RADIO_FAV_NAME_SIZE] = {};
+uint32_t s_radio_name_refresh_ms = 0u;
 
 void refreshVolume();
 void buildUi();
@@ -619,11 +647,13 @@ void resetCenterWidgets()
     s_lbl_time = nullptr;
     s_lbl_hint = nullptr;
     s_lbl_ota = nullptr;
+    s_bar_ota = nullptr;
     s_shown_callsign[0] = '\0';
     s_shown_ssid[0] = '\0';
     s_shown_time[0] = '\0';
     s_shown_ota[0] = '\0';
     s_shown_state = -1;
+    s_shown_media = false;
 }
 
 void resetHomeWidgets()
@@ -634,10 +664,12 @@ void resetHomeWidgets()
     s_lbl_vol = nullptr;
     s_lbl_batt = nullptr;
     s_lbl_ip = nullptr;
+    s_lbl_cpu = nullptr;
     s_shown_wifi[0] = '\0';
     s_shown_vol[0] = '\0';
     s_shown_batt[0] = '\0';
     s_shown_ip[0] = '\0';
+    s_shown_cpu[0] = '\0';
 }
 
 lv_obj_t *prepareScreen()
@@ -685,9 +717,10 @@ void menuRow(lv_obj_t *scr, int y, const char *text, bool selected)
 
     lv_obj_t *lbl = makeLabel(row, &lv_font_montserrat_14,
                               selected ? kColorCallIdle : kColorSub);
-    lv_obj_set_width(lbl, kWidth - 24);
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 7, 0);
+    lv_obj_set_size(lbl, kWidth - 24,
+                    lv_font_get_line_height(&lv_font_montserrat_14));
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 7, 0);
     char line[64] = {};
     snprintf(line, sizeof(line), "%s%s", selected ? "> " : "  ", text);
     lv_label_set_text(lbl, line);
@@ -709,6 +742,24 @@ void setMenuMessage(const char *text, uint32_t duration_ms = 3000u)
     s_menu_message_until_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL) + duration_ms;
 }
 
+void menuStatusFooter(lv_obj_t *scr, const char *default_text)
+{
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    if (s_menu_message[0] != '\0' && static_cast<int32_t>(s_menu_message_until_ms - now) > 0) {
+        menuFooter(scr, s_menu_message, kColorApWarn);
+    } else {
+        menuFooter(scr, default_text);
+    }
+}
+
+size_t menuWindowStart(const size_t item_count, const size_t visible_count)
+{
+    if (item_count <= visible_count || s_menu_index < visible_count) return 0u;
+    size_t start = s_menu_index - visible_count + 1u;
+    if (start + visible_count > item_count) start = item_count - visible_count;
+    return start;
+}
+
 void buildMainMenu()
 {
     lv_obj_t *scr = prepareContent();
@@ -726,19 +777,19 @@ void buildMainMenu()
         ptt,
         nrl_codec,
         now_codec,
+        "SIGNALING",
         "CHECK UPDATE",
+        "APRS",
         "ABOUT",
     };
-    for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); ++i) {
-        menuRow(scr, 1 + static_cast<int>(i) * 24, items[i], s_menu_index == i);
+    constexpr size_t kItemCount = sizeof(items) / sizeof(items[0]);
+    constexpr size_t kVisibleRows = 6u;
+    const size_t start = menuWindowStart(kItemCount, kVisibleRows);
+    const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
+    for (size_t i = start; i < end; ++i) {
+        menuRow(scr, 1 + static_cast<int>(i - start) * 24, items[i], s_menu_index == i);
     }
-    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
-    if (s_menu_message[0] != '\0' && static_cast<int32_t>(s_menu_message_until_ms - now) > 0) {
-        menuFooter(scr, s_menu_message, kColorApWarn);
-    } else {
-        s_menu_message[0] = '\0';
-        menuFooter(scr, "VOL+/- SELECT   PTT OK");
-    }
+    menuStatusFooter(scr, "VOL+/- SELECT   PTT OK");
 }
 
 void buildAboutMenu()
@@ -796,8 +847,26 @@ void buildOtaMenu()
         lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_20, kColorTx);
         lv_obj_set_width(lbl, kWidth);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 64);
-        lv_label_set_text(lbl, "INSTALLING...");
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 54);
+        char progress[32] = {};
+        if (ota->update_size > 0u) {
+            snprintf(progress, sizeof(progress), "INSTALLING %u%%",
+                     static_cast<unsigned>(ota->update_percent));
+        } else {
+            snprintf(progress, sizeof(progress), "INSTALLING...");
+        }
+        lv_label_set_text(lbl, progress);
+        if (ota->update_size > 0u) {
+            lv_obj_t *bar = lv_bar_create(scr);
+            lv_obj_set_pos(bar, 20, 94);
+            lv_obj_set_size(bar, kWidth - 40, 10);
+            lv_bar_set_range(bar, 0, 100);
+            lv_bar_set_value(bar, ota->update_percent, LV_ANIM_OFF);
+            lv_obj_set_style_radius(bar, 5, LV_PART_MAIN);
+            lv_obj_set_style_radius(bar, 5, LV_PART_INDICATOR);
+            lv_obj_set_style_bg_color(bar, lv_color_hex(kColorCaption), LV_PART_MAIN);
+            lv_obj_set_style_bg_color(bar, lv_color_hex(kColorTx), LV_PART_INDICATOR);
+        }
     } else if (ota->release_count == 0u) {
         lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_16, kColorSub);
         lv_obj_set_width(lbl, kWidth - 20);
@@ -838,10 +907,170 @@ void buildOtaMenu()
     }
 }
 
+void buildAprsMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    const char *items[] = {
+        "< BACK / APRS",
+        "APRS SETTINGS",
+        "STATION LIST",
+        "SEND BEACON NOW",
+    };
+    for (size_t i = 0; i < 4u; ++i) {
+        menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
+    }
+
+    AprsConfig cfg{};
+    APRS_SERVICE_GetConfig(&cfg);
+    char status[64];
+    snprintf(status, sizeof(status), "%s  IS:%s  RX:%lu TX:%lu",
+             cfg.enabled ? "ON" : "OFF",
+             APRS_SERVICE_IsNetConnected() ? "UP" : "DOWN",
+             static_cast<unsigned long>(APRS_SERVICE_GetRxCount()),
+             static_cast<unsigned long>(APRS_SERVICE_GetTxCount()));
+    menuStatusFooter(scr, status);
+}
+
+void buildAprsSettingsMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    AprsConfig cfg{};
+    APRS_SERVICE_GetConfig(&cfg);
+    constexpr size_t kItemCount = 8u;
+    constexpr size_t kVisibleRows = 5u;
+    const size_t start = menuWindowStart(kItemCount, kVisibleRows);
+    const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
+    const char *names[] = {"MASTER", "APRS-IS", "RF TX", "RF RX", "AUTO PERIOD"};
+    const bool values[] = {cfg.enabled, cfg.net_enabled, cfg.rf_tx_enabled,
+                           cfg.rf_rx_enabled, cfg.auto_interval};
+    for (size_t item = start; item < end; ++item) {
+        char line[40];
+        if (item == 0u) {
+            snprintf(line, sizeof(line), "< BACK / APRS SET");
+        } else if (item <= 5u) {
+            snprintf(line, sizeof(line), "%s: %s", names[item - 1u],
+                     values[item - 1u] ? "ON" : "OFF");
+        } else if (item == 6u) {
+            snprintf(line, sizeof(line), "PERIOD: %us",
+                     static_cast<unsigned>(cfg.beacon_interval_s));
+        } else {
+            snprintf(line, sizeof(line), "SSID: %u", static_cast<unsigned>(cfg.ssid));
+        }
+        menuRow(scr, 1 + static_cast<int>(item - start) * 28, line,
+                s_menu_index == item);
+    }
+    char footer[40];
+    snprintf(footer, sizeof(footer), "ITEM %u/%u  PTT TOGGLE/NEXT",
+             static_cast<unsigned>(s_menu_index + 1u),
+             static_cast<unsigned>(kItemCount));
+    menuStatusFooter(scr, footer);
+}
+
+// Dedicated APRS station page: BACK row plus the most recent stations heard,
+// one compact line per station (callsign, distance, source, age).
+void buildAprsListMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    menuRow(scr, 1, "< BACK / STATIONS", true);
+
+    AprsStationInfo stations[5];
+    const size_t count = APRS_SERVICE_GetStations(stations, 5);
+    if (!APRS_SERVICE_IsEnabled()) {
+        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, kColorSub);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 60);
+        lv_label_set_text(lbl, "APRS OFF (web/AT+APRS=ON)");
+    } else if (count == 0u) {
+        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, kColorSub);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 60);
+        lv_label_set_text(lbl, "NO STATIONS HEARD YET");
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const AprsStationInfo &s = stations[i];
+        char dist[16] = "--";
+        if (!isnan(s.distance_km)) {
+            snprintf(dist, sizeof(dist), "%.1fkm", static_cast<double>(s.distance_km));
+        }
+        char age[12];
+        if (s.age_s < 60u) snprintf(age, sizeof(age), "%lus", static_cast<unsigned long>(s.age_s));
+        else snprintf(age, sizeof(age), "%lum", static_cast<unsigned long>(s.age_s / 60u));
+        char line[64];
+        snprintf(line, sizeof(line), "%s %s %s %s",
+                 s.name, dist, s.via_rf ? "RF" : "IS", age);
+        menuRow(scr, 25 + static_cast<int>(i) * 24, line, false);
+    }
+    menuFooter(scr, "PTT BACK");
+}
+
+bool signalingRouteEnabled(const SignalingConfig &cfg, bool mdc, size_t index)
+{
+    if (mdc) {
+        if (index == 0u) return cfg.mdc_rx_mic;
+        if (index == 1u) return cfg.mdc_rx_nrl;
+        if (index == 2u) return cfg.mdc_tx_nrl;
+        return cfg.mdc_tx_speaker;
+    }
+    if (index == 0u) return cfg.dtmf_rx_mic;
+    if (index == 1u) return cfg.dtmf_rx_nrl;
+    if (index == 2u) return cfg.dtmf_tx_nrl;
+    return cfg.dtmf_tx_speaker;
+}
+
+void buildSignalingMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    const char *items[] = {"< BACK / SIGNAL", "MDC1200 SETTINGS", "DTMF SETTINGS",
+                           "CTCSS RX SETTINGS"};
+    for (size_t i = 0; i < 4u; ++i) menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
+    menuStatusFooter(scr, "VOL+/- SELECT   PTT OK");
+}
+
+void buildCtcssMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    menuRow(scr, 1, "< BACK / CTCSS", s_menu_index == 0u);
+    char line[40];
+    snprintf(line, sizeof(line), "MIC RX: %s", cfg.ctcss_rx_mic ? "ON" : "OFF");
+    menuRow(scr, 35, line, s_menu_index == 1u);
+    snprintf(line, sizeof(line), "NRL RX: %s", cfg.ctcss_rx_nrl ? "ON" : "OFF");
+    menuRow(scr, 69, line, s_menu_index == 2u);
+    menuStatusFooter(scr, "PTT TOGGLE");
+}
+
+void buildProtocolMenu(bool mdc)
+{
+    lv_obj_t *scr = prepareContent();
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    menuRow(scr, 1, mdc ? "< BACK / MDC1200" : "< BACK / DTMF", s_menu_index == 0u);
+    static const char *names[] = {"MIC RX", "NRL RX", "NRL TX", "SPEAKER TX"};
+    for (size_t i = 0; i < 4u; ++i) {
+        char line[40];
+        snprintf(line, sizeof(line), "%s: %s", names[i], signalingRouteEnabled(cfg, mdc, i) ? "ON" : "OFF");
+        menuRow(scr, 29 + static_cast<int>(i) * 28, line, s_menu_index == i + 1u);
+    }
+    char footer[48];
+    if (mdc) {
+        snprintf(footer, sizeof(footer), "ID:%04X  PTT TOGGLE",
+                 static_cast<unsigned>(cfg.mdc_unit_id));
+    } else {
+        snprintf(footer, sizeof(footer), "ID:%.16s  PTT TOGGLE", cfg.dtmf_digits);
+    }
+    menuStatusFooter(scr, footer);
+}
+
 void buildMenuUi()
 {
     if (s_menu_page == MenuPage::About) buildAboutMenu();
     else if (s_menu_page == MenuPage::Ota) buildOtaMenu();
+    else if (s_menu_page == MenuPage::Aprs) buildAprsMenu();
+    else if (s_menu_page == MenuPage::AprsSettings) buildAprsSettingsMenu();
+    else if (s_menu_page == MenuPage::AprsList) buildAprsListMenu();
+    else if (s_menu_page == MenuPage::Signaling) buildSignalingMenu();
+    else if (s_menu_page == MenuPage::Ctcss) buildCtcssMenu();
+    else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
+    else if (s_menu_page == MenuPage::Dtmf) buildProtocolMenu(false);
     else buildMainMenu();
 }
 
@@ -970,6 +1199,9 @@ void buildHomeContent()
     lv_label_set_text(s_lbl_callsign, "----");
 
     s_lbl_ssid = makeLabel(content, &lv_font_montserrat_20, kColorSub);
+    lv_obj_set_width(s_lbl_ssid, kWidth - 16);
+    lv_obj_set_style_text_align(s_lbl_ssid, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_ssid, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_align(s_lbl_ssid, LV_ALIGN_TOP_MID, 0, 86);
     lv_label_set_text(s_lbl_ssid, "SSID -");
 
@@ -980,11 +1212,24 @@ void buildHomeContent()
     // Gezipai is not a touch screen: this is deliberately only a notification.
     // Upgrade confirmation is AT+OTA=LATEST, the local /update page, or the
     // physical VOL+ + VOL- chord handled by status_io.cpp.
-    s_lbl_ota = makeLabel(content, &lv_font_montserrat_14, kColorApWarn);
+    s_lbl_ota = makeLabel(content, &s_font_aprs_16, kColorApWarn);
     lv_obj_set_width(s_lbl_ota, kWidth);
     lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 148);
+    // Doubles as the APRS monitor ticker; long packet lines scroll circularly.
+    lv_label_set_long_mode(s_lbl_ota, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_ota, "");
+
+    s_bar_ota = lv_bar_create(content);
+    lv_obj_set_pos(s_bar_ota, 20, 165);
+    lv_obj_set_size(s_bar_ota, kWidth - 40, 4);
+    lv_bar_set_range(s_bar_ota, 0, 100);
+    lv_bar_set_value(s_bar_ota, 0, LV_ANIM_OFF);
+    lv_obj_set_style_radius(s_bar_ota, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_bar_ota, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_bar_ota, lv_color_hex(kColorCaption), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_bar_ota, lv_color_hex(kColorApWarn), LV_PART_INDICATOR);
+    lv_obj_add_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
 }
 
 void buildUi()
@@ -1020,11 +1265,17 @@ void buildUi()
     // ---- Centre content ----
     buildHomeContent();
 
-    // ---- Bottom IP bar ----
+    // ---- Bottom IP bar: address on the left, per-core CPU load on the right ----
     lv_obj_t *bottom = makeBar(scr, kHeight - kBottomBarHeight, kBottomBarHeight);
     s_lbl_ip = makeLabel(bottom, &lv_font_montserrat_16, kColorIp);
-    lv_obj_center(s_lbl_ip);
+    lv_obj_set_width(s_lbl_ip, 156);
+    lv_label_set_long_mode(s_lbl_ip, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_lbl_ip, LV_ALIGN_LEFT_MID, 8, 0);
     lv_label_set_text(s_lbl_ip, "---");
+
+    s_lbl_cpu = makeLabel(bottom, &lv_font_montserrat_16, kColorSub);
+    lv_obj_align(s_lbl_cpu, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_label_set_text(s_lbl_cpu, "--/--");
 }
 
 //================================ Refresh ====================================
@@ -1054,11 +1305,56 @@ void refreshCaller()
         ESPNOW_LINK_GetLastPeer(espnow_peer, sizeof(espnow_peer));
     }
 
+    char media_name[160] = {};
+    const char *playing_path = MUSIC_CurrentPath();
+    const bool media_playing = MUSIC_IsPlaying() && playing_path != nullptr;
+    const bool radio_playing = media_playing &&
+                               (strncmp(playing_path, "http://", 7) == 0 ||
+                                strncmp(playing_path, "https://", 8) == 0);
+    // Voice/PTT and ESP-NOW remain above music in the display priority, just
+    // as they are in the audio path. When idle, show the configured favorite
+    // name; a URL played directly from AT/Web has no friendly metadata yet.
+    const bool show_radio = radio_playing && !rx && !tx && !espnow_rx && !espnow_tx;
+    const bool show_music = media_playing && !radio_playing &&
+                            !rx && !tx && !espnow_rx && !espnow_tx;
+    if (show_radio) {
+        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+        if (strcmp(s_cached_radio_path, playing_path) != 0 ||
+            s_radio_name_refresh_ms == 0u ||
+            (now_ms - s_radio_name_refresh_ms) >= 1000u) {
+            snprintf(s_cached_radio_path, sizeof(s_cached_radio_path), "%s", playing_path);
+            s_cached_radio_name[0] = '\0';
+            const int favorite = RADIO_FAV_IndexOfUrl(playing_path);
+            if (favorite >= 0) {
+                (void)RADIO_FAV_Get(static_cast<size_t>(favorite), s_cached_radio_name,
+                                    sizeof(s_cached_radio_name), nullptr, 0u);
+            }
+            if (s_cached_radio_name[0] == '\0') {
+                snprintf(s_cached_radio_name, sizeof(s_cached_radio_name), "网络电台");
+            }
+            s_radio_name_refresh_ms = now_ms;
+        }
+        snprintf(media_name, sizeof(media_name), "%s", s_cached_radio_name);
+    } else if (show_music) {
+        const MediaTrackInfo *track = MUSIC_GetTrackInfo();
+        if (track != nullptr && track->title[0] != '\0') {
+            snprintf(media_name, sizeof(media_name), "%s", track->title);
+        } else {
+            const char *basename = strrchr(playing_path, '/');
+            basename = (basename != nullptr) ? basename + 1 : playing_path;
+            snprintf(media_name, sizeof(media_name), "%s", basename);
+            char *extension = strrchr(media_name, '.');
+            if (extension != nullptr && extension != media_name) {
+                *extension = '\0';
+            }
+        }
+    }
+
     // While a voice stream is actually being received, the main area shows the
     // remote caller. Otherwise it shows this device's own callsign/SSID, read
     // straight from the local config -- heartbeats never feed this.
     char call_text[16];
-    char ssid_text[16];
+    char ssid_text[160];
     if (rx && voice_call[0] != '\0') {
         snprintf(call_text, sizeof(call_text), "%s", voice_call);
         snprintf(ssid_text, sizeof(ssid_text), "SSID %u", voice_ssid);
@@ -1074,6 +1370,12 @@ void refreshCaller()
             snprintf(ssid_text, sizeof(ssid_text), "SSID -");
         }
         snprintf(call_text, sizeof(call_text), "%s", espnow_peer);
+    } else if (show_radio) {
+        snprintf(call_text, sizeof(call_text), "RADIO");
+        snprintf(ssid_text, sizeof(ssid_text), "%s", media_name);
+    } else if (show_music) {
+        snprintf(call_text, sizeof(call_text), "MUSIC");
+        snprintf(ssid_text, sizeof(ssid_text), "%s", media_name);
     } else {
         const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
         if (cfg != nullptr && cfg->callsign[0] != '\0') {
@@ -1088,6 +1390,15 @@ void refreshCaller()
 
     setLabel(s_lbl_callsign, s_shown_callsign, sizeof(s_shown_callsign), call_text);
     setLabel(s_lbl_ssid, s_shown_ssid, sizeof(s_shown_ssid), ssid_text);
+    const bool show_media = show_radio || show_music;
+    if (show_media != s_shown_media) {
+        s_shown_media = show_media;
+        // The 16 px UI font falls back to the bundled GB2312 glyphs, allowing
+        // Chinese favorite names without adding another large Gezipai font.
+        lv_obj_set_style_text_font(s_lbl_ssid,
+                                   show_media ? &s_font_aprs_16 : &lv_font_montserrat_20,
+                                   0);
+    }
 
     // Status caption above the callsign. Transmitting while also receiving is
     // shown as full duplex; otherwise TX wins over RX wins over standby.
@@ -1104,6 +1415,8 @@ void refreshCaller()
         state = 3;  // transmitting
     } else if (rx) {
         state = 2;  // receiving
+    } else if (show_media) {
+        state = 11;  // network radio or music file
     } else if (ESPNOW_LINK_IsEnabled()) {
         // Standby captions carry the PTT target (NRL / ESP-NOW) and that
         // link's own TX codec. Both are folded into the state value so
@@ -1119,6 +1432,10 @@ void refreshCaller()
         uint32_t caption_color;
         uint32_t call_color;
         switch (state) {
+            case 11:
+                caption = "NOW PLAYING"; caption_color = kColorGood;
+                call_color = kColorGood;
+                break;
             case 7:
                 caption = "ESP-NOW RX";  caption_color = kColorDuplex;
                 call_color = kColorCallLive;
@@ -1282,6 +1599,54 @@ void refreshBattery()
     }
 }
 
+// Per-core CPU load ("c0/c1") from the FreeRTOS idle-task runtime counters,
+// sampled on the 500 ms refresh tick. A 3% hysteresis keeps the label from
+// redrawing on measurement jitter.
+void refreshCpu()
+{
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    if (s_lbl_cpu == nullptr) {
+        return;
+    }
+    static uint32_t s_last_idle[2] = {};
+    static uint32_t s_last_us = 0;
+    static int s_pct_shown[2] = {-100, -100};
+    const uint32_t now_us = static_cast<uint32_t>(esp_timer_get_time());
+    const uint32_t idle[2] = {
+        static_cast<uint32_t>(ulTaskGetIdleRunTimeCounterForCore(0)),
+        static_cast<uint32_t>(ulTaskGetIdleRunTimeCounterForCore(1)),
+    };
+    const uint32_t dt = now_us - s_last_us; // wrap-safe unsigned math
+    if (s_last_us != 0u && dt > 0u) {
+        int pct[2];
+        for (int core = 0; core < 2; ++core) {
+            const uint32_t di = idle[core] - s_last_idle[core];
+            const uint64_t idle_pct = static_cast<uint64_t>(di) * 100u / dt;
+            long load = 100 - static_cast<long>(idle_pct);
+            if (load < 0) load = 0;
+            if (load > 100) load = 100;
+            pct[core] = static_cast<int>(load);
+        }
+        const int d0 = pct[0] - s_pct_shown[0];
+        const int d1 = pct[1] - s_pct_shown[1];
+        if (d0 >= 3 || d0 <= -3 || d1 >= 3 || d1 <= -3) {
+            s_pct_shown[0] = pct[0];
+            s_pct_shown[1] = pct[1];
+            char text[16];
+            snprintf(text, sizeof(text), "%d/%d", pct[0], pct[1]);
+            if (setLabel(s_lbl_cpu, s_shown_cpu, sizeof(s_shown_cpu), text)) {
+                lv_obj_set_style_text_color(
+                    s_lbl_cpu,
+                    lv_color_hex((pct[0] > 85 || pct[1] > 85) ? kColorWeak : kColorSub), 0);
+            }
+        }
+    }
+    s_last_us = now_us;
+    s_last_idle[0] = idle[0];
+    s_last_idle[1] = idle[1];
+#endif
+}
+
 void refreshIp()
 {
     char ip_text[96];
@@ -1350,6 +1715,7 @@ void refreshOtaNotice()
     const NrlOtaStatus *status = otaUiSnapshot();
     char text[sizeof(s_shown_ota)] = {};
     uint32_t color = kColorApWarn;
+    int progress_percent = -1;
     DisplayNoticeSnapshot notice = {};
     DISPLAY_NOTICE_Get(&notice);
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -1358,12 +1724,19 @@ void refreshOtaNotice()
     if (notice_active) {
         snprintf(text, sizeof(text), "%.*s",
                  static_cast<int>(sizeof(text) - 1u), notice.text);
+        progress_percent = notice.progress_percent;
         if (notice.level == DISPLAY_NOTICE_SUCCESS) color = kColorGood;
         else if (notice.level == DISPLAY_NOTICE_ERROR) color = kColorWeak;
         else if (notice.level == DISPLAY_NOTICE_WARNING) color = kColorApWarn;
         else color = kColorAccent;
     } else if (status != nullptr && status->updating) {
-        snprintf(text, sizeof(text), "OTA UPDATING...");
+        if (status->update_size > 0u) {
+            snprintf(text, sizeof(text), "OTA UPDATING %u%%",
+                     static_cast<unsigned>(status->update_percent));
+            progress_percent = status->update_percent;
+        } else {
+            snprintf(text, sizeof(text), "OTA UPDATING...");
+        }
         color = kColorTx;
     } else if (status != nullptr && status->checking) {
         snprintf(text, sizeof(text), "OTA CHECKING...");
@@ -1371,16 +1744,40 @@ void refreshOtaNotice()
                strcmp(status->latest_version, NRL_FIRMWARE_VERSION) != 0) {
         snprintf(text, sizeof(text), "NEW FW %.20s VOL+/-", status->latest_version);
         color = kColorGood;
+    } else if (APRS_SERVICE_IsEnabled()) {
+        // Every parsed APRS packet gets a compact summary. Unlike the station
+        // list, this also covers text/status packets that have no position.
+        char summary[sizeof(text)] = {};
+        if (APRS_SERVICE_GetLastSummary(summary, sizeof(summary)) != 0u &&
+            summary[0] != '\0') {
+            snprintf(text, sizeof(text), "APRS %.*s",
+                     static_cast<int>(sizeof(text) - 6u), summary);
+            color = kColorAccent;
+        }
     }
     if (setLabel(s_lbl_ota, s_shown_ota, sizeof(s_shown_ota), text)) {
         lv_obj_set_style_text_color(s_lbl_ota, lv_color_hex(color), 0);
+    }
+    if (s_bar_ota != nullptr) {
+        if (progress_percent >= 0) {
+            lv_bar_set_value(s_bar_ota, progress_percent, LV_ANIM_OFF);
+            lv_obj_remove_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
 size_t menuItemCount()
 {
-    if (s_menu_page == MenuPage::Main) return 6u;
+    if (s_menu_page == MenuPage::Main) return 8u;
     if (s_menu_page == MenuPage::About) return 1u;
+    if (s_menu_page == MenuPage::Aprs) return 4u;
+    if (s_menu_page == MenuPage::AprsSettings) return 8u;
+    if (s_menu_page == MenuPage::AprsList) return 1u;
+    if (s_menu_page == MenuPage::Signaling) return 4u;
+    if (s_menu_page == MenuPage::Ctcss) return 3u;
+    if (s_menu_page == MenuPage::Mdc || s_menu_page == MenuPage::Dtmf) return 5u;
     const NrlOtaStatus *ota = otaUiSnapshot();
     return (ota != nullptr ? ota->release_count : 0u) + 1u; // Back row + releases
 }
@@ -1432,7 +1829,12 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
-        case 4: {
+        case 4:
+            s_menu_page = MenuPage::Signaling;
+            s_menu_index = 0u;
+            buildMenuUi();
+            break;
+        case 5: {
             const NrlOtaStatus *ota = otaUiSnapshot();
             s_menu_page = MenuPage::Ota;
             s_menu_index = 0u;
@@ -1443,7 +1845,14 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         }
-        case 5:
+        case 6:
+            s_menu_page = MenuPage::Aprs;
+            s_menu_index = 0u;
+            s_menu_aprs_refresh_ms = 0u;
+            s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
+            buildMenuUi();
+            break;
+        case 7:
             s_menu_page = MenuPage::About;
             s_menu_index = 0u;
             buildMenuUi();
@@ -1451,6 +1860,134 @@ void confirmMainMenu()
         default:
             break;
     }
+}
+
+void confirmSignalingMenu()
+{
+    if (s_menu_index == 0u) {
+        activateMainMenu();
+    } else {
+        s_menu_page = s_menu_index == 1u ? MenuPage::Mdc
+                    : s_menu_index == 2u ? MenuPage::Dtmf : MenuPage::Ctcss;
+        s_menu_index = 0u;
+        buildMenuUi();
+    }
+}
+
+void confirmAprsMenu()
+{
+    if (s_menu_index == 0u) {
+        activateMainMenu();
+    } else if (s_menu_index == 1u) {
+        s_menu_page = MenuPage::AprsSettings;
+        s_menu_index = 0u;
+        buildMenuUi();
+    } else if (s_menu_index == 2u) {
+        s_menu_page = MenuPage::AprsList;
+        s_menu_index = 0u;
+        s_menu_aprs_refresh_ms = 0u;
+        s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
+        buildMenuUi();
+    } else {
+        const bool ok = APRS_SERVICE_SendBeaconNow();
+        setMenuMessage(ok ? "BEACON QUEUED" : "ENABLE APRS FIRST");
+        buildMenuUi();
+    }
+}
+
+void confirmAprsSettingsMenu()
+{
+    if (s_menu_index == 0u) {
+        s_menu_page = MenuPage::Aprs;
+        s_menu_index = 0u;
+        buildMenuUi();
+        return;
+    }
+
+    AprsConfig cfg{};
+    APRS_SERVICE_GetConfig(&cfg);
+    bool ok = false;
+    const char *message = "SAVE FAILED";
+    switch (s_menu_index) {
+        case 1:
+            ok = APRS_SERVICE_SetEnabled(!cfg.enabled);
+            message = !cfg.enabled ? "APRS ON" : "APRS OFF";
+            break;
+        case 2:
+            ok = APRS_SERVICE_SetNetEnabled(!cfg.net_enabled);
+            message = !cfg.net_enabled ? "APRS-IS ON" : "APRS-IS OFF";
+            break;
+        case 3:
+            ok = APRS_SERVICE_SetRfTxEnabled(!cfg.rf_tx_enabled);
+            message = !cfg.rf_tx_enabled ? "RF TX ON" : "RF TX OFF";
+            break;
+        case 4:
+            ok = APRS_SERVICE_SetRfRxEnabled(!cfg.rf_rx_enabled);
+            message = !cfg.rf_rx_enabled ? "RF RX ON" : "RF RX OFF";
+            break;
+        case 5:
+            ok = APRS_SERVICE_SetAutoInterval(!cfg.auto_interval);
+            message = !cfg.auto_interval ? "AUTO PERIOD ON" : "AUTO PERIOD OFF";
+            break;
+        case 6: {
+            static constexpr uint16_t periods[] = {30u, 60u, 120u, 300u, 600u, 1200u, 3600u};
+            uint16_t next = periods[0];
+            for (const uint16_t period : periods) {
+                if (period > cfg.beacon_interval_s) {
+                    next = period;
+                    break;
+                }
+            }
+            ok = APRS_SERVICE_SetBeaconInterval(next);
+            message = "PERIOD UPDATED";
+            break;
+        }
+        case 7:
+            ok = APRS_SERVICE_SetSsid(static_cast<uint8_t>((cfg.ssid + 1u) & 0x0Fu));
+            message = "SSID UPDATED";
+            break;
+        default:
+            break;
+    }
+    setMenuMessage(ok ? message : "SAVE FAILED");
+    buildMenuUi();
+}
+
+void confirmCtcssMenu()
+{
+    if (s_menu_index == 0u) {
+        s_menu_page = MenuPage::Signaling;
+        s_menu_index = 0u;
+        buildMenuUi();
+        return;
+    }
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    const SignalingRoute route = s_menu_index == 1u
+                                     ? SIGNAL_ROUTE_RX_MIC : SIGNAL_ROUTE_RX_NRL;
+    const bool enabled = s_menu_index == 1u ? !cfg.ctcss_rx_mic : !cfg.ctcss_rx_nrl;
+    const bool ok = SIGNALING_SetCtcssRoute(route, enabled);
+    setMenuMessage(ok ? (enabled ? "CTCSS RX ON" : "CTCSS RX OFF") : "SAVE FAILED");
+    buildMenuUi();
+}
+
+void confirmProtocolMenu(bool mdc)
+{
+    if (s_menu_index == 0u) {
+        s_menu_page = MenuPage::Signaling;
+        s_menu_index = 0u;
+        buildMenuUi();
+        return;
+    }
+    const size_t index = s_menu_index - 1u;
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+    const bool enabled = !signalingRouteEnabled(cfg, mdc, index);
+    const SignalingRoute route = static_cast<SignalingRoute>(index);
+    const bool ok = mdc ? SIGNALING_SetMdcRoute(route, enabled)
+                        : SIGNALING_SetDtmfRoute(route, enabled);
+    setMenuMessage(ok ? (enabled ? "SIGNAL ROUTE ON" : "SIGNAL ROUTE OFF") : "SAVE FAILED");
+    buildMenuUi();
 }
 
 void confirmOtaMenu()
@@ -1509,6 +2046,17 @@ void processMenuInput(uint32_t now)
         s_menu_confirm_pending = 0u;
         if (s_menu_page == MenuPage::Main) confirmMainMenu();
         else if (s_menu_page == MenuPage::About) activateMainMenu();
+        else if (s_menu_page == MenuPage::Aprs) confirmAprsMenu();
+        else if (s_menu_page == MenuPage::AprsSettings) confirmAprsSettingsMenu();
+        else if (s_menu_page == MenuPage::AprsList) {
+            s_menu_page = MenuPage::Aprs;
+            s_menu_index = 0u;
+            buildMenuUi();
+        }
+        else if (s_menu_page == MenuPage::Signaling) confirmSignalingMenu();
+        else if (s_menu_page == MenuPage::Ctcss) confirmCtcssMenu();
+        else if (s_menu_page == MenuPage::Mdc) confirmProtocolMenu(true);
+        else if (s_menu_page == MenuPage::Dtmf) confirmProtocolMenu(false);
         else confirmOtaMenu();
     }
     if (!s_menu_active) return;
@@ -1531,10 +2079,12 @@ void processMenuInput(uint32_t now)
             s_menu_ota_requested = false;
         }
         char state[sizeof(s_menu_ota_state)] = {};
-        int used = snprintf(state, sizeof(state), "%u|%u|%u|%u|%s|%s",
+        int used = snprintf(state, sizeof(state), "%u|%u|%u|%u|%lu|%u|%s|%s",
                             ota->checking ? 1u : 0u, ota->updating ? 1u : 0u,
                             static_cast<unsigned>(ota->release_count),
                             s_menu_ota_requested ? 1u : 0u,
+                            static_cast<unsigned long>(ota->update_size),
+                            static_cast<unsigned>(ota->update_percent),
                             ota->latest_version, ota->last_error);
         for (size_t i = 0; i < ota->release_count && used > 0 &&
                            static_cast<size_t>(used) < sizeof(state) - 2u; ++i) {
@@ -1544,6 +2094,18 @@ void processMenuInput(uint32_t now)
         if (strncmp(state, s_menu_ota_state, sizeof(s_menu_ota_state)) != 0) {
             snprintf(s_menu_ota_state, sizeof(s_menu_ota_state), "%s", state);
             if (s_menu_index > ota->release_count) s_menu_index = 0u;
+            buildMenuUi();
+        }
+    }
+
+    // Keep the APRS station page live: redraw when a packet lands and every
+    // few seconds anyway so the age column ticks.
+    if (s_menu_page == MenuPage::AprsList) {
+        const uint32_t revision = APRS_SERVICE_GetStationRevision();
+        if (revision != s_menu_aprs_revision ||
+            s_menu_aprs_refresh_ms == 0u || now - s_menu_aprs_refresh_ms >= 3000u) {
+            s_menu_aprs_revision = revision;
+            s_menu_aprs_refresh_ms = now;
             buildMenuUi();
         }
     }
@@ -1592,6 +2154,8 @@ extern "C" void Display_Init(void)
     if (!initLvgl()) {
         return;
     }
+    s_font_aprs_16 = lv_font_montserrat_16;
+    s_font_aprs_16.fallback = &lv_font_cjk_16;
 #if NRL_DISPLAY_BUS_RGB
     initTouch();
 #endif
@@ -1630,6 +2194,7 @@ extern "C" void Display_Poll(void)
             s_last_refresh_ms = now;
             refreshWifi();
             refreshBattery();
+            refreshCpu();
         }
         lv_timer_handler();
         return;
@@ -1648,6 +2213,7 @@ extern "C" void Display_Poll(void)
         refreshClock();
         refreshWifi();
         refreshBattery();
+        refreshCpu();
     }
 
     lv_timer_handler();

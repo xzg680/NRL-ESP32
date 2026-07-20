@@ -1,12 +1,16 @@
 #include "services/music_playlist.h"
 
 #include "services/music_player.h"
+#include "services/smb_vfs.h"
 #include "services/storage_service.h"
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <nvs.h>
 
+#include <atomic>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +23,7 @@ namespace {
 
 constexpr size_t kMaxTracks = 512;
 constexpr size_t kMaxDirs = 128;
+constexpr size_t kMaxScannedEntries = kMaxTracks + kMaxDirs;
 // Matches music_player's limit; UTF-8 Chinese paths (3 bytes per CJK char
 // plus artist/album directories) overflow the old 128 quickly.
 constexpr size_t kMaxPathLen = 256;
@@ -32,14 +37,22 @@ struct PlaylistDir {
 
 static char (*s_paths)[kMaxPathLen] = nullptr; // PSRAM array of current-dir tracks
 static PlaylistDir *s_dirs = nullptr;          // PSRAM array of current-dir subdirs
-static size_t s_count = 0;
-static size_t s_dir_count = 0;
+static std::atomic_size_t s_count{0};
+static std::atomic_size_t s_dir_count{0};
 static volatile int s_current = -1;
 static volatile bool s_auto_advance = true;
 static char s_current_dir[kMaxPathLen] = {};   // empty string means virtual source root
 static char (*s_favs)[kMaxPathLen] = nullptr;
 static size_t s_fav_count = 0;
 static PlaylistRepeatMode s_repeat_mode = PLAYLIST_REPEAT_LIST;
+static volatile bool s_scanning = false;
+static volatile bool s_async_scan_active = false;
+static volatile bool s_scan_entries_visible = true;
+static volatile bool s_last_scan_ok = true;
+static std::atomic_bool s_cancel_scan{false};
+static portMUX_TYPE s_scan_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_scan_queued = false;
+static char s_queued_dir[kMaxPathLen] = {};
 
 constexpr const char *kNvsNamespace = "playlist";
 constexpr const char *kFavoritesDir = "@favorites";
@@ -201,7 +214,7 @@ static void scan_favorites()
         snprintf(s_paths[s_count], kMaxPathLen, "%s", s_favs[i]);
         ++s_count;
     }
-    if (s_count > 1u) {
+    if (!s_async_scan_active && s_count > 1u) {
         qsort(s_paths, s_count, kMaxPathLen, compare_paths);
     }
 }
@@ -215,7 +228,10 @@ static bool scan_current_dir()
     }
 
     struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr && (s_count < kMaxTracks || s_dir_count < kMaxDirs)) {
+    size_t inspected = 0;
+    while (inspected < kMaxScannedEntries && !s_cancel_scan.load() &&
+           (entry = readdir(dir)) != nullptr) {
+        ++inspected;
         if (entry->d_name[0] == '.') {
             continue; // hidden entries + "."/".."
         }
@@ -236,10 +252,10 @@ static bool scan_current_dir()
     }
     closedir(dir);
 
-    if (s_dir_count > 1u) {
+    if (!s_async_scan_active && s_dir_count > 1u) {
         qsort(s_dirs, s_dir_count, sizeof(PlaylistDir), compare_dirs);
     }
-    if (s_count > 1u) {
+    if (!s_async_scan_active && s_count > 1u) {
         qsort(s_paths, s_count, kMaxPathLen, compare_paths);
     }
     return true;
@@ -253,6 +269,87 @@ static bool set_current_dir(const char *path)
     }
     const int written = snprintf(s_current_dir, sizeof(s_current_dir), "%s", path);
     if (written <= 0 || static_cast<size_t>(written) >= sizeof(s_current_dir)) {
+        return false;
+    }
+    return true;
+}
+
+static void async_scan_task(void *)
+{
+    while (true) {
+        (void)PLAYLIST_Scan();
+
+        char next[kMaxPathLen] = {};
+        bool scan_again = false;
+        portENTER_CRITICAL(&s_scan_state_lock);
+        if (s_scan_queued) {
+            memcpy(next, s_queued_dir, sizeof(next));
+            s_scan_queued = false;
+            s_scan_entries_visible = false;
+            s_last_scan_ok = true;
+            scan_again = true;
+        } else {
+            s_async_scan_active = false;
+            s_scan_entries_visible = true;
+            s_scanning = false;
+        }
+        portEXIT_CRITICAL(&s_scan_state_lock);
+
+        if (!scan_again) {
+            break;
+        }
+        (void)set_current_dir(next);
+        s_cancel_scan.store(false);
+        ESP_LOGI(TAG, "switching directory scan to %s", next[0] ? next : "<sources>");
+    }
+    vTaskDelete(nullptr);
+}
+
+static bool schedule_scan(const char *path)
+{
+    if (path == nullptr) {
+        return false;
+    }
+    char target[kMaxPathLen] = {};
+    char previous[kMaxPathLen] = {};
+    const int written = snprintf(target, sizeof(target), "%s", path);
+    if (written < 0 || static_cast<size_t>(written) >= sizeof(target)) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_scan_state_lock);
+    if (s_scanning) {
+        memcpy(s_queued_dir, target, sizeof(s_queued_dir));
+        s_scan_queued = true;
+        s_last_scan_ok = true;
+        portEXIT_CRITICAL(&s_scan_state_lock);
+
+        // readdir() may currently be waiting for an SMB QUERY_DIRECTORY reply.
+        // Wake that wait promptly; the scan task will reconnect and open the
+        // most recently queued directory after discarding the partial result.
+        s_cancel_scan.store(true);
+        SMB_VFS_CancelDirectoryScan();
+        ESP_LOGI(TAG, "directory switch queued: %s", target[0] ? target : "<sources>");
+        return true;
+    }
+    memcpy(previous, s_current_dir, sizeof(previous));
+    memcpy(s_current_dir, target, sizeof(s_current_dir));
+    s_scanning = true;
+    s_async_scan_active = true;
+    s_scan_entries_visible = false;
+    s_last_scan_ok = true;
+    s_scan_queued = false;
+    s_cancel_scan.store(false);
+    portEXIT_CRITICAL(&s_scan_state_lock);
+
+    if (xTaskCreate(async_scan_task, "playlist_scan", 6144, nullptr, 3, nullptr) != pdPASS) {
+        portENTER_CRITICAL(&s_scan_state_lock);
+        s_scanning = false;
+        s_async_scan_active = false;
+        s_scan_entries_visible = true;
+        s_last_scan_ok = false;
+        memcpy(s_current_dir, previous, sizeof(s_current_dir));
+        portEXIT_CRITICAL(&s_scan_state_lock);
+        ESP_LOGE(TAG, "background scan task create failed");
         return false;
     }
     return true;
@@ -358,6 +455,7 @@ extern "C" void PLAYLIST_Init(void)
 extern "C" size_t PLAYLIST_Scan(void)
 {
     if (!ensure_tables()) {
+        s_last_scan_ok = false;
         return 0;
     }
     load_favorites_from_sd();
@@ -368,14 +466,20 @@ extern "C" size_t PLAYLIST_Scan(void)
     }
 
     reset_entries();
+    if (s_async_scan_active) {
+        s_scan_entries_visible = true;
+    }
+    bool scan_ok = true;
     if (strcmp(s_current_dir, kFavoritesDir) == 0) {
         scan_favorites();
     } else if (s_current_dir[0] == '\0') {
         scan_virtual_root();
     } else if (!scan_current_dir()) {
-        s_current_dir[0] = '\0';
+        // A network directory can fail transiently while SMB reconnects. Keep
+        // the requested directory selected so the web/display UI can retry it
+        // in place instead of unexpectedly jumping back to the source root.
         reset_entries();
-        scan_virtual_root();
+        scan_ok = false;
     }
 
     if (current_path[0] != '\0') {
@@ -391,7 +495,56 @@ extern "C" size_t PLAYLIST_Scan(void)
              static_cast<unsigned>(s_dir_count),
              static_cast<unsigned>(s_count),
              s_current_dir[0] ? s_current_dir : "<sources>");
+    s_last_scan_ok = scan_ok;
     return s_count;
+}
+
+extern "C" bool PLAYLIST_ScanAsync(void)
+{
+    return schedule_scan(s_current_dir);
+}
+
+extern "C" bool PLAYLIST_EnterDirAsync(const size_t index)
+{
+    const char *path = PLAYLIST_GetDirPath(index);
+    if (path == nullptr ||
+        (strcmp(path, kFavoritesDir) == 0 && !STORAGE_SdMounted())) {
+        return false;
+    }
+    char target[kMaxPathLen];
+    const int written = snprintf(target, sizeof(target), "%s", path);
+    return written >= 0 && static_cast<size_t>(written) < sizeof(target) &&
+           schedule_scan(target);
+}
+
+extern "C" bool PLAYLIST_UpAsync(void)
+{
+    if (s_current_dir[0] == '\0') {
+        return false;
+    }
+    char target[kMaxPathLen];
+    snprintf(target, sizeof(target), "%s", s_current_dir);
+    if (strcmp(target, kFavoritesDir) == 0 || is_source_root(target)) {
+        target[0] = '\0';
+    } else {
+        char *slash = strrchr(target, '/');
+        if (slash == nullptr || slash == target) {
+            target[0] = '\0';
+        } else {
+            *slash = '\0';
+        }
+    }
+    return schedule_scan(target);
+}
+
+extern "C" bool PLAYLIST_IsScanning(void)
+{
+    return s_scanning;
+}
+
+extern "C" bool PLAYLIST_LastScanOk(void)
+{
+    return s_last_scan_ok;
 }
 
 extern "C" const char *PLAYLIST_CurrentDir(void)
@@ -411,12 +564,12 @@ extern "C" bool PLAYLIST_InFavorites(void)
 
 extern "C" size_t PLAYLIST_DirCount(void)
 {
-    return s_dir_count;
+    return s_scan_entries_visible ? s_dir_count.load() : 0u;
 }
 
 extern "C" const char *PLAYLIST_GetDirName(const size_t index)
 {
-    if (s_dirs == nullptr || index >= s_dir_count) {
+    if (!s_scan_entries_visible || s_dirs == nullptr || index >= s_dir_count) {
         return nullptr;
     }
     return s_dirs[index].name;
@@ -424,7 +577,7 @@ extern "C" const char *PLAYLIST_GetDirName(const size_t index)
 
 extern "C" const char *PLAYLIST_GetDirPath(const size_t index)
 {
-    if (s_dirs == nullptr || index >= s_dir_count) {
+    if (!s_scan_entries_visible || s_dirs == nullptr || index >= s_dir_count) {
         return nullptr;
     }
     return s_dirs[index].path;
@@ -432,6 +585,9 @@ extern "C" const char *PLAYLIST_GetDirPath(const size_t index)
 
 extern "C" bool PLAYLIST_EnterDir(const size_t index)
 {
+    if (s_scanning) {
+        return false;
+    }
     const char *path = PLAYLIST_GetDirPath(index);
     if (path != nullptr && strcmp(path, kFavoritesDir) == 0 && !STORAGE_SdMounted()) {
         return false;
@@ -445,7 +601,7 @@ extern "C" bool PLAYLIST_EnterDir(const size_t index)
 
 extern "C" bool PLAYLIST_Up(void)
 {
-    if (s_current_dir[0] == '\0') {
+    if (s_scanning || s_current_dir[0] == '\0') {
         return false;
     }
     if (strcmp(s_current_dir, kFavoritesDir) == 0) {
@@ -470,12 +626,12 @@ extern "C" bool PLAYLIST_Up(void)
 
 extern "C" size_t PLAYLIST_Count(void)
 {
-    return s_count;
+    return s_scan_entries_visible ? s_count.load() : 0u;
 }
 
 extern "C" const char *PLAYLIST_GetPath(const size_t index)
 {
-    if (s_paths == nullptr || index >= s_count) {
+    if (!s_scan_entries_visible || s_paths == nullptr || index >= s_count) {
         return nullptr;
     }
     return s_paths[index];
@@ -483,11 +639,14 @@ extern "C" const char *PLAYLIST_GetPath(const size_t index)
 
 extern "C" int PLAYLIST_CurrentIndex(void)
 {
-    return s_current;
+    return s_scanning ? -1 : s_current;
 }
 
 extern "C" bool PLAYLIST_PlayIndex(const size_t index)
 {
+    if (s_scanning) {
+        return false;
+    }
     const char *path = PLAYLIST_GetPath(index);
     if (path == nullptr) {
         return false;
@@ -501,7 +660,7 @@ extern "C" bool PLAYLIST_PlayIndex(const size_t index)
 
 extern "C" bool PLAYLIST_Next(void)
 {
-    if (s_count == 0u) {
+    if (s_scanning || s_count == 0u) {
         return false;
     }
     const size_t next = (s_current < 0) ? 0u : (static_cast<size_t>(s_current) + 1u) % s_count;
@@ -510,7 +669,7 @@ extern "C" bool PLAYLIST_Next(void)
 
 extern "C" bool PLAYLIST_Prev(void)
 {
-    if (s_count == 0u) {
+    if (s_scanning || s_count == 0u) {
         return false;
     }
     const size_t prev = (s_current <= 0) ? (s_count - 1u) : (static_cast<size_t>(s_current) - 1u);

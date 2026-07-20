@@ -10,6 +10,7 @@ set(app_sources
     media/media_metadata.cpp
     media/opus_voice.cpp
     services/ai_assistant.cpp
+    services/aprs_service.cpp
     services/config_notify.cpp
     services/display_notice.cpp
     services/espnow_link.cpp
@@ -18,6 +19,7 @@ set(app_sources
     services/nanny.cpp
     services/ota_service.cpp
     services/radio_favorites.cpp
+    services/signaling_service.cpp
     services/smb_vfs.cpp
     services/storage_service.cpp
     services/video_call.cpp
@@ -32,10 +34,16 @@ set(app_sources
     app/driver/es8311.cpp
     app/driver/es8389.cpp
     app/driver/external_radio.cpp
+    app/driver/gps_serial.cpp
     app/driver/i2c.cpp
     app/driver/s31_i2c.cpp
     app/driver/sci_serial.cpp
+    app/driver/serial_port_config.cpp
     app/driver/status_io.cpp
+    lib/aprs/aprs_ax25.cpp
+    lib/aprs/aprs_crc_ccit.c
+    lib/aprs/aprs_modem.cpp
+    lib/aprs/parse_aprs.cpp
     lib/ble_config.cpp
     lib/nrl_bt_hfp.cpp
     lib/nrl_ethernet.cpp
@@ -43,6 +51,8 @@ set(app_sources
     lib/nrl_audio_bridge.cpp
     lib/nrl_captive_dns.cpp
     lib/nrl_g711.cpp
+    lib/dtmf_codec.cpp
+    lib/ctcss_decoder.cpp
     lib/nrl_usb_console.cpp
     lib/nrl_wifi.cpp
     lib/wifi_config_portal.cpp
@@ -75,6 +85,7 @@ set(app_priv_requires
     esp_https_ota
     esp_http_server
     mbedtls
+    mdc1200
     esp_lcd
     esp_netif
     esp_ringbuf
@@ -100,10 +111,12 @@ endif()
 # Korvo's BSP is linked from the top-level CMakeLists after project(), where the
 # custom board selection is reliably available. Declaring it here would make
 # ESP-IDF's early requirement scan pull the display BSP into every S31 build.
-# USB flash drive + SMB network share (storage_service backends) -- the
-# component dependencies themselves are target-gated in idf_component.yml.
+# SMB network playback is available on every board.
+list(APPEND app_priv_requires sahlberg__libsmb2 vfs)
+
+# USB flash drive and the S31-only assistant/display dependencies.
 if(IDF_TARGET STREQUAL "esp32s31")
-    list(APPEND app_priv_requires usb espressif__usb_host_msc espressif__led_strip fatfs sahlberg__libsmb2 vfs
+    list(APPEND app_priv_requires usb espressif__usb_host_msc espressif__led_strip fatfs
                                   espressif__esp_websocket_client espressif__cjson)
 endif()
 
@@ -120,4 +133,16 @@ idf_component_register(
     # registered as a plain component via EXTRA_COMPONENT_DIRS, so it needs this
     # explicitly or the link fails with "undefined reference to app_main".
     WHOLE_ARCHIVE
+)
+
+# Vendored APRS sources (aprsc parser / VP-Digi modem, see file headers) keep
+# their upstream style; exempt them from the warnings -Werror would trip on.
+# Must come after idf_component_register: the early component requirement scan
+# runs this file in script mode where set_source_files_properties is invalid.
+set_source_files_properties(
+    lib/aprs/parse_aprs.cpp
+    lib/aprs/aprs_ax25.cpp
+    lib/aprs/aprs_modem.cpp
+    PROPERTIES COMPILE_OPTIONS
+    "-Wno-parentheses;-Wno-type-limits;-Wno-implicit-fallthrough;-Wno-unused-variable;-Wno-unused-but-set-variable;-Wno-unused-label;-Wno-unused-value"
 )

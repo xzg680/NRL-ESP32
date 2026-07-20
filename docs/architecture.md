@@ -15,6 +15,17 @@
 5. 蓝牙耳机通话 (HFP, 已有基础)
 6. AI 助手
 7. ESP-NOW (脱网近距离语音)
+8. APRS 收发 (四块板): 独立 UART2 GPS (NMEA) 位置信标 → APRS-IS 网络
+   (可配服务器, 默认 asia.aprs2.net:14580, passcode 自动计算; 无 GPS 时用配置的
+   默认经纬度) 和/或 Bell 202 AFSK 经扬声器→电台发射 (VOX 起振);
+   麦克风侧解调电台收到的 APRS 音频, 解码后转发 APRS-IS (qAR iGate 方向)
+   并进入 PSRAM 站点表 (呼号/SSID/经纬度/高度/航向/速度/注释 + 本机距离
+   与连续报文推算速度)。展示: web 后台 /aprs 页 (全部字段, 5s 轮询)、
+   AT+APRS 命令族、S31 韦韵屏 Apps→APRS 列表页、格子派主屏滚动监视行
+   + 菜单 APRS LIST 页。实现: `src/lib/aprs/` 移植 aprsc 解析器 (BSD) 与
+   VP-Digi 调制解调/AX.25 (GPL3, 经 ESP32APRS_Audio); 解调固定 9600Hz
+   (16k 麦克风流 5:3 线性插值重采样), 发射 8kHz Q16 分数步进 DDS 经
+   AudioRouter (AUDIO_SRC_APRS / AUDIO_SINK_APRS)。
 
 ## 一、现状与核心问题
 

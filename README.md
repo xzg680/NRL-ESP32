@@ -4,7 +4,7 @@
 
 HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
-当前固件版本：`0.6.3`
+当前固件版本：`0.8.3`
 
 本项目是以 ESP32-S31 为主要目标平台、兼容 ESP32-S3 板卡的 NRL 网络语音电台桥接固件，用于把电台音频、PTT、SQL、频道选择、串口透明传输和网络配置集中到一个嵌入式应用中。不同板卡分别适配 ES8311 或 ES8389 等音频编解码器，当前工程覆盖 Moto3188/NRL 硬件及 ESP32-S31 开发板。
 
@@ -16,7 +16,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 | --- | --- | --- | --- |
 | `gezipai` | 格子派，ESP32-S3 | ES7210 麦克风 ADC + ES8311 DAC、240×240 ST7789 彩屏、电池电压检测、音量+/音量-/PTT 三按键、三色状态灯、SCI 串口 | 带小屏幕和实体 PTT 的便携式网络语音终端 |
 | `bh4tdv` | BH4TDV NRL-3188 / Moto3188 控制板，ESP32-S3 | ES8311 全双工音频、PTT/SQL/三色状态灯、三位频道选择（0–7）、SCI 串口；无板载屏幕 | 连接 3188 电台的网络桥接与频道控制 |
-| `s31_korvo` | ESP32-S31-Korvo-1，ESP32-S31 | ES8389 音频、800×480 RGB 触摸屏、ADC 按键（音量、模式、PTT）、TF 卡、USB-OTG 主机、板载 RGB 状态灯 | 带触控界面的多媒体/网络语音终端；当前未启用外接 SCI 串口 |
+| `s31_korvo` | ESP32-S31-Korvo-1，ESP32-S31 | ES8389 音频、800×480 RGB 触摸屏、ADC 按键（音量、模式、PTT）、TF 卡、USB-OTG 主机、板载 RGB 状态灯 | 带触控界面的多媒体/网络语音终端；UART1/SCI 与 UART2/GPS 默认关闭，可通过 Web/AT 启用 |
 | `s31_function_coreboard` | ESP32-S31-Function-CoreBoard-1，ESP32-S31 | ES8311 音频、YT8531 千兆以太网、USB-A 主机、WS2812 RGB 状态灯、SCI 串口；无屏幕、无实体音量/PTT 键 | 需要有线网络或 USB 存储的功能核心板方案 |
 
 ### 板卡实物与界面
@@ -38,7 +38,7 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
 左图为 `s31_korvo` 使用的 ESP32-S31-Korvo-1，提供屏幕、触摸、TF 卡、USB 主机及音频外设；右图为 `s31_function_coreboard` 使用的 ESP32-S31-Function-CoreBoard-1，提供 RJ45 千兆以太网、USB-A 主机、板载音频和 RGB 状态灯。
 
-> 注意：网页 USB 刷机仅支持 ESP32-S3 的 `gezipai` 和 `bh4tdv`；两块 ESP32-S31 板请使用串口烧录。Korvo 的 SCI 引脚仍为预留映射，固件当前关闭 SCI 串口功能。
+> 注意：网页 USB 刷机仅支持 ESP32-S3 的 `gezipai` 和 `bh4tdv`；两块 ESP32-S31 板请使用串口烧录。Korvo 的 UART1/SCI 与 UART2/GPS 使用 DVP 摄像头接口 GPIO，默认关闭，可通过 Web/AT 启用；启用后不能同时使用并口摄像头。
 
 ## 扩展功能与适用范围
 
@@ -75,12 +75,21 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
   - ESP32-S31 Function CoreBoard 还可使用板载 YT8531 千兆以太网；Wi-Fi 仍可作为回退连接。
 
 - **版本 OTA 与发布服务**
-  - 项目内置 `ota-server/` OTA 管理系统：Go 服务端嵌入 Vue 管理界面，使用 SQLite 保存按板卡、版本和发布通道（如 `stable` / `beta`）划分的固件发布记录与更新说明。
+  - OTA 管理系统已拆分到独立的 [`NRL-OTA`](https://github.com/hicaoc/NRL-OTA) 仓库：Go 服务端配合 Vue 管理界面，使用 SQLite 保存按板卡、版本和发布通道（如 `stable` / `beta`）划分的固件发布记录与更新说明。
   - 管理后台提供板卡介绍、各板卡固件历史与变更说明、USB 刷机入口，以及设备管理面板。设备在检查更新时会上报板卡型号、固件版本、呼号、SSID、IP 和最后在线时间，后台可识别有可用更新的设备。
   - 发布流程以**完整刷机包**为唯一来源：一次上传包含 bootloader、分区表、OTA data、应用及所需资源镜像。服务端从其中登记应用镜像作为设备 OTA 版本，并为 ESP32-S3 板同时生成 USB 网页刷机 manifest，避免两套固件来源不一致。
   - 所有四个构建目标均可接入 OTA 管理系统；`gezipai` / `bh4tdv` 还可通过 Chrome/Edge 的 USB 网页刷机首次全量安装，`s31_korvo` / `s31_function_coreboard` 保持串口首次烧录，后续可使用设备 OTA。
   - 设备端保存 OTA 服务 URL 与设备令牌，定时或按需拉取兼容版本清单，可安装最新版本或指定历史版本；生产 OTA 下载仅接受 HTTPS。可通过本地串口 AT 命令 `AT+OTAURL`、`AT+OTACHECK`、`AT+OTALIST`、`AT+OTA` 管理和执行更新。
   - 管理员可通过网页登录或管理令牌维护发布；构建环境设置 `OTA_SERVER_URL`、`OTA_UPLOAD_TOKEN` 等变量后，`scripts/build.py` 会在构建成功后自动上传发布包。
+  - 推荐使用 `scripts/publish_ota_mcp.py` 进行需要审核确认的正式发布。脚本通过 MCP 创建一次性上传会话，上传完整刷机包后校验状态，再显式确认发布；重复执行时会核对应用镜像大小和 SHA-256，不会重复创建相同版本。
+
+```powershell
+$env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
+$env:OTA_ADMIN_TOKEN = '<管理员令牌>'
+python scripts/publish_ota_mcp.py --version 0.8.3 --notes 'release notes'
+# 仅核验服务器上的四板发布包：
+python scripts/publish_ota_mcp.py --version 0.8.3 --verify-only
+```
 
 ## 支持功能
 

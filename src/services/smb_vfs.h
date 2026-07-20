@@ -5,7 +5,7 @@
 // esp_vfs adapter). Read-only: exactly what the media player needs --
 // fopen/fread/fseek and opendir/readdir work on /smb/... paths, so the
 // decoder, metadata parser and playlist scan all play network folders with
-// zero changes. S31-only (gated like the rest of the media stack).
+// zero changes. The backend is shared by all four boards.
 
 #include <stdbool.h>
 
@@ -25,6 +25,10 @@ bool SMB_VFS_Mount(const char *server, const char *share,
 void SMB_VFS_Unmount(void);
 
 bool SMB_VFS_Mounted(void);
+
+// Interrupt an in-progress directory enumeration. Used by Web navigation so
+// entering another folder does not wait for the previous large folder.
+void SMB_VFS_CancelDirectoryScan(void);
 
 #ifdef __cplusplus
 }

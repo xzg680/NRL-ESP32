@@ -21,6 +21,14 @@ void PLAYLIST_Init(void);
 // Called at startup, when storage mounts change, and when the UI refreshes.
 size_t PLAYLIST_Scan(void);
 
+// Web directory browsing uses asynchronous scans so a slow SMB directory
+// cannot hold the HTTP request open until the NAS finishes enumeration.
+bool PLAYLIST_ScanAsync(void);
+bool PLAYLIST_EnterDirAsync(size_t index);
+bool PLAYLIST_UpAsync(void);
+bool PLAYLIST_IsScanning(void);
+bool PLAYLIST_LastScanOk(void);
+
 // Current directory browser state. At the virtual root, DirCount lists the
 // available sources (SD music, USB music, SMB share); inside a source it lists
 // direct child directories. Track APIs below always refer only to the current

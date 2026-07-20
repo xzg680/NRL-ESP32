@@ -135,6 +135,77 @@ const translations = {
         saved: 'Saved',
         saveFailed: 'Save failed',
         mediaConfig: 'Media / Nanny',
+        aprsConfig: 'APRS',
+        signalingConfig: 'Signaling / CTCSS',
+        serialPorts: 'Serial Ports',
+        uart0Reserved: 'UART0 is reserved for system logs and serial AT commands.',
+        uart1Sci: 'UART1 - SCI transparent serial',
+        uart2Gps: 'UART2 - GPS NMEA',
+        serialEnabled: 'Enable this serial port',
+        serialRxPin: 'RX GPIO',
+        serialTxPin: 'TX GPIO',
+        serialBaud: 'Baud rate',
+        serialDataBits: 'Data bits',
+        serialParity: 'Parity (N/E/O)',
+        serialStopBits: 'Stop bits',
+        signalingHeadline: 'MDC1200 / DTMF / CTCSS',
+        signalingIntro: 'Configure signaling decode sources and voice-tail transmit destinations.',
+        ctcssRoutes: 'CTCSS / PL Receive',
+        mdcRoutes: 'MDC1200 Routes',
+        dtmfRoutes: 'DTMF Routes',
+        decodeMic: 'Decode from MIC',
+        decodeNrl: 'Decode from NRL',
+        ctcssDecodeMicText: 'Detect the standard CTCSS frequency from microphone/radio audio',
+        ctcssDecodeNrlText: 'Detect the standard CTCSS frequency from NRL downlink audio',
+        encodeNrl: 'Send to NRL',
+        encodeSpeaker: 'Send to speaker',
+        mdcDecodeMicText: 'Decode MDC1200 received from microphone/radio',
+        mdcDecodeNrlText: 'Decode MDC1200 in network downlink audio',
+        mdcEncodeNrlText: 'Append MDC1200 after local PTT release',
+        mdcEncodeSpeakerText: 'Append MDC1200 after NRL voice ends',
+        dtmfDecodeMicText: 'Decode DTMF received from microphone/radio',
+        dtmfDecodeNrlText: 'Decode DTMF in network downlink audio',
+        dtmfEncodeNrlText: 'Append DTMF after local PTT release',
+        dtmfEncodeSpeakerText: 'Append DTMF after NRL voice ends',
+        mdcOpcode: 'Opcode (hex)',
+        mdcArgument: 'Argument (hex)',
+        mdcUnitId: 'MDC ID (4 hex digits)',
+        dtmfId: 'DTMF ID',
+        aprsHeadline: 'APRS',
+        aprsIntro: 'GPS beacons to APRS-IS and AFSK over the radio; stations heard are listed below.',
+        aprsSwitches: 'APRS',
+        aprsEnabled: 'APRS',
+        aprsEnabledText: 'Master switch for the APRS transceiver',
+        aprsNet: 'APRS-IS Network',
+        aprsNetText: 'Send beacons to and hear stations from the APRS-IS server',
+        aprsRfTx: 'RF Transmit (AFSK)',
+        aprsRfTxText: 'Modulate beacons out through the speaker into the radio',
+        aprsRfRx: 'RF Receive (AFSK)',
+        aprsRfRxText: 'Demodulate APRS audio heard on the microphone/radio',
+        aprsAuto: 'Auto interval',
+        aprsAutoText: 'With a GPS fix, beacon faster while moving (30 s at 60+ km/h, or after a 300 m jump); the interval below is the ceiling when parked',
+        aprsSettings: 'APRS Settings',
+        aprsSettingsHint: 'Callsign comes from the Radio page; passcode is derived automatically.',
+        aprsServer: 'APRS-IS Server',
+        aprsPort: 'Port',
+        aprsSsid: 'SSID (0-15)',
+        aprsSymbol: 'Symbol (table+code)',
+        aprsInterval: 'Beacon interval (s, 10-3600)',
+        aprsPath: 'RF path',
+        aprsLat: 'Default latitude (WGS-84 ddmm.mmmm; N added automatically)',
+        aprsLon: 'Default longitude (WGS-84 dddmm.mmmm; E added automatically)',
+        aprsComment: 'Beacon comment',
+        aprsBeaconNow: 'Beacon now',
+        aprsStations: 'Stations Heard',
+        aprsStnCall: 'Callsign',
+        aprsStnPos: 'Lat / Lon',
+        aprsStnAlt: 'Alt',
+        aprsStnDist: 'Distance',
+        aprsStnSpeed: 'Speed',
+        aprsStnCourse: 'Course',
+        aprsStnAge: 'Heard',
+        aprsStnComment: 'Comment',
+        aprsStnEmpty: 'No stations heard yet.',
         mediaHeadline: 'Media / Nanny',
         mediaIntro: 'Configure playback target, nanny beacon, net radio, and SMB network share.',
         playback: 'Playback',
@@ -169,6 +240,25 @@ const translations = {
         smbUser: 'Username (empty = guest)',
         smbPassword: 'Password',
         smbClear: 'Clear',
+        musicLibrary: 'Music Playback',
+        musicPrev: 'Previous',
+        musicStop: 'Stop',
+        musicNext: 'Next',
+        musicRepeatList: 'Repeat list',
+        musicRepeatOne: 'Repeat one',
+        musicUp: 'Up',
+        musicRefresh: 'Rescan',
+        musicLoading: 'Loading...',
+        musicPagePrev: 'Previous page',
+        musicPageNext: 'Next page',
+        musicSourcesHint: 'Mounted SMB, TF/SD and USB sources appear here automatically. Tap a folder to browse and a track to play.',
+        musicNoSources: 'No storage source is mounted.',
+        musicNoEntries: 'No supported tracks or subfolders in this directory.',
+        musicScanning: 'Scanning directory... Large SMB folders may take a while.',
+        musicScanFailed: 'Directory scan timed out or failed. Tap Rescan to retry.',
+        musicStopped: 'Stopped',
+        musicActionFailed: 'Playback action failed',
+        musicFavoriteNeedsSd: 'Favorites require a mounted TF/SD card',
         musicOutput: 'Music Output Device',
         outputSpk: 'Onboard speaker',
         outputBt: 'Bluetooth headset (A2DP)',
@@ -325,6 +415,77 @@ const translations = {
         batteryCalibrate: '校准',
         batteryScale: '校准系数 (500-2000，1000 表示不修正)',
         mediaConfig: '媒体/保姆',
+        aprsConfig: 'APRS',
+        signalingConfig: '信令 / CTCSS',
+        serialPorts: '串口配置',
+        uart0Reserved: 'UART0 固定保留给系统日志和串口 AT 指令。',
+        uart1Sci: 'UART1 - SCI 透明串口',
+        uart2Gps: 'UART2 - GPS NMEA',
+        serialEnabled: '启用此串口',
+        serialRxPin: 'RX GPIO',
+        serialTxPin: 'TX GPIO',
+        serialBaud: '波特率',
+        serialDataBits: '数据位',
+        serialParity: '校验位 (N/E/O)',
+        serialStopBits: '停止位',
+        signalingHeadline: 'MDC1200 / DTMF / CTCSS 信令',
+        signalingIntro: '配置 MIC 与 NRL 音频解码来源，以及语音结束后的信令发送目标。',
+        ctcssRoutes: 'CTCSS / 模拟亚音接收',
+        mdcRoutes: 'MDC1200 收发',
+        dtmfRoutes: 'DTMF 收发',
+        decodeMic: '从 MIC 解码',
+        decodeNrl: '从 NRL 解码',
+        ctcssDecodeMicText: '识别麦克风或电台音频中的标准 CTCSS 亚音频率',
+        ctcssDecodeNrlText: '识别 NRL 网络下行音频中的标准 CTCSS 亚音频率',
+        encodeNrl: '发送到 NRL',
+        encodeSpeaker: '发送到喇叭',
+        mdcDecodeMicText: '解码麦克风或电台收到的 MDC1200',
+        mdcDecodeNrlText: '解码 NRL 网络下行音频中的 MDC1200',
+        mdcEncodeNrlText: '本地 PTT 松开后追加 MDC1200',
+        mdcEncodeSpeakerText: 'NRL 网络语音结束后向喇叭追加 MDC1200',
+        dtmfDecodeMicText: '解码麦克风或电台收到的 DTMF',
+        dtmfDecodeNrlText: '解码 NRL 网络下行音频中的 DTMF',
+        dtmfEncodeNrlText: '本地 PTT 松开后追加 DTMF',
+        dtmfEncodeSpeakerText: 'NRL 网络语音结束后向喇叭追加 DTMF',
+        mdcOpcode: '操作码（十六进制）',
+        mdcArgument: '参数（十六进制）',
+        mdcUnitId: 'MDC ID（4位十六进制）',
+        dtmfId: 'DTMF ID',
+        aprsHeadline: 'APRS 收发',
+        aprsIntro: 'GPS 位置上报到 APRS-IS 服务器，或经电台 AFSK 收发；下方列出收到的台站。',
+        aprsSwitches: 'APRS',
+        aprsEnabled: 'APRS 总开关',
+        aprsEnabledText: 'APRS 收发功能总开关',
+        aprsNet: 'APRS-IS 网络',
+        aprsNetText: '向 APRS-IS 服务器上报位置并接收周边台站',
+        aprsRfTx: '射频发射 (AFSK)',
+        aprsRfTxText: '信标经扬声器调制后由电台发射',
+        aprsRfRx: '射频接收 (AFSK)',
+        aprsRfRxText: '解调麦克风/电台收到的 APRS 音频',
+        aprsAuto: '自动发送间隔',
+        aprsAutoText: 'GPS 定位有效时按移动状态自动加快信标（60 km/h 以上 30 秒一次，位移超 300 米立即补发）；静止时使用下方设定的间隔',
+        aprsSettings: 'APRS 设置',
+        aprsSettingsHint: '呼号使用"电台"页配置；APRS-IS 验证码自动计算。',
+        aprsServer: 'APRS-IS 服务器',
+        aprsPort: '端口',
+        aprsSsid: 'SSID (0-15)',
+        aprsSymbol: '符号 (表+代码)',
+        aprsInterval: '信标间隔 (秒, 10-3600)',
+        aprsPath: '射频路径',
+        aprsLat: '默认纬度 (WGS-84 ddmm.mmmm，自动补N)',
+        aprsLon: '默认经度 (WGS-84 dddmm.mmmm，自动补E)',
+        aprsComment: '信标注释',
+        aprsBeaconNow: '立即发信标',
+        aprsStations: '收到的台站',
+        aprsStnCall: '呼号',
+        aprsStnPos: '纬度/经度',
+        aprsStnAlt: '高度',
+        aprsStnDist: '距离',
+        aprsStnSpeed: '速度',
+        aprsStnCourse: '航向',
+        aprsStnAge: '最后收到',
+        aprsStnComment: '注释',
+        aprsStnEmpty: '尚未收到台站。',
         mediaHeadline: '媒体/保姆',
         mediaIntro: '配置播放目标、保姆信标、网络收音机和 SMB 网络共享。',
         playback: '播放',
@@ -359,6 +520,25 @@ const translations = {
         smbUser: '用户名 (留空为来宾)',
         smbPassword: '密码',
         smbClear: '清除',
+        musicLibrary: '音乐播放管理',
+        musicPrev: '上一首',
+        musicStop: '停止',
+        musicNext: '下一首',
+        musicRepeatList: '列表循环',
+        musicRepeatOne: '单曲循环',
+        musicUp: '返回上级',
+        musicRefresh: '重新扫描',
+        musicLoading: '正在载入...',
+        musicPagePrev: '上一页',
+        musicPageNext: '下一页',
+        musicSourcesHint: '已挂载的 SMB、TF/SD 和 USB 会自动显示；点击文件夹进入，点击歌曲播放。',
+        musicNoSources: '当前没有已挂载的存储来源。',
+        musicNoEntries: '当前目录没有支持的歌曲或子目录。',
+        musicScanning: '正在扫描目录，大型 SMB 目录可能需要一些时间…',
+        musicScanFailed: '目录扫描超时或失败，请点击“重新扫描”重试。',
+        musicStopped: '已停止',
+        musicActionFailed: '播放操作失败',
+        musicFavoriteNeedsSd: '收藏功能需要插入 TF/SD 卡',
         musicOutput: '音乐输出设备',
         outputSpk: '板载扬声器',
         outputBt: '蓝牙耳机 (A2DP)',
@@ -590,6 +770,186 @@ const translations = {
       });
     }
 
+    let musicLibraryOffset = 0;
+    let musicLibraryPageSize = 64;
+    let musicLibraryTotal = 0;
+    let musicLibraryBusy = false;
+    let musicScanPollTimer = null;
+
+    function scheduleMusicScanPoll() {
+      if (musicScanPollTimer !== null) return;
+      musicScanPollTimer = setTimeout(() => {
+        musicScanPollTimer = null;
+        if (document.getElementById('music-library-list')) {
+          musicLibraryPost('snapshot', null, true);
+        }
+      }, 1000);
+    }
+
+    function musicLibraryPost(action, index, quiet) {
+      if (musicLibraryBusy && action === 'status') return Promise.resolve(null);
+      const body = new URLSearchParams();
+      body.append('action', action);
+      body.append('offset', String(musicLibraryOffset));
+      if (index !== undefined && index !== null) body.append('index', String(index));
+      if (!quiet) musicLibraryBusy = true;
+      return fetch('/media/playlist', {
+        method: 'POST',
+        body,
+        cache: 'no-store',
+        credentials: 'same-origin',
+        referrerPolicy: 'no-referrer',
+      }).then((r) => r.json().then((data) => Object.assign({ ok: r.ok }, data)))
+        .catch(() => ({ ok: false }))
+        .then((reply) => {
+          if (reply && reply.scanning) {
+            musicLibraryBusy = true;
+            scheduleMusicScanPoll();
+          } else {
+            musicLibraryBusy = false;
+          }
+          if (reply) renderMusicLibrary(reply, action !== 'status');
+          return reply;
+        });
+    }
+
+    function musicPathBasename(path) {
+      if (!path) return '';
+      const slash = path.lastIndexOf('/');
+      return slash >= 0 ? path.slice(slash + 1) : path;
+    }
+
+    function updateMusicPlayerStatus(data) {
+      const status = document.getElementById('music-player-status');
+      if (status) {
+        status.textContent = data.playing
+          ? '\u25b6 ' + musicPathBasename(data.playing_path)
+          : t('musicStopped');
+      }
+      const repeat = document.getElementById('music-repeat-button');
+      if (repeat) {
+        const key = Number(data.repeat) === 1 ? 'musicRepeatOne' : 'musicRepeatList';
+        repeat.setAttribute('data-i18n', key);
+        repeat.textContent = t(key);
+      }
+      const up = document.getElementById('music-up-button');
+      if (up) up.disabled = !!data.root;
+    }
+
+    function renderMusicLibrary(data, includeEntries) {
+      updateMusicPlayerStatus(data || {});
+      if (!data || data.ok === false) {
+        const status = document.getElementById('music-player-status');
+        if (status) status.textContent = t('musicActionFailed');
+        return;
+      }
+      const path = document.getElementById('music-browser-path');
+      if (path) path.textContent = data.root ? '/' : (data.dir || '/');
+      const list = document.getElementById('music-library-list');
+      const scanning = !!data.scanning;
+      if (scanning && (!Array.isArray(data.dirs) || !Array.isArray(data.tracks))) {
+        if (list) {
+          list.innerHTML = '';
+          const loading = document.createElement('span');
+          loading.className = 'hint';
+          loading.textContent = t('musicScanning');
+          list.appendChild(loading);
+        }
+        const pagination = document.getElementById('music-pagination');
+        if (pagination) pagination.hidden = true;
+        scheduleMusicScanPoll();
+        return;
+      }
+      if (!scanning && data.scan_ok === false) {
+        if (list) {
+          list.innerHTML = '';
+          const failed = document.createElement('span');
+          failed.className = 'hint';
+          failed.textContent = t('musicScanFailed');
+          list.appendChild(failed);
+        }
+        return;
+      }
+      if (!includeEntries || !Array.isArray(data.dirs) || !Array.isArray(data.tracks)) return;
+
+      musicLibraryOffset = Number(data.offset) || 0;
+      musicLibraryPageSize = Number(data.page_size) || 64;
+      musicLibraryTotal = Number(data.total) || 0;
+      if (!list) return;
+      list.innerHTML = '';
+      data.dirs.forEach((dir) => {
+        const row = document.createElement('div');
+        row.className = 'music-entry music-dir';
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'music-entry-main secondary';
+        open.textContent = '\ud83d\udcc1 ' + (dir.name || '(dir)');
+        open.addEventListener('click', () => musicLibraryAction('enter', dir.index));
+        row.appendChild(open);
+        list.appendChild(row);
+      });
+      data.tracks.forEach((track) => {
+        const row = document.createElement('div');
+        row.className = 'music-entry' + (track.current ? ' current' : '');
+        const play = document.createElement('button');
+        play.type = 'button';
+        play.className = 'music-entry-main secondary';
+        play.textContent = (track.current ? '\u25b6 ' : '\u266b ') + track.name;
+        play.addEventListener('click', () => musicLibraryAction('play', track.index));
+        row.appendChild(play);
+        if (data.favorite_supported) {
+          const fav = document.createElement('button');
+          fav.type = 'button';
+          fav.className = 'music-favorite secondary';
+          fav.textContent = track.favorite ? '\u2605' : '\u2606';
+          fav.title = track.favorite ? t('radioFavDelete') : t('radioFavAdd');
+          fav.addEventListener('click', () => musicLibraryAction('favorite', track.index));
+          row.appendChild(fav);
+        }
+        list.appendChild(row);
+      });
+      if (!data.dirs.length && !data.tracks.length && !scanning) {
+        const empty = document.createElement('span');
+        empty.className = 'hint';
+        empty.textContent = data.root ? t('musicNoSources') : t('musicNoEntries');
+        list.appendChild(empty);
+      }
+      if (scanning) {
+        const loading = document.createElement('span');
+        loading.className = 'hint';
+        loading.textContent = t('musicScanning') + ' (' + musicLibraryTotal + ')';
+        list.appendChild(loading);
+        scheduleMusicScanPoll();
+      }
+
+      const pagination = document.getElementById('music-pagination');
+      if (pagination) {
+        pagination.hidden = musicLibraryTotal <= musicLibraryPageSize;
+        const buttons = pagination.querySelectorAll('button');
+        if (buttons[0]) buttons[0].disabled = musicLibraryOffset === 0;
+        if (buttons[1]) buttons[1].disabled = musicLibraryOffset + musicLibraryPageSize >= musicLibraryTotal;
+      }
+      const pageStatus = document.getElementById('music-page-status');
+      if (pageStatus && musicLibraryTotal > 0) {
+        const last = Math.min(musicLibraryOffset + musicLibraryPageSize, musicLibraryTotal);
+        pageStatus.textContent = (musicLibraryOffset + 1) + '-' + last + ' / ' + musicLibraryTotal;
+      }
+    }
+
+    function musicLibraryAction(action, index) {
+      const navigation = action === 'enter' || action === 'up' || action === 'refresh';
+      if (musicLibraryBusy && !navigation) return;
+      if (action === 'enter' || action === 'up' || action === 'refresh') musicLibraryOffset = 0;
+      musicLibraryPost(action, index, false);
+    }
+
+    function musicLibraryPage(direction) {
+      const next = musicLibraryOffset + direction * musicLibraryPageSize;
+      musicLibraryOffset = Math.max(0, Math.min(next,
+        Math.max(0, musicLibraryTotal - musicLibraryPageSize)));
+      musicLibraryPost('snapshot', null, false);
+    }
+
     function flashButtonFeedback(button, ok) {
       if (!button) return;
       const orig = button.textContent;
@@ -717,6 +1077,10 @@ const translations = {
       if (window.RADIO_FAVS) {
         renderRadioFavs(window.RADIO_FAVS, window.RADIO_FAV_CUR);
         applyLanguage(currentLang()); // translate the freshly rendered rows
+      }
+      if (document.getElementById('music-player-panel')) {
+        musicLibraryPost('snapshot', null, false);
+        setInterval(() => musicLibraryPost('status', null, true), 3000);
       }
       const expert = document.getElementById('audio-expert-mode');
       if (expert) {

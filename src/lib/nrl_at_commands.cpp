@@ -9,7 +9,10 @@
 #include "driver/es8311.h"
 #include "driver/es8389.h"
 #include "driver/external_radio.h"
+#include "driver/gps_serial.h"
+#include "driver/serial_port_config.h"
 #include "services/ai_assistant.h"
+#include "services/aprs_service.h"
 #include "services/display_notice.h"
 #include "services/espnow_link.h"
 #include "services/video_call.h"
@@ -19,9 +22,12 @@
 #include "services/nanny.h"
 #include "services/ota_service.h"
 #include "services/storage_service.h"
+#include "services/signaling_service.h"
 #include "driver/sci_serial.h"
+#include "app/main_loop_profile.h"
 
 #include <esp_log.h>
+#include <esp_partition.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
@@ -29,10 +35,12 @@
 #include <lwip/sockets.h>
 
 #include <ctype.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static const char *TAG = "NRL";
 
@@ -146,9 +154,15 @@ static bool appendKeyValueLine(uint8_t *payload,
                                const char *key,
                                const char *value)
 {
-    char line[320];
-    snprintf(line, sizeof(line), "AT+%s=%s", key, value);
-    return appendReplyLine(payload, capacity, used, line);
+    static const char kPrefix[] = "AT+";
+    static const char kEquals[] = "=";
+    static const char kCrLf[] = "\r\n";
+    if (key == nullptr || value == nullptr) return false;
+    return appendReplyBytes(payload, capacity, used, kPrefix, sizeof(kPrefix) - 1u) &&
+           appendReplyBytes(payload, capacity, used, key, strlen(key)) &&
+           appendReplyBytes(payload, capacity, used, kEquals, sizeof(kEquals) - 1u) &&
+           appendReplyBytes(payload, capacity, used, value, strlen(value)) &&
+           appendReplyBytes(payload, capacity, used, kCrLf, sizeof(kCrLf) - 1u);
 }
 
 static bool appendUnsignedLine(uint8_t *payload,
@@ -216,6 +230,9 @@ static bool appendSupportedAtList(uint8_t *payload,
 {
     const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
     char sci_config[32] = "9600,8,N,1";
+    char uart1_io[24] = "0,0";
+    char uart2_io[24] = "0,0";
+    char uart2_config[32] = "9600,8,N,1";
     char wifi_pass[32] = "(empty)";
     char hp_drive[4] = "OFF";
     char ptt_mode[8] = "NRL";
@@ -235,6 +252,14 @@ static bool appendSupportedAtList(uint8_t *payload,
         ipText(currentWifiIpValue(config->wifi_gateway, nrlWifiStaGateway(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
         ipText(currentWifiIpValue(config->wifi_dns, nrlWifiStaDns(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
     }
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+    snprintf(uart1_io, sizeof(uart1_io), "%d,%d", serial.uart1_rx_pin, serial.uart1_tx_pin);
+    snprintf(uart2_io, sizeof(uart2_io), "%d,%d", serial.uart2_rx_pin, serial.uart2_tx_pin);
+    snprintf(uart2_config, sizeof(uart2_config), "%lu,%u,%c,%u",
+             static_cast<unsigned long>(serial.uart2_baud),
+             static_cast<unsigned>(serial.uart2_data_bits), serial.uart2_parity,
+             static_cast<unsigned>(serial.uart2_stop_bits));
     return appendKeyValueLine(payload, capacity, used, "WIFI_SSID", (config != nullptr) ? config->wifi_ssid : "") &&
            appendKeyValueLine(payload, capacity, used, "WIFI_PASS", wifi_pass) &&
            appendUnsignedLine(payload, capacity, used, "WIFI_DHCP", (config != nullptr && config->wifi_dhcp_enabled) ? 1u : 0u) &&
@@ -243,6 +268,13 @@ static bool appendSupportedAtList(uint8_t *payload,
            appendKeyValueLine(payload, capacity, used, "WIFI_GW", wifi_gw) &&
            appendKeyValueLine(payload, capacity, used, "WIFI_DNS", wifi_dns) &&
            appendKeyValueLine(payload, capacity, used, "SCI", sci_config) &&
+           appendKeyValueLine(payload, capacity, used, "UART0", "RESERVED(LOG/AT)") &&
+           appendKeyValueLine(payload, capacity, used, "UART1", sci_config) &&
+           appendKeyValueLine(payload, capacity, used, "UART1_ENABLE", serial.uart1_enabled ? "ON" : "OFF") &&
+           appendKeyValueLine(payload, capacity, used, "UART1_IO", uart1_io) &&
+           appendKeyValueLine(payload, capacity, used, "UART2", uart2_config) &&
+           appendKeyValueLine(payload, capacity, used, "UART2_ENABLE", serial.uart2_enabled ? "ON" : "OFF") &&
+           appendKeyValueLine(payload, capacity, used, "UART2_IO", uart2_io) &&
            appendUnsignedLine(payload, capacity, used, "CH", (config != nullptr) ? config->channel : 0u) &&
            appendKeyValueLine(payload, capacity, used, "D_IP", (config != nullptr) ? config->server_host : "") &&
            appendUnsignedLine(payload, capacity, used, "D_PORT", (config != nullptr) ? config->server_port : 0u) &&
@@ -282,28 +314,32 @@ static bool decodeAtCommand(const uint8_t *payload, const size_t payload_size, A
         return false;
     }
 
-    char buffer[288];
-    size_t copy_size = payload_size - 1u;
-    if (copy_size >= sizeof(buffer)) {
-        copy_size = sizeof(buffer) - 1u;
-    }
-    memcpy(buffer, payload + 1u, copy_size);
-    buffer[copy_size] = '\0';
+    const uint8_t *text = payload + 1u;
+    const size_t text_size = payload_size - 1u;
+    const auto *separator = static_cast<const uint8_t *>(memchr(text, '=', text_size));
+    if (separator == nullptr) return false;
 
-    char *separator = strchr(buffer, '=');
-    if (separator == nullptr) {
-        return false;
-    }
-
-    *separator = '\0';
-    snprintf(out_cmd->command, sizeof(out_cmd->command), "%.*s",
-             static_cast<int>(sizeof(out_cmd->command) - 1u), buffer);
-    snprintf(out_cmd->value, sizeof(out_cmd->value), "%.*s",
-             static_cast<int>(sizeof(out_cmd->value) - 1u), separator + 1);
+    const size_t command_size = static_cast<size_t>(separator - text);
+    const size_t value_size = text_size - command_size - 1u;
+    const size_t command_copy = command_size < sizeof(out_cmd->command) - 1u
+        ? command_size : sizeof(out_cmd->command) - 1u;
+    const size_t value_copy = value_size < sizeof(out_cmd->value) - 1u
+        ? value_size : sizeof(out_cmd->value) - 1u;
+    memcpy(out_cmd->command, text, command_copy);
+    out_cmd->command[command_copy] = '\0';
+    memcpy(out_cmd->value, separator + 1u, value_copy);
+    out_cmd->value[value_copy] = '\0';
 
     trimText(out_cmd->command);
     trimText(out_cmd->value);
-    if (strncmp(out_cmd->command, "AT+", 3u) == 0) {
+    // Some serial terminals can leave a previously typed "AT" in front of a
+    // pasted command ("ATAT+TOP=1"). Collapse repeated leading AT prefixes
+    // before stripping the normal AT+ prefix.
+    while (strncasecmp(out_cmd->command, "ATAT+", 5u) == 0) {
+        memmove(out_cmd->command, out_cmd->command + 2u,
+                strlen(out_cmd->command + 2u) + 1u);
+    }
+    if (strncasecmp(out_cmd->command, "AT+", 3u) == 0) {
         memmove(out_cmd->command, out_cmd->command + 3u, strlen(out_cmd->command + 3u) + 1u);
     }
     return out_cmd->command[0] != '\0';
@@ -321,6 +357,16 @@ static bool parseUnsignedValue(const char *text, unsigned long *out_value)
         return false;
     }
 
+    *out_value = value;
+    return true;
+}
+
+static bool parseHexValue(const char *text, unsigned long *out_value)
+{
+    if (text == nullptr || out_value == nullptr || text[0] == '\0') return false;
+    char *end = nullptr;
+    const unsigned long value = strtoul(text, &end, 16);
+    if (end == text || (end != nullptr && *end != '\0')) return false;
     *out_value = value;
     return true;
 }
@@ -421,6 +467,30 @@ static bool parseSciConfigValue(const char *text,
     *out_data_bits = static_cast<uint8_t>(data_bits);
     *out_parity = parity;
     *out_stop_bits = static_cast<uint8_t>(stop_bits);
+    return true;
+}
+
+static bool parseIoConfigValue(const char *text, int *out_rx, int *out_tx)
+{
+    if (text == nullptr || out_rx == nullptr || out_tx == nullptr) return false;
+    char buffer[48];
+    const size_t text_len = strlen(text);
+    if (text_len == 0u || text_len >= sizeof(buffer)) return false;
+    memcpy(buffer, text, text_len + 1u);
+    char *comma = strchr(buffer, ',');
+    if (comma == nullptr || strchr(comma + 1, ',') != nullptr) return false;
+    *comma = '\0';
+    char *rx_text = buffer;
+    char *tx_text = comma + 1;
+    trimText(rx_text);
+    trimText(tx_text);
+    unsigned long rx = 0u, tx = 0u;
+    if (!parseUnsignedValue(rx_text, &rx) || !parseUnsignedValue(tx_text, &tx) ||
+        rx > 127u || tx > 127u) {
+        return false;
+    }
+    *out_rx = static_cast<int>(rx);
+    *out_tx = static_cast<int>(tx);
     return true;
 }
 
@@ -1337,6 +1407,408 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         return;
     }
 
+    // CTCSS/PL receive detection. The master command controls both sources;
+    // the route commands below keep MIC and NRL independently selectable.
+    if (stringEqualsIgnoreCase(command.command, "CTCSS")) {
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        if (!is_query) {
+            bool enabled = false;
+            if (!parseBoolValue(command.value, &enabled) ||
+                !SIGNALING_SetCtcssRoute(SIGNAL_ROUTE_RX_MIC, enabled) ||
+                !SIGNALING_SetCtcssRoute(SIGNAL_ROUTE_RX_NRL, enabled)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload),
+                                   &result->payload_size, "ERR", "CTCSS");
+                return;
+            }
+            cfg.ctcss_rx_mic = enabled;
+            cfg.ctcss_rx_nrl = enabled;
+        }
+        char status[48];
+        snprintf(status, sizeof(status), "RXMIC=%s,RXNRL=%s",
+                 cfg.ctcss_rx_mic ? "ON" : "OFF",
+                 cfg.ctcss_rx_nrl ? "ON" : "OFF");
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "CTCSS", status);
+        return;
+    }
+
+    struct CtcssAtRoute {
+        const char *command;
+        SignalingRoute route;
+    };
+    static const CtcssAtRoute ctcss_routes[] = {
+        {"CTCSS_RX_MIC", SIGNAL_ROUTE_RX_MIC},
+        {"CTCSS_RX_NRL", SIGNAL_ROUTE_RX_NRL},
+    };
+    for (const CtcssAtRoute &entry : ctcss_routes) {
+        if (!stringEqualsIgnoreCase(command.command, entry.command)) continue;
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        bool enabled = entry.route == SIGNAL_ROUTE_RX_MIC
+                           ? cfg.ctcss_rx_mic : cfg.ctcss_rx_nrl;
+        if (!is_query && (!parseBoolValue(command.value, &enabled) ||
+                          !SIGNALING_SetCtcssRoute(entry.route, enabled))) {
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "ERR", entry.command);
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, entry.command,
+                           enabled ? "ON" : "OFF");
+        return;
+    }
+
+    // MDC1200/DTMF signaling. Route switches are independent; MDC/DTMF
+    // payloads are pre-generated into PSRAM when their IDs change.
+    if (stringEqualsIgnoreCase(command.command, "MDC") ||
+        stringEqualsIgnoreCase(command.command, "DTMF")) {
+        const bool mdc = stringEqualsIgnoreCase(command.command, "MDC");
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        if (is_query) {
+            char status[128];
+            if (mdc) {
+                snprintf(status, sizeof(status), "ID=%04X,OP=%02X,ARG=%02X,RXMIC=%s,RXNRL=%s,TXNRL=%s,TXSPK=%s",
+                         cfg.mdc_unit_id, cfg.mdc_opcode, cfg.mdc_argument,
+                         cfg.mdc_rx_mic ? "ON" : "OFF", cfg.mdc_rx_nrl ? "ON" : "OFF",
+                         cfg.mdc_tx_nrl ? "ON" : "OFF", cfg.mdc_tx_speaker ? "ON" : "OFF");
+            } else {
+                snprintf(status, sizeof(status), "ID=%s,RXMIC=%s,RXNRL=%s,TXNRL=%s,TXSPK=%s",
+                         cfg.dtmf_digits, cfg.dtmf_rx_mic ? "ON" : "OFF",
+                         cfg.dtmf_rx_nrl ? "ON" : "OFF", cfg.dtmf_tx_nrl ? "ON" : "OFF",
+                         cfg.dtmf_tx_speaker ? "ON" : "OFF");
+            }
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               mdc ? "MDC" : "DTMF", status);
+            return;
+        }
+        bool ok = false;
+        if (mdc) {
+            char value[sizeof(command.value)];
+            snprintf(value, sizeof(value), "%s", command.value);
+            char *arg_text = strchr(value, ',');
+            char *id_text = arg_text != nullptr ? strchr(arg_text + 1, ',') : nullptr;
+            if (arg_text != nullptr && id_text != nullptr) {
+                *arg_text++ = '\0';
+                *id_text++ = '\0';
+                unsigned long op = 0, arg = 0, unit_id = 0;
+                ok = parseHexValue(value, &op) && op <= 0xFFUL &&
+                     parseHexValue(arg_text, &arg) && arg <= 0xFFUL &&
+                     parseHexValue(id_text, &unit_id) && unit_id <= 0xFFFFUL &&
+                     SIGNALING_SetMdcPacket(static_cast<uint8_t>(op), static_cast<uint8_t>(arg),
+                                            static_cast<uint16_t>(unit_id));
+            }
+        } else {
+            ok = SIGNALING_SetDtmfDigits(command.value);
+        }
+        if (!ok) appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", mdc ? "MDC" : "DTMF");
+        else appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, mdc ? "MDC" : "DTMF", command.value);
+        return;
+    }
+
+    struct SignalingAtRoute {
+        const char *command;
+        bool mdc;
+        SignalingRoute route;
+    };
+    static const SignalingAtRoute signaling_routes[] = {
+        {"MDC_RX_MIC", true, SIGNAL_ROUTE_RX_MIC}, {"MDC_RX_NRL", true, SIGNAL_ROUTE_RX_NRL},
+        {"MDC_TX_NRL", true, SIGNAL_ROUTE_TX_NRL}, {"MDC_TX_SPK", true, SIGNAL_ROUTE_TX_SPEAKER},
+        {"DTMF_RX_MIC", false, SIGNAL_ROUTE_RX_MIC}, {"DTMF_RX_NRL", false, SIGNAL_ROUTE_RX_NRL},
+        {"DTMF_TX_NRL", false, SIGNAL_ROUTE_TX_NRL}, {"DTMF_TX_SPK", false, SIGNAL_ROUTE_TX_SPEAKER},
+    };
+    for (const SignalingAtRoute &entry : signaling_routes) {
+        if (!stringEqualsIgnoreCase(command.command, entry.command)) continue;
+        SignalingConfig cfg{};
+        SIGNALING_GetConfig(&cfg);
+        bool enabled = false;
+        if (entry.mdc) {
+            if (entry.route == SIGNAL_ROUTE_RX_MIC) enabled = cfg.mdc_rx_mic;
+            else if (entry.route == SIGNAL_ROUTE_RX_NRL) enabled = cfg.mdc_rx_nrl;
+            else if (entry.route == SIGNAL_ROUTE_TX_NRL) enabled = cfg.mdc_tx_nrl;
+            else enabled = cfg.mdc_tx_speaker;
+        } else {
+            if (entry.route == SIGNAL_ROUTE_RX_MIC) enabled = cfg.dtmf_rx_mic;
+            else if (entry.route == SIGNAL_ROUTE_RX_NRL) enabled = cfg.dtmf_rx_nrl;
+            else if (entry.route == SIGNAL_ROUTE_TX_NRL) enabled = cfg.dtmf_tx_nrl;
+            else enabled = cfg.dtmf_tx_speaker;
+        }
+        if (!is_query) {
+            if (!parseBoolValue(command.value, &enabled) ||
+                !(entry.mdc ? SIGNALING_SetMdcRoute(entry.route, enabled)
+                            : SIGNALING_SetDtmfRoute(entry.route, enabled))) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", entry.command);
+                return;
+            }
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           entry.command, enabled ? "ON" : "OFF");
+        return;
+    }
+
+    // APRS transceiver family:
+    //   AT+APRS=ON|OFF|?          master switch / status summary
+    //   AT+APRS_NET=ON|OFF        APRS-IS uplink/downlink
+    //   AT+APRS_TX=ON|OFF         AFSK beacon out through the radio
+    //   AT+APRS_RX=ON|OFF         demodulate radio audio
+    //   AT+APRS_AUTO=ON|OFF       speed/movement-adaptive beacon interval
+    //   AT+APRS_SERVER=host:port  APRS-IS server
+    //   AT+APRS_SSID=0..15        SSID appended to the radio callsign
+    //   AT+APRS_SYMBOL=/I         symbol table+code (TCP/IP by default)
+    //   AT+APRS_INTERVAL=60       beacon interval, seconds
+    //   AT+APRS_POS=ddmm.mmmm,dddmm.mmmm
+    //                              default WGS-84 position (N/E automatic)
+    //   AT+APRS_PATH=WIDE1-1      RF digi path
+    //   AT+APRS_COMMENT=text      beacon comment
+    //   AT+APRS_BEACON            queue a beacon right now
+    //   AT+APRS_LIST              recent stations heard
+    if (stringEqualsIgnoreCase(command.command, "APRS")) {
+        if (is_query) {
+            AprsConfig cfg;
+            APRS_SERVICE_GetConfig(&cfg);
+            char status[112];
+            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s auto=%s gps=%s rx=%lu tx=%lu",
+                     cfg.enabled ? "ON" : "OFF",
+                     cfg.net_enabled ? "ON" : "OFF",
+                     APRS_SERVICE_IsNetConnected() ? "(conn)" : "",
+                     cfg.rf_tx_enabled ? "ON" : "OFF",
+                     cfg.rf_rx_enabled ? "ON" : "OFF",
+                     cfg.auto_interval ? "ON" : "OFF",
+                     APRS_SERVICE_GpsHasFix() ? "FIX" : "NO",
+                     static_cast<unsigned long>(APRS_SERVICE_GetRxCount()),
+                     static_cast<unsigned long>(APRS_SERVICE_GetTxCount()));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS", status);
+            return;
+        }
+        bool enabled = false;
+        if (!parseBoolValue(command.value, &enabled) || !APRS_SERVICE_SetEnabled(enabled)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS",
+                           enabled ? "ON" : "OFF");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_NET") ||
+        stringEqualsIgnoreCase(command.command, "APRS_TX") ||
+        stringEqualsIgnoreCase(command.command, "APRS_RX") ||
+        stringEqualsIgnoreCase(command.command, "APRS_AUTO")) {
+        AprsConfig cfg;
+        APRS_SERVICE_GetConfig(&cfg);
+        const bool is_net = stringEqualsIgnoreCase(command.command, "APRS_NET");
+        const bool is_tx = stringEqualsIgnoreCase(command.command, "APRS_TX");
+        const bool is_auto = stringEqualsIgnoreCase(command.command, "APRS_AUTO");
+        if (!is_query) {
+            bool enabled = false;
+            bool ok = parseBoolValue(command.value, &enabled);
+            if (ok) {
+                if (is_net) {
+                    ok = APRS_SERVICE_SetNetEnabled(enabled);
+                } else if (is_tx) {
+                    ok = APRS_SERVICE_SetRfTxEnabled(enabled);
+                } else if (is_auto) {
+                    ok = APRS_SERVICE_SetAutoInterval(enabled);
+                } else {
+                    ok = APRS_SERVICE_SetRfRxEnabled(enabled);
+                }
+            }
+            if (!ok) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", command.command);
+                return;
+            }
+            APRS_SERVICE_GetConfig(&cfg);
+        }
+        const bool state = is_net ? cfg.net_enabled
+                                  : (is_tx ? cfg.rf_tx_enabled
+                                           : (is_auto ? cfg.auto_interval : cfg.rf_rx_enabled));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           command.command, state ? "ON" : "OFF");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_SERVER")) {
+        if (!is_query) {
+            char host[65] = {};
+            unsigned port = 14580;
+            const char *colon = strrchr(command.value, ':');
+            if (colon != nullptr && colon != command.value) {
+                const size_t host_len = static_cast<size_t>(colon - command.value);
+                if (host_len >= sizeof(host) || sscanf(colon + 1, "%u", &port) != 1) {
+                    appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_SERVER");
+                    return;
+                }
+                memcpy(host, command.value, host_len);
+            } else {
+                snprintf(host, sizeof(host), "%.64s", command.value);
+            }
+            if (port == 0 || port > 65535u || !APRS_SERVICE_SetServer(host, static_cast<uint16_t>(port))) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_SERVER");
+                return;
+            }
+        }
+        AprsConfig cfg;
+        APRS_SERVICE_GetConfig(&cfg);
+        char server[80];
+        snprintf(server, sizeof(server), "%s:%u", cfg.server_host, static_cast<unsigned>(cfg.server_port));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_SERVER", server);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_SSID")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            unsigned ssid = 0;
+            if (sscanf(command.value, "%u", &ssid) != 1 || ssid > 15u ||
+                !APRS_SERVICE_SetSsid(static_cast<uint8_t>(ssid))) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_SSID");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        char text[8];
+        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg.ssid));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_SSID", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_SYMBOL")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            if (strlen(command.value) != 2u ||
+                !APRS_SERVICE_SetSymbol(command.value[0], command.value[1])) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_SYMBOL");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        char text[4] = {cfg.symbol_table, cfg.symbol_code, '\0'};
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_SYMBOL", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_INTERVAL")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            unsigned seconds = 0;
+            if (sscanf(command.value, "%u", &seconds) != 1 || seconds > 65535u ||
+                !APRS_SERVICE_SetBeaconInterval(static_cast<uint16_t>(seconds))) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_INTERVAL");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        char text[8];
+        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg.beacon_interval_s));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_INTERVAL", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_POS")) {
+        if (!is_query) {
+            double lat = 0.0, lon = 0.0;
+            const char *comma = strchr(command.value, ',');
+            if (comma == nullptr) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_POS");
+                return;
+            }
+            char lat_text[24] = {};
+            const size_t lat_len = static_cast<size_t>(comma - command.value);
+            if (lat_len == 0u || lat_len >= sizeof(lat_text)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_POS");
+                return;
+            }
+            memcpy(lat_text, command.value, lat_len);
+            if (!APRS_SERVICE_ParseAprsCoord(lat_text, true, &lat) ||
+                !APRS_SERVICE_ParseAprsCoord(comma + 1, false, &lon) ||
+                !APRS_SERVICE_SetDefaultPosition(lat, lon)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_POS");
+                return;
+            }
+        }
+        double lat = 0.0, lon = 0.0, alt = 0.0;
+        const bool fix = APRS_SERVICE_GetOwnPosition(&lat, &lon, &alt);
+        char text[64];
+        char lat_text[16], lon_text[16];
+        APRS_SERVICE_FormatAprsCoord(lat, true, lat_text, sizeof(lat_text));
+        APRS_SERVICE_FormatAprsCoord(lon, false, lon_text, sizeof(lon_text));
+        snprintf(text, sizeof(text), "%s,%s %s", lat_text, lon_text, fix ? "GPS" : "DEFAULT");
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_POS", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_PATH")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            if (!APRS_SERVICE_SetPath(command.value)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_PATH");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_PATH",
+                           cfg.path[0] != '\0' ? cfg.path : "(none)");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_COMMENT")) {
+        AprsConfig cfg;
+        if (!is_query) {
+            if (!APRS_SERVICE_SetComment(command.value)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_COMMENT");
+                return;
+            }
+        }
+        APRS_SERVICE_GetConfig(&cfg);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_COMMENT",
+                           cfg.comment[0] != '\0' ? cfg.comment : "(none)");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "APRS_BEACON")) {
+        if (!APRS_SERVICE_SendBeaconNow()) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "APRS_OFF");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_BEACON", "QUEUED");
+        return;
+    }
+
+    // Station list. Replies must fit the 1024-byte remote-AT UDP budget, so
+    // cap the station count and keep each line compact.
+    if (stringEqualsIgnoreCase(command.command, "APRS_LIST")) {
+        AprsStationInfo stations[8];
+        const size_t count = APRS_SERVICE_GetStations(stations, 8);
+        if (count == 0) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "APRS_LIST", "EMPTY");
+            return;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            const AprsStationInfo &s = stations[i];
+            char line[104];
+            char spd[16] = "-";
+            if (!isnan(s.speed_kmh)) {
+                snprintf(spd, sizeof(spd), "%.0fkm/h", static_cast<double>(s.speed_kmh));
+            } else if (!isnan(s.derived_speed_kmh)) {
+                snprintf(spd, sizeof(spd), "~%.0fkm/h", static_cast<double>(s.derived_speed_kmh));
+            }
+            char dist[16] = "-";
+            if (!isnan(s.distance_km)) {
+                snprintf(dist, sizeof(dist), "%.1fkm", static_cast<double>(s.distance_km));
+            }
+            snprintf(line, sizeof(line), "%.4f,%.4f %s %s %s %lus",
+                     static_cast<double>(s.lat), static_cast<double>(s.lon),
+                     dist, spd, s.via_rf ? "RF" : "IS",
+                     static_cast<unsigned long>(s.age_s));
+            if (!appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                                    s.name, line)) {
+                break;
+            }
+        }
+        return;
+    }
+
     // Physical/user PTT target:
     //   AT+PTT_MODE=NRL     -> existing NRL uplink behavior
     //   AT+PTT_MODE=ESPNOW  -> the same PTT/SQL gate broadcasts over ESP-NOW
@@ -1558,66 +2030,143 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         const long fb_mbps = Display_FramebufferBenchMBps();
         snprintf(line, sizeof(line), "framebuffer memset %ld MB/s", fb_mbps);
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "MEM", line);
+        // Flash-through-cache read: what CJK glyph lookups actually pay during
+        // rendering. 256 KB sequential mmap read defeats the cache, so this
+        // times the cache-miss fill path, which the RAM benches above never see.
+        uint8_t *dst = static_cast<uint8_t *>(heap_caps_malloc(kBench, MALLOC_CAP_SPIRAM));
+        const esp_partition_t *app_part = esp_partition_find_first(
+            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, nullptr);
+        if (dst != nullptr && app_part != nullptr) {
+            const void *mapped = nullptr;
+            esp_partition_mmap_handle_t map_handle = 0;
+            if (esp_partition_mmap(app_part, 0, kBench, ESP_PARTITION_MMAP_DATA,
+                                   &mapped, &map_handle) == ESP_OK) {
+                const int64_t t0 = esp_timer_get_time();
+                for (int i = 0; i < 4; ++i) {
+                    memcpy(dst, mapped, kBench);
+                }
+                const int64_t us = esp_timer_get_time() - t0;
+                esp_partition_munmap(map_handle);
+                snprintf(line, sizeof(line), "flash read %lld MB/s",
+                         static_cast<long long>(4LL * kBench * 1000000LL / us / 1048576LL));
+                appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "MEM", line);
+            }
+        }
+        if (dst != nullptr) {
+            heap_caps_free(dst);
+        }
         return;
     }
 
-    // Per-task CPU usage over a 500 ms window, top consumers first:
-    // AT+TOP=1. Debug tool for hunting UI-latency / CPU-contention issues.
+    // On-demand breakdown of the work executed by nrl_main_loop. Profiling is
+    // normally off, so its timestamp calls cannot affect regular CPU usage.
+    // Start it, wait several seconds, then query the averages and maxima:
+    //   AT+LOOP=1
+    //   AT+LOOP=?
+    //   AT+LOOP=0
+    if (stringEqualsIgnoreCase(command.command, "LOOP")) {
+        if (!is_query) {
+            bool enabled = false;
+            if (!parseBoolValue(command.value, &enabled)) {
+                appendKeyValueLine(result->payload, sizeof(result->payload),
+                                   &result->payload_size, "ERR", "LOOP");
+                return;
+            }
+            MAIN_LOOP_PROFILE_SetEnabled(enabled);
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "LOOP", enabled ? "STARTED" : "STOPPED");
+            return;
+        }
+
+        static constexpr const char *kStageNames[MAIN_LOOP_STAGE_COUNT] = {
+            "status", "wifi_portal", "ble", "bt", "serial", "display",
+        };
+        MainLoopProfileSnapshot snapshot{};
+        MAIN_LOOP_PROFILE_Get(&snapshot);
+        char line[80];
+        snprintf(line, sizeof(line), "%s loops=%lu",
+                 snapshot.enabled ? "RUNNING" : "STOPPED",
+                 static_cast<unsigned long>(snapshot.loops));
+        appendKeyValueLine(result->payload, sizeof(result->payload),
+                           &result->payload_size, "LOOP", line);
+        for (size_t i = 0; i < MAIN_LOOP_STAGE_COUNT; ++i) {
+            const uint64_t average_us = snapshot.loops != 0u
+                ? snapshot.total_us[i] / snapshot.loops : 0u;
+            snprintf(line, sizeof(line), "%-11s avg=%llu us max=%lu us",
+                     kStageNames[i], static_cast<unsigned long long>(average_us),
+                     static_cast<unsigned long>(snapshot.max_us[i]));
+            appendKeyValueLine(result->payload, sizeof(result->payload),
+                               &result->payload_size, "LOOP", line);
+        }
+        return;
+    }
+
+    // Per-task CPU usage, top consumers first. The first request reports the
+    // cumulative average since boot; later requests report the interval since
+    // the previous request. This is intentionally non-blocking: TOP is handled
+    // by nrl_main_loop, so sleeping here would hide that task's own CPU usage.
     if (stringEqualsIgnoreCase(command.command, "TOP")) {
 #if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
         constexpr UBaseType_t kMaxTasks = 40;
-        // Static: two snapshots are ~4 KB, too big for this task's stack.
-        static TaskStatus_t s_snap_a[kMaxTasks];
-        static TaskStatus_t s_snap_b[kMaxTasks];
-        const UBaseType_t n_a = uxTaskGetSystemState(s_snap_a, kMaxTasks, nullptr);
-        const int64_t t0 = esp_timer_get_time();
-        vTaskDelay(pdMS_TO_TICKS(500));
-        const UBaseType_t n_b = uxTaskGetSystemState(s_snap_b, kMaxTasks, nullptr);
-        const uint32_t window_us = static_cast<uint32_t>(esp_timer_get_time() - t0);
-
         struct Row {
             const TaskStatus_t *task;
             uint32_t delta;
         };
-        Row rows[kMaxTasks];
+        // Keep snapshots and sort rows out of the 6 KB nrl_main_loop stack.
+        static TaskStatus_t s_previous[kMaxTasks];
+        static TaskStatus_t s_current[kMaxTasks];
+        static Row s_rows[kMaxTasks];
+        static UBaseType_t s_previous_n = 0u;
+        static uint32_t s_previous_us = 0u;
+        const uint32_t now_us = static_cast<uint32_t>(esp_timer_get_time());
+        const UBaseType_t current_n = uxTaskGetSystemState(s_current, kMaxTasks, nullptr);
+        const uint32_t window_us = s_previous_us == 0u ? now_us : now_us - s_previous_us;
+
         UBaseType_t rows_n = 0;
-        for (UBaseType_t i = 0; i < n_b; ++i) {
+        for (UBaseType_t i = 0; i < current_n; ++i) {
             uint32_t before = 0;
-            for (UBaseType_t j = 0; j < n_a; ++j) {
-                if (s_snap_a[j].xHandle == s_snap_b[i].xHandle) {
-                    before = s_snap_a[j].ulRunTimeCounter;
+            bool found = s_previous_n == 0u;
+            for (UBaseType_t j = 0; j < s_previous_n; ++j) {
+                if (s_previous[j].xHandle == s_current[i].xHandle) {
+                    before = s_previous[j].ulRunTimeCounter;
+                    found = true;
                     break;
                 }
             }
-            rows[rows_n].task = &s_snap_b[i];
-            rows[rows_n].delta = s_snap_b[i].ulRunTimeCounter - before;
+            // A task created after the previous sample has no valid interval
+            // baseline; start reporting it on the next request.
+            s_rows[rows_n].task = &s_current[i];
+            s_rows[rows_n].delta = found ? s_current[i].ulRunTimeCounter - before : 0u;
             ++rows_n;
         }
         for (UBaseType_t i = 1; i < rows_n; ++i) { // insertion sort, desc
-            const Row key = rows[i];
+            const Row key = s_rows[i];
             UBaseType_t j = i;
-            while (j > 0 && rows[j - 1].delta < key.delta) {
-                rows[j] = rows[j - 1];
+            while (j > 0 && s_rows[j - 1].delta < key.delta) {
+                s_rows[j] = s_rows[j - 1];
                 --j;
             }
-            rows[j] = key;
+            s_rows[j] = key;
         }
         const UBaseType_t show = (rows_n < 12u) ? rows_n : 12u;
         for (UBaseType_t i = 0; i < show; ++i) {
             // Percent of ONE core over the window, one decimal.
             const unsigned pct10 = (window_us != 0u)
-                ? static_cast<unsigned>(static_cast<uint64_t>(rows[i].delta) * 1000u / window_us)
+                ? static_cast<unsigned>(static_cast<uint64_t>(s_rows[i].delta) * 1000u / window_us)
                 : 0u;
             char core_ch = '*';
 #if defined(CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID) && CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID
-            if (rows[i].task->xCoreID == 0) core_ch = '0';
-            else if (rows[i].task->xCoreID == 1) core_ch = '1';
+            if (s_rows[i].task->xCoreID == 0) core_ch = '0';
+            else if (s_rows[i].task->xCoreID == 1) core_ch = '1';
 #endif
             char line[64];
             snprintf(line, sizeof(line), "%-16s c%c %u.%u%%",
-                     rows[i].task->pcTaskName, core_ch, pct10 / 10u, pct10 % 10u);
+                     s_rows[i].task->pcTaskName, core_ch, pct10 / 10u, pct10 % 10u);
             appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "TOP", line);
         }
+        memcpy(s_previous, s_current, current_n * sizeof(s_current[0]));
+        s_previous_n = current_n;
+        s_previous_us = now_us;
         return;
 #else
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "TOP");
@@ -1682,14 +2231,134 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     }
 #endif
 
-    if (stringEqualsIgnoreCase(command.command, "SCI")) {
+    if (stringEqualsIgnoreCase(command.command, "UART0")) {
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           is_query ? "UART0" : "ERR",
+                           is_query ? "RESERVED(LOG/AT)" : "UART0_RESERVED");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "UART1_ENABLE") ||
+        stringEqualsIgnoreCase(command.command, "UART2_ENABLE")) {
+        const bool uart1 = stringEqualsIgnoreCase(command.command, "UART1_ENABLE");
+        const char *reply_key = uart1 ? "UART1_ENABLE" : "UART2_ENABLE";
+        SerialPortConfig old_config{};
+        SERIAL_PORT_CONFIG_Get(&old_config);
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               reply_key,
+                               (uart1 ? old_config.uart1_enabled : old_config.uart2_enabled)
+                                   ? "ON" : "OFF");
+            return;
+        }
+        bool enabled = false;
+        SerialPortConfig updated = old_config;
+        bool ok = parseBoolValue(command.value, &enabled);
+        if (ok) {
+            if (uart1) updated.uart1_enabled = enabled;
+            else updated.uart2_enabled = enabled;
+        }
+        ok = ok && SERIAL_PORT_CONFIG_Set(&updated, true) &&
+             (uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+        if (!ok) {
+            (void)SERIAL_PORT_CONFIG_Set(&old_config, true);
+            (void)(uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", reply_key);
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           reply_key, enabled ? "ON" : "OFF");
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "UART1_IO") ||
+        stringEqualsIgnoreCase(command.command, "UART2_IO")) {
+        const bool uart1 = stringEqualsIgnoreCase(command.command, "UART1_IO");
+        SerialPortConfig old_config{};
+        SERIAL_PORT_CONFIG_Get(&old_config);
+        if (is_query) {
+            char text[24];
+            snprintf(text, sizeof(text), "%d,%d",
+                     uart1 ? old_config.uart1_rx_pin : old_config.uart2_rx_pin,
+                     uart1 ? old_config.uart1_tx_pin : old_config.uart2_tx_pin);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               uart1 ? "UART1_IO" : "UART2_IO", text);
+            return;
+        }
+        int rx = -1, tx = -1;
+        SerialPortConfig updated = old_config;
+        bool ok = parseIoConfigValue(command.value, &rx, &tx);
+        if (ok && uart1) {
+            updated.uart1_rx_pin = rx;
+            updated.uart1_tx_pin = tx;
+        } else if (ok) {
+            updated.uart2_rx_pin = rx;
+            updated.uart2_tx_pin = tx;
+        }
+        ok = ok && SERIAL_PORT_CONFIG_Set(&updated, true) &&
+             (uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+        if (!ok) {
+            (void)SERIAL_PORT_CONFIG_Set(&old_config, true);
+            (void)(uart1 ? SCI_SERIAL_ReloadPins() : GPS_SERIAL_ReloadConfig());
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", uart1 ? "UART1_IO" : "UART2_IO");
+            return;
+        }
+        char text[24];
+        snprintf(text, sizeof(text), "%d,%d", rx, tx);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           uart1 ? "UART1_IO" : "UART2_IO", text);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "UART2")) {
+        SerialPortConfig old_config{};
+        SERIAL_PORT_CONFIG_Get(&old_config);
+        char uart_config[32];
+        if (is_query) {
+            snprintf(uart_config, sizeof(uart_config), "%lu,%u,%c,%u",
+                     static_cast<unsigned long>(old_config.uart2_baud),
+                     static_cast<unsigned>(old_config.uart2_data_bits),
+                     old_config.uart2_parity,
+                     static_cast<unsigned>(old_config.uart2_stop_bits));
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "UART2", uart_config);
+            return;
+        }
+        SerialPortConfig updated = old_config;
+        bool ok = parseSciConfigValue(command.value, &updated.uart2_baud,
+                                      &updated.uart2_data_bits, &updated.uart2_parity,
+                                      &updated.uart2_stop_bits) &&
+                  SERIAL_PORT_CONFIG_Set(&updated, true) && GPS_SERIAL_ReloadConfig();
+        if (!ok) {
+            (void)SERIAL_PORT_CONFIG_Set(&old_config, true);
+            (void)GPS_SERIAL_ReloadConfig();
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "ERR", "UART2");
+            return;
+        }
+        snprintf(uart_config, sizeof(uart_config), "%lu,%u,%c,%u",
+                 static_cast<unsigned long>(updated.uart2_baud),
+                 static_cast<unsigned>(updated.uart2_data_bits), updated.uart2_parity,
+                 static_cast<unsigned>(updated.uart2_stop_bits));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "UART2", uart_config);
+        return;
+    }
+
+    if (stringEqualsIgnoreCase(command.command, "SCI") ||
+        stringEqualsIgnoreCase(command.command, "UART1")) {
+        const bool sci_alias = stringEqualsIgnoreCase(command.command, "SCI");
+        const char *reply_key = sci_alias ? "SCI" : "UART1";
         char sci_config[32];
         if (is_query) {
             formatSciConfig(config->sci, sci_config, sizeof(sci_config));
-            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SCI", sci_config);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, reply_key, sci_config);
             return;
         }
 
+        const SciSerialConfig old_sci = config->sci;
         uint32_t baud = 0u;
         uint8_t data_bits = 0u;
         char parity = '\0';
@@ -1697,13 +2366,17 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         if (!parseSciConfigValue(command.value, &baud, &data_bits, &parity, &stop_bits) ||
             !EXTERNAL_RADIO_SetSciConfig(baud, data_bits, parity, stop_bits, true) ||
             !SCI_SERIAL_ApplyConfig(baud, data_bits, parity, stop_bits)) {
-            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "SCI");
+            (void)EXTERNAL_RADIO_SetSciConfig(old_sci.baud, old_sci.data_bits,
+                                              old_sci.parity, old_sci.stop_bits, true);
+            (void)SCI_SERIAL_ApplyConfig(old_sci.baud, old_sci.data_bits,
+                                         old_sci.parity, old_sci.stop_bits);
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", reply_key);
             return;
         }
 
         const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
         formatSciConfig(updated->sci, sci_config, sizeof(sci_config));
-        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SCI", sci_config);
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, reply_key, sci_config);
         return;
     }
 

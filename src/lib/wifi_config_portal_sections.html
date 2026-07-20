@@ -77,6 +77,32 @@
     </form>
   </div>
 </section>{{BATTERY_SECTION}}
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="serialPorts">Serial Ports</h2><span class="hint" data-i18n="uart0Reserved">UART0 is reserved for system logs and serial AT commands.</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_serial">
+      <div class="subgrid">
+        <div class="group-label span-2" data-i18n="uart1Sci">UART1 - SCI transparent serial</div>
+        <div class="span-2"><input type="hidden" name="uart1_enabled_present" value="1"><label class="hint"><input type="checkbox" name="uart1_enabled" value="1" {{UART1_ENABLED_CHECKED}}><span data-i18n="serialEnabled">Enable this serial port</span></label></div>
+        <div><label data-i18n="serialRxPin">RX GPIO</label><input name="uart1_rx_pin" value="{{UART1_RX_PIN}}"></div>
+        <div><label data-i18n="serialTxPin">TX GPIO</label><input name="uart1_tx_pin" value="{{UART1_TX_PIN}}"></div>
+        <div><label data-i18n="serialBaud">Baud rate</label><input name="uart1_baud" value="{{UART1_BAUD}}"></div>
+        <div><label data-i18n="serialDataBits">Data bits</label><input name="uart1_data_bits" value="{{UART1_DATA_BITS}}"></div>
+        <div><label data-i18n="serialParity">Parity (N/E/O)</label><input name="uart1_parity" value="{{UART1_PARITY}}" maxlength="1"></div>
+        <div><label data-i18n="serialStopBits">Stop bits</label><input name="uart1_stop_bits" value="{{UART1_STOP_BITS}}"></div>
+        <div class="group-label span-2" data-i18n="uart2Gps">UART2 - GPS NMEA</div>
+        <div class="span-2"><input type="hidden" name="uart2_enabled_present" value="1"><label class="hint"><input type="checkbox" name="uart2_enabled" value="1" {{UART2_ENABLED_CHECKED}}><span data-i18n="serialEnabled">Enable this serial port</span></label></div>
+        <div><label data-i18n="serialRxPin">RX GPIO</label><input name="uart2_rx_pin" value="{{UART2_RX_PIN}}"></div>
+        <div><label data-i18n="serialTxPin">TX GPIO</label><input name="uart2_tx_pin" value="{{UART2_TX_PIN}}"></div>
+        <div><label data-i18n="serialBaud">Baud rate</label><input name="uart2_baud" value="{{UART2_BAUD}}"></div>
+        <div><label data-i18n="serialDataBits">Data bits</label><input name="uart2_data_bits" value="{{UART2_DATA_BITS}}"></div>
+        <div><label data-i18n="serialParity">Parity (N/E/O)</label><input name="uart2_parity" value="{{UART2_PARITY}}" maxlength="1"></div>
+        <div><label data-i18n="serialStopBits">Stop bits</label><input name="uart2_stop_bits" value="{{UART2_STOP_BITS}}"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+    </form>
+  </div>
+</section>
 <!-- @endtemplate -->
 
 <!-- @template BATTERY_SECTION -->
@@ -235,6 +261,7 @@
     </form>
   </div>
 </section>
+{{MUSIC_BROWSER}}
 <section class="panel">
   <div class="section-head"><h2 data-i18n="aiAssistant">AI Assistant (xiaozhi)</h2><span class="hint mono">{{AI_STATUS}}</span></div>
   <div class="grid">
@@ -246,6 +273,139 @@
       </div>
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
     </form>
+  </div>
+</section>
+<!-- @endtemplate -->
+
+<!-- @template APRS_TAB -->
+<a class="{{APRS_ACTIVE}}" href="/aprs" data-i18n="aprsConfig">APRS</a>
+<!-- @endtemplate -->
+
+<!-- @template SIGNALING_TAB -->
+<a class="{{SIGNALING_ACTIVE}}" href="/signaling" data-i18n="signalingConfig">Signaling</a>
+<!-- @endtemplate -->
+
+<!-- @template SIGNALING_SECTIONS -->
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="ctcssRoutes">CTCSS / PL Receive</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="ctcss_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="ctcss_rx_mic" value="1" onchange="submitSwitch(this)" {{CTCSS_RX_MIC_CHECKED}}><span data-i18n="ctcssDecodeMicText">Detect the standard CTCSS frequency from microphone/radio audio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeNrl">Decode from NRL</label><input type="hidden" name="ctcss_rx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="ctcss_rx_nrl" value="1" onchange="submitSwitch(this)" {{CTCSS_RX_NRL_CHECKED}}><span data-i18n="ctcssDecodeNrlText">Detect the standard CTCSS frequency from NRL downlink audio</span></label></form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="mdcRoutes">MDC1200 Routes</h2><span class="hint mono">{{SIGNALING_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="mdc_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="mdc_rx_mic" value="1" onchange="submitSwitch(this)" {{MDC_RX_MIC_CHECKED}}><span data-i18n="mdcDecodeMicText">Decode MDC1200 received from microphone/radio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeNrl">Decode from NRL</label><input type="hidden" name="mdc_rx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="mdc_rx_nrl" value="1" onchange="submitSwitch(this)" {{MDC_RX_NRL_CHECKED}}><span data-i18n="mdcDecodeNrlText">Decode MDC1200 in network downlink audio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="encodeNrl">Send to NRL</label><input type="hidden" name="mdc_tx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="mdc_tx_nrl" value="1" onchange="submitSwitch(this)" {{MDC_TX_NRL_CHECKED}}><span data-i18n="mdcEncodeNrlText">Append MDC1200 after local PTT release</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="encodeSpeaker">Send to speaker</label><input type="hidden" name="mdc_tx_speaker_present" value="1"><label class="hint"><input type="checkbox" name="mdc_tx_speaker" value="1" onchange="submitSwitch(this)" {{MDC_TX_SPEAKER_CHECKED}}><span data-i18n="mdcEncodeSpeakerText">Append MDC1200 after NRL voice ends</span></label></form>
+    <form class="item-form span-2" method="post" action="/save_signaling">
+      <div class="grid compact-grid"><div><label data-i18n="mdcOpcode">Opcode (hex)</label><input class="mono" name="mdc_opcode" value="{{MDC_OPCODE}}" maxlength="4"></div><div><label data-i18n="mdcArgument">Argument (hex)</label><input class="mono" name="mdc_argument" value="{{MDC_ARGUMENT}}" maxlength="4"></div><div><label data-i18n="mdcUnitId">MDC ID (4 hex digits)</label><input class="mono" name="mdc_unit_id" value="{{MDC_UNIT_ID}}" maxlength="6"></div></div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="dtmfRoutes">DTMF Routes</h2></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeMic">Decode from MIC</label><input type="hidden" name="dtmf_rx_mic_present" value="1"><label class="hint"><input type="checkbox" name="dtmf_rx_mic" value="1" onchange="submitSwitch(this)" {{DTMF_RX_MIC_CHECKED}}><span data-i18n="dtmfDecodeMicText">Decode DTMF received from microphone/radio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="decodeNrl">Decode from NRL</label><input type="hidden" name="dtmf_rx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="dtmf_rx_nrl" value="1" onchange="submitSwitch(this)" {{DTMF_RX_NRL_CHECKED}}><span data-i18n="dtmfDecodeNrlText">Decode DTMF in network downlink audio</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="encodeNrl">Send to NRL</label><input type="hidden" name="dtmf_tx_nrl_present" value="1"><label class="hint"><input type="checkbox" name="dtmf_tx_nrl" value="1" onchange="submitSwitch(this)" {{DTMF_TX_NRL_CHECKED}}><span data-i18n="dtmfEncodeNrlText">Append DTMF after local PTT release</span></label></form>
+    <form class="item-form" method="post" action="/save_signaling"><label data-i18n="encodeSpeaker">Send to speaker</label><input type="hidden" name="dtmf_tx_speaker_present" value="1"><label class="hint"><input type="checkbox" name="dtmf_tx_speaker" value="1" onchange="submitSwitch(this)" {{DTMF_TX_SPEAKER_CHECKED}}><span data-i18n="dtmfEncodeSpeakerText">Append DTMF after NRL voice ends</span></label></form>
+    <form class="item-form span-2" method="post" action="/save_signaling"><label data-i18n="dtmfId">DTMF ID</label><input class="mono" name="dtmf_digits" value="{{DTMF_DIGITS}}" maxlength="16" placeholder="123#"><div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button></div></form>
+  </div>
+</section>
+<!-- @endtemplate -->
+
+<!-- @template APRS_SECTIONS -->
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aprsSwitches">APRS</h2><span class="hint mono">{{APRS_STATUS}}</span></div>
+  <div class="grid">
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsEnabled">APRS</label><input type="hidden" name="aprs_present" value="1"><label class="hint"><input type="checkbox" name="aprs_enabled" value="1" onchange="submitSwitch(this)" {{APRS_ENABLED_CHECKED}}><span data-i18n="aprsEnabledText">Master switch for the APRS transceiver</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsNet">APRS-IS Network</label><input type="hidden" name="aprs_net_present" value="1"><label class="hint"><input type="checkbox" name="aprs_net" value="1" onchange="submitSwitch(this)" {{APRS_NET_CHECKED}}><span data-i18n="aprsNetText">Send beacons to and hear stations from the APRS-IS server</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsRfTx">RF Transmit (AFSK)</label><input type="hidden" name="aprs_tx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_tx" value="1" onchange="submitSwitch(this)" {{APRS_TX_CHECKED}}><span data-i18n="aprsRfTxText">Modulate beacons out through the speaker into the radio</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsRfRx">RF Receive (AFSK)</label><input type="hidden" name="aprs_rx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_rx" value="1" onchange="submitSwitch(this)" {{APRS_RX_CHECKED}}><span data-i18n="aprsRfRxText">Demodulate APRS audio heard on the microphone/radio</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsAuto">Auto interval</label><input type="hidden" name="aprs_auto_present" value="1"><label class="hint"><input type="checkbox" name="aprs_auto" value="1" onchange="submitSwitch(this)" {{APRS_AUTO_CHECKED}}><span data-i18n="aprsAutoText">With a GPS fix, beacon faster while moving (30 s at 60+ km/h, or after a 300 m jump); the interval below is the ceiling when parked</span></label></form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aprsSettings">APRS Settings</h2><span class="hint" data-i18n="aprsSettingsHint">Callsign comes from the Radio page; passcode is derived automatically.</span></div>
+  <div class="grid">
+    <form class="item-form span-2" method="post" action="/save_aprs">
+      <div class="subgrid">
+        <div><label data-i18n="aprsServer">APRS-IS Server</label><input name="aprs_server" value="{{APRS_SERVER_HOST}}" placeholder="asia.aprs2.net"></div>
+        <div><label data-i18n="aprsPort">Port</label><input name="aprs_port" value="{{APRS_SERVER_PORT}}"></div>
+        <div><label data-i18n="aprsSsid">SSID (0-15)</label><input name="aprs_ssid" value="{{APRS_SSID}}"></div>
+        <div><label data-i18n="aprsSymbol">Symbol (table+code)</label><input name="aprs_symbol" value="{{APRS_SYMBOL}}" maxlength="2" placeholder="/I"></div>
+        <div><label data-i18n="aprsInterval">Beacon interval (s, 10-3600)</label><input name="aprs_interval" value="{{APRS_INTERVAL}}"></div>
+        <div><label data-i18n="aprsPath">RF path</label><input name="aprs_path" value="{{APRS_PATH}}" placeholder="WIDE1-1"></div>
+        <div><label data-i18n="aprsLat">Default latitude (WGS-84 ddmm.mmmm; N added automatically)</label><input name="aprs_lat" value="{{APRS_LAT}}" placeholder="3153.3100"></div>
+        <div><label data-i18n="aprsLon">Default longitude (WGS-84 dddmm.mmmm; E added automatically)</label><input name="aprs_lon" value="{{APRS_LON}}" placeholder="11848.8460"></div>
+        <div class="span-2"><label data-i18n="aprsComment">Beacon comment</label><input name="aprs_comment" value="{{APRS_COMMENT}}" maxlength="40"></div>
+      </div>
+      <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="btn-small" type="button" onclick="submitFormAction(this, 'aprs_beacon')" data-i18n="aprsBeaconNow">Beacon now</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2 data-i18n="aprsStations">Stations Heard</h2><span class="hint mono" id="aprs-stn-status"></span></div>
+  <div class="grid">
+    <div class="span-2" style="overflow-x:auto">
+      <table class="mono" id="aprs-stn-table" style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="text-align:left">
+          <th data-i18n="aprsStnCall">Callsign</th><th data-i18n="aprsStnPos">Lat / Lon</th><th data-i18n="aprsStnAlt">Alt</th>
+          <th data-i18n="aprsStnDist">Distance</th><th data-i18n="aprsStnSpeed">Speed</th><th data-i18n="aprsStnCourse">Course</th>
+          <th>via</th><th data-i18n="aprsStnAge">Heard</th><th data-i18n="aprsStnComment">Comment</th>
+        </tr></thead>
+        <tbody id="aprs-stn-body"><tr><td colspan="9" class="hint" data-i18n="aprsStnEmpty">No stations heard yet.</td></tr></tbody>
+      </table>
+    </div>
+    <script>
+    (function(){
+      function fmt(v, suffix, digits) {
+        if (v === null || v === undefined || Number.isNaN(v)) return '-';
+        return v.toFixed(digits === undefined ? 0 : digits) + (suffix || '');
+      }
+      function refresh() {
+        fetch('/aprs/stations').then(function(r){ return r.json(); }).then(function(data){
+          var body = document.getElementById('aprs-stn-body');
+          if (!body || !data || !Array.isArray(data.stations)) return;
+          var st = document.getElementById('aprs-stn-status');
+          if (st) st.textContent = (data.net ? 'APRS-IS: OK' : 'APRS-IS: --') +
+                                   '  GPS: ' + (data.gps ? 'FIX' : '--') +
+                                   '  RX: ' + data.rx + '  TX: ' + data.tx;
+          body.innerHTML = '';
+          if (!data.stations.length) {
+            var tr = document.createElement('tr');
+            var td = document.createElement('td');
+            td.colSpan = 9; td.className = 'hint';
+            td.textContent = 'No stations heard yet.';
+            tr.appendChild(td); body.appendChild(tr);
+            return;
+          }
+          data.stations.forEach(function(s){
+            var tr = document.createElement('tr');
+            function cell(text) { var td = document.createElement('td'); td.textContent = text; tr.appendChild(td); }
+            cell(s.name);
+            cell(fmt(s.lat, '', 4) + ', ' + fmt(s.lon, '', 4));
+            cell(fmt(s.alt, ' m'));
+            cell(fmt(s.dist, ' km', 1));
+            var spd = (s.spd !== null && s.spd !== undefined) ? fmt(s.spd, ' km/h')
+                    : ((s.dspd !== null && s.dspd !== undefined) ? '~' + fmt(s.dspd, ' km/h') : '-');
+            cell(spd);
+            cell(s.crs ? (s.crs % 360) + '°' : '-');
+            cell(s.rf ? 'RF' : 'IS');
+            cell(s.age < 60 ? s.age + 's' : Math.floor(s.age / 60) + 'm');
+            cell(s.cmt || '');
+            body.appendChild(tr);
+          });
+        }).catch(function(){});
+      }
+      refresh();
+      setInterval(refresh, 5000);
+    })();
+    </script>
   </div>
 </section>
 <!-- @endtemplate -->

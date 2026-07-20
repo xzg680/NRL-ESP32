@@ -289,10 +289,8 @@ extern "C" const char *STORAGE_UsbMountPoint(void)
 #endif // NRL_HAS_USB_HOST
 
 // ---------------------------------------------------------------------------
-// SMB network share backend (libsmb2 via services/smb_vfs, S31 only)
+// SMB network share backend (libsmb2 via services/smb_vfs, all boards)
 // ---------------------------------------------------------------------------
-#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
-
 #include "lib/nrl_net_compat.h"
 #include "services/config_notify.h"
 #include "services/music_playlist.h"
@@ -468,54 +466,6 @@ extern "C" bool STORAGE_SmbGetConfig(char *server, const size_t server_size,
     return s_smb_server[0] != '\0' && s_smb_share[0] != '\0';
 }
 
-#else // !S31
-
-extern "C" bool STORAGE_SmbConfigure(const char *, const char *, const char *, const char *)
-{
-    return false;
-}
-
-extern "C" void STORAGE_SmbClear(void) {}
-
-extern "C" bool STORAGE_SmbMounted(void)
-{
-    return false;
-}
-
-extern "C" const char *STORAGE_SmbMountPoint(void)
-{
-    return nullptr;
-}
-
-extern "C" void STORAGE_SmbDescribe(char *out, const size_t out_size)
-{
-    if (out != nullptr && out_size > 0u) {
-        snprintf(out, out_size, "(unsupported)");
-    }
-}
-
-extern "C" bool STORAGE_SmbGetConfig(char *server, const size_t server_size,
-                                     char *share, const size_t share_size,
-                                     char *user, const size_t user_size,
-                                     char *password, const size_t password_size)
-{
-    if (server != nullptr && server_size > 0u) {
-        server[0] = '\0';
-    }
-    if (share != nullptr && share_size > 0u) {
-        share[0] = '\0';
-    }
-    if (user != nullptr && user_size > 0u) {
-        user[0] = '\0';
-    }
-    if (password != nullptr && password_size > 0u) {
-        password[0] = '\0';
-    }
-    return false;
-}
-
-#endif // S31
-
 // ---------------------------------------------------------------------------
 
 extern "C" bool STORAGE_Init(void)
@@ -532,18 +482,11 @@ extern "C" bool STORAGE_Init(void)
         storage_start_usb_host();
     }
 #endif
-#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
     // SMB share configured earlier: mount once either network is up.
     static bool smb_started = false;
     if (!smb_started && smb_load_config()) {
         smb_started = true;
         smb_start_mount_task();
     }
-#endif
-#if (defined(NRL_HAS_SDCARD) && NRL_HAS_SDCARD) || (defined(NRL_HAS_USB_HOST) && NRL_HAS_USB_HOST)
-    return STORAGE_SdMounted() || STORAGE_UsbMounted();
-#else
-    ESP_LOGD(TAG, "no removable storage on this board");
-    return false;
-#endif
+    return STORAGE_SdMounted() || STORAGE_UsbMounted() || STORAGE_SmbMounted();
 }

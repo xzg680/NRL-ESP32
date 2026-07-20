@@ -11,6 +11,7 @@
 #include "../../lib/nrl_wifi.h"
 #include "../../media/cover_decoder.h"
 #include "../../services/ai_assistant.h"
+#include "../../services/aprs_service.h"
 #include "../../services/config_notify.h"
 #include "../../services/display_notice.h"
 #include "../../services/espnow_link.h"
@@ -20,6 +21,7 @@
 #include "../../services/ota_service.h"
 #include "../../services/radio_favorites.h"
 #include "../../services/storage_service.h"
+#include "../../services/signaling_service.h"
 #include "../../services/video_call.h"
 #include "external_radio.h"
 #include "fonts/lv_font_cjk.h"
@@ -28,6 +30,7 @@
 #include "status_io.h"
 
 #include <dirent.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,10 +98,14 @@ enum class Page : uint8_t {
     Nanny,
     Smb,
     EspNow,
+    Ctcss,
+    Mdc,
+    Dtmf,
     Video,
     Game,
     Ai,
     About,
+    Aprs,
 };
 
 enum class Action : intptr_t {
@@ -151,6 +158,12 @@ enum class Action : intptr_t {
     OtaOlder,
     OtaNewer,
     InstallOta,
+    Aprs,
+    Ctcss,
+    Mdc,
+    Dtmf,
+    SaveMdc,
+    SaveDtmf,
 };
 
 enum class AudioControl : intptr_t {
@@ -163,6 +176,16 @@ enum class AudioControl : intptr_t {
     EspNowRx,
     EspNowOpus,
     OpusCodec,
+    CtcssRxMic,
+    CtcssRxNrl,
+    MdcRxMic,
+    MdcRxNrl,
+    MdcTxNrl,
+    MdcTxSpeaker,
+    DtmfRxMic,
+    DtmfRxNrl,
+    DtmfTxNrl,
+    DtmfTxSpeaker,
 };
 
 bool s_ready = false;
@@ -204,6 +227,7 @@ lv_obj_t *s_lbl_detail = nullptr;
 lv_obj_t *s_lbl_form_status = nullptr;
 lv_obj_t *s_notice_panel = nullptr;
 lv_obj_t *s_lbl_notice = nullptr;
+lv_obj_t *s_bar_notice_progress = nullptr;
 char s_shown_notice[96] = {};
 uint32_t s_notice_sequence = 0u;
 uint32_t s_notice_color = 0xFFFFFFFFu;
@@ -214,6 +238,10 @@ lv_obj_t *s_ta_callsign = nullptr;
 lv_obj_t *s_ta_callsign_ssid = nullptr;
 lv_obj_t *s_ta_server_host = nullptr;
 lv_obj_t *s_ta_server_port = nullptr;
+lv_obj_t *s_ta_mdc_unit_id = nullptr;
+lv_obj_t *s_ta_mdc_opcode = nullptr;
+lv_obj_t *s_ta_mdc_argument = nullptr;
+lv_obj_t *s_ta_dtmf_digits = nullptr;
 lv_obj_t *s_slider_speaker = nullptr;
 lv_obj_t *s_slider_mic = nullptr;
 lv_obj_t *s_lbl_speaker_value = nullptr;
@@ -255,6 +283,9 @@ int32_t s_big_invalidate_w = 0;
 int32_t s_big_invalidate_h = 0;
 int32_t s_big_invalidate_x = 0;
 int32_t s_big_invalidate_y = 0;
+uint32_t s_big_invalidate_count = 0u; // per 10 s digest window
+uint32_t s_invalidate_count = 0u;     // every invalidation, per digest window
+uint64_t s_invalidate_px = 0u;        // summed invalidated area, per window
 
 // Media / nanny config pages (SMB share, beacon scheduler, net radio).
 lv_obj_t *s_ta_smb_server = nullptr;
@@ -329,6 +360,15 @@ lv_obj_t *s_btn_ai_talk_label = nullptr;
 lv_obj_t *s_btn_ai_talk = nullptr;
 lv_obj_t *s_sw_ai = nullptr;
 char s_shown_ai_status[224] = {};
+
+// APRS page: master switch, status line and the stations-heard list.
+lv_obj_t *s_sw_aprs = nullptr;
+lv_obj_t *s_lbl_aprs_status = nullptr;
+lv_obj_t *s_lbl_aprs_list = nullptr;
+char s_shown_aprs_status[128] = {};
+char s_shown_aprs_list[704] = {};
+uint32_t s_aprs_seen_revision = 0u;
+uint32_t s_aprs_last_refresh_ms = 0u;
 
 lv_obj_t *s_img_video = nullptr;
 lv_obj_t *s_lbl_video_status = nullptr;
@@ -511,6 +551,8 @@ void invalidateProbe(lv_event_t *e)
     }
     const int32_t w = a->x2 - a->x1 + 1;
     const int32_t h = a->y2 - a->y1 + 1;
+    ++s_invalidate_count;
+    s_invalidate_px += static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
     if (static_cast<int64_t>(w) * h >= (static_cast<int64_t>(kWidth) * kHeight) / 4) {
         s_big_invalidate_w = w;
         s_big_invalidate_h = h;
@@ -534,6 +576,7 @@ void flushLvglTelemetry()
     }
     if (s_big_invalidate_pending) {
         s_big_invalidate_pending = false;
+        ++s_big_invalidate_count;
         static uint32_t s_last_log_ms = 0u;
         const uint32_t now = millis();
         if (now - s_last_log_ms > 1000u) {
@@ -845,6 +888,8 @@ const TrEntry kTr[] = {
     // Shared
     {"OTA CHECKING...", "正在检查 OTA..."},
     {"OTA DOWNLOADING...", "正在下载 OTA 固件..."},
+    {"OTA UPDATING...", "正在升级 OTA 固件..."},
+    {"OTA Updating %u%%", "OTA 升级 %u%%"},
     {"OTA UPLOADING...", "正在上传 OTA 固件..."},
     {"OTA CHECK FAILED", "OTA 检查失败"},
     {"OTA UPDATE FAILED", "OTA 升级失败"},
@@ -858,6 +903,7 @@ const TrEntry kTr[] = {
     {"Checking for updates...", "正在检查更新..."},
     {"Update check requested...", "已请求检查更新..."},
     {"Installing firmware...", "正在安装固件..."},
+    {"Installing firmware... %u%%", "正在安装固件... %u%%"},
     {"Firmware install requested...", "已请求安装固件..."},
     {"OTA server URL saved.", "OTA 服务器地址已保存。"},
     {"Save failed: out of memory.", "保存失败：内存不足。"},
@@ -961,6 +1007,8 @@ void languageEvent(lv_event_t *event);
 void updateAudioValueLabels();
 void refresh();
 void refreshOtaPage();
+void refreshAprsPage();
+void buildAprs();
 void rebuildCurrentPage();
 void stopVideoView();
 lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w);
@@ -1199,6 +1247,7 @@ void clearScreen()
     s_lbl_form_status = nullptr;
     s_notice_panel = nullptr;
     s_lbl_notice = nullptr;
+    s_bar_notice_progress = nullptr;
     s_shown_notice[0] = '\0';
     s_notice_sequence = 0u;
     s_notice_color = kColorUnset;
@@ -1212,6 +1261,10 @@ void clearScreen()
     s_ta_callsign_ssid = nullptr;
     s_ta_server_host = nullptr;
     s_ta_server_port = nullptr;
+    s_ta_mdc_unit_id = nullptr;
+    s_ta_mdc_opcode = nullptr;
+    s_ta_mdc_argument = nullptr;
+    s_ta_dtmf_digits = nullptr;
     s_slider_speaker = nullptr;
     s_slider_mic = nullptr;
     s_lbl_speaker_value = nullptr;
@@ -1280,6 +1333,11 @@ void clearScreen()
     s_btn_ai_talk = nullptr;
     s_sw_ai = nullptr;
     s_shown_ai_status[0] = '\0';
+    s_sw_aprs = nullptr;
+    s_lbl_aprs_status = nullptr;
+    s_lbl_aprs_list = nullptr;
+    s_shown_aprs_status[0] = '\0';
+    s_shown_aprs_list[0] = '\0';
 }
 
 void topBar(lv_obj_t *scr)
@@ -1459,11 +1517,12 @@ void buildApps()
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
     // ESP-NOW lives under Config (it's a settings entry, not an app).
-    button(scr, 24, 84, 138, 120, "Music", Action::Music);
-    button(scr, 182, 84, 138, 120, "Radio", Action::Radio);
-    button(scr, 340, 84, 138, 120, "Video", Action::Video);
-    button(scr, 498, 84, 138, 120, "AI", Action::Ai);
-    button(scr, 656, 84, 118, 120, "Tetris", Action::Game);
+    button(scr, 24, 84, 118, 120, "Music", Action::Music);
+    button(scr, 150, 84, 118, 120, "Radio", Action::Radio);
+    button(scr, 276, 84, 118, 120, "Video", Action::Video);
+    button(scr, 402, 84, 118, 120, "AI", Action::Ai);
+    button(scr, 528, 84, 118, 120, "Tetris", Action::Game);
+    button(scr, 654, 84, 120, 120, "APRS", Action::Aprs);
 
     // Shared playback target: one setting for everything the music player
     // outputs (music / nanny beacon / net radio), so it lives here next to
@@ -1500,17 +1559,21 @@ void buildConfig()
     s_page = Page::Config;
     lv_obj_t *scr = lv_screen_active();
     topBar(scr);
-    // Settings entries only; the feature/app entries live on the Apps page.
-    // Two uniform 4-slot rows (the 8th slot is reserved for a future entry);
-    // the Back button keeps its usual size/place.
-    button(scr, 24, 84, 176, 120, "WiFi", Action::Wifi);
-    button(scr, 216, 84, 176, 120, "NRL", Action::Station);
-    button(scr, 408, 84, 176, 120, "Audio", Action::Audio);
-    button(scr, 600, 84, 174, 120, "BT", Action::Bt);
-    button(scr, 24, 220, 176, 120, "Nanny", Action::Nanny);
-    button(scr, 216, 220, 176, 120, "NAS", Action::Smb);
-    button(scr, 408, 220, 176, 120, "ESP-NOW", Action::EspNow);
-    button(scr, 600, 220, 174, 120, "About", Action::About);
+    // Keep every settings entry visible in a uniform 4 x 3 grid. The compact
+    // 80 px rows leave the fixed bottom bar exclusively for Back and Language.
+    button(scr, 24, 84, 180, 80, "WiFi", Action::Wifi);
+    button(scr, 214, 84, 180, 80, "NRL", Action::Station);
+    button(scr, 404, 84, 180, 80, "Audio", Action::Audio);
+    button(scr, 594, 84, 180, 80, "BT", Action::Bt);
+
+    button(scr, 24, 174, 180, 80, "CTCSS", Action::Ctcss);
+    button(scr, 214, 174, 180, 80, "MDC", Action::Mdc);
+    button(scr, 404, 174, 180, 80, "DTMF", Action::Dtmf);
+    button(scr, 594, 174, 180, 80, "ESP-NOW", Action::EspNow);
+
+    button(scr, 24, 264, 180, 80, "Nanny", Action::Nanny);
+    button(scr, 214, 264, 180, 80, "NAS", Action::Smb);
+    button(scr, 404, 264, 180, 80, "About", Action::About);
     button(scr, 24, 372, 230, 76, "Back", Action::Home);
 
     // Language selector: switching persists and rebuilds this page in place.
@@ -2042,6 +2105,96 @@ void buildEspNow()
                       "gains a dedicated ESP-NOW PTT below the network PTT.");
 
     button(scr, 24, 372, 230, 76, "Back", Action::Config);
+}
+
+void buildCtcss()
+{
+    clearScreen();
+    s_page = Page::Ctcss;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 78, 750, 274);
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+
+    switchControl(box, 0, 4, "CTCSS MIC RX", cfg.ctcss_rx_mic, AudioControl::CtcssRxMic);
+    switchControl(box, 370, 4, "CTCSS NRL RX", cfg.ctcss_rx_nrl, AudioControl::CtcssRxNrl);
+    fieldLabel(box, 0, 78, "Detected standard PL tone");
+    char result[96] = {};
+    SIGNALING_GetLastResult(result, sizeof(result));
+    s_lbl_form_status = label(box, &lv_font_montserrat_20, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 0, 112);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_label_set_text(s_lbl_form_status,
+                      strncmp(result, "CTCSS ", 6u) == 0 ? result : "No CTCSS tone detected yet.");
+    button(scr, 24, 372, 230, 76, "Back", Action::Config);
+}
+
+void buildMdc()
+{
+    clearScreen();
+    s_page = Page::Mdc;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 78, 750, 274);
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+
+    switchControl(box, 0, 4, "MDC MIC RX", cfg.mdc_rx_mic, AudioControl::MdcRxMic);
+    switchControl(box, 370, 4, "MDC NRL RX", cfg.mdc_rx_nrl, AudioControl::MdcRxNrl);
+    switchControl(box, 0, 58, "MDC NRL TX", cfg.mdc_tx_nrl, AudioControl::MdcTxNrl);
+    switchControl(box, 370, 58, "MDC SPK TX", cfg.mdc_tx_speaker, AudioControl::MdcTxSpeaker);
+
+    char unit_id[5] = {};
+    char opcode[3] = {};
+    char argument[3] = {};
+    snprintf(unit_id, sizeof(unit_id), "%04X", cfg.mdc_unit_id);
+    snprintf(opcode, sizeof(opcode), "%02X", cfg.mdc_opcode);
+    snprintf(argument, sizeof(argument), "%02X", cfg.mdc_argument);
+    fieldLabel(box, 0, 116, "Unit ID (HEX)");
+    s_ta_mdc_unit_id = textArea(box, 0, 140, 190, "0001", unit_id, 4, false,
+                                "0123456789ABCDEFabcdef", false);
+    fieldLabel(box, 220, 116, "Opcode (HEX)");
+    s_ta_mdc_opcode = textArea(box, 220, 140, 150, "01", opcode, 2, false,
+                               "0123456789ABCDEFabcdef", false);
+    fieldLabel(box, 400, 116, "Argument (HEX)");
+    s_ta_mdc_argument = textArea(box, 400, 140, 150, "00", argument, 2, false,
+                                 "0123456789ABCDEFabcdef", false);
+
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 0, 204);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_label_set_text(s_lbl_form_status, "Edit MDC packet fields, then save.");
+    button(scr, 24, 372, 230, 76, "Back", Action::Config);
+    button(scr, 544, 372, 230, 76, "Save", Action::SaveMdc);
+    createKeyboard(scr);
+}
+
+void buildDtmf()
+{
+    clearScreen();
+    s_page = Page::Dtmf;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+    lv_obj_t *box = panel(scr, 24, 78, 750, 274);
+    SignalingConfig cfg{};
+    SIGNALING_GetConfig(&cfg);
+
+    switchControl(box, 0, 4, "DTMF MIC RX", cfg.dtmf_rx_mic, AudioControl::DtmfRxMic);
+    switchControl(box, 370, 4, "DTMF NRL RX", cfg.dtmf_rx_nrl, AudioControl::DtmfRxNrl);
+    switchControl(box, 0, 58, "DTMF NRL TX", cfg.dtmf_tx_nrl, AudioControl::DtmfTxNrl);
+    switchControl(box, 370, 58, "DTMF SPK TX", cfg.dtmf_tx_speaker, AudioControl::DtmfTxSpeaker);
+
+    fieldLabel(box, 0, 116, "DTMF ID (1-16 digits)");
+    s_ta_dtmf_digits = textArea(box, 0, 140, 550, "123#", cfg.dtmf_digits, 16, false,
+                                "0123456789ABCDabcd*#", false);
+    s_lbl_form_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 0, 204);
+    lv_obj_set_width(s_lbl_form_status, 710);
+    lv_label_set_text(s_lbl_form_status, "Edit the DTMF ID, then save.");
+    button(scr, 24, 372, 230, 76, "Back", Action::Config);
+    button(scr, 544, 372, 230, 76, "Save", Action::SaveDtmf);
+    createKeyboard(scr);
 }
 
 const char *musicBasename(const char *path)
@@ -2999,6 +3152,146 @@ void buildAi()
     refreshAiPage();
 }
 
+// ---- APRS -------------------------------------------------------------------
+
+void aprsEnableEvent(lv_event_t *event)
+{
+    lv_obj_t *sw = lv_event_get_target_obj(event);
+    const bool want = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (!APRS_SERVICE_SetEnabled(want)) {
+        if (want) {
+            lv_obj_remove_state(sw, LV_STATE_CHECKED);
+        }
+        formStatus("APRS service unavailable.", kColorBad);
+    } else {
+        formStatus(want ? "APRS enabled." : "APRS disabled.", kColorSub);
+    }
+    s_aprs_last_refresh_ms = 0u;
+    s_last_refresh_ms = 0;
+}
+
+// Rebuild the status line and station list only when a packet arrived or the
+// age column needs a tick -- Aprs is a FULL-render surface, so every
+// lv_label_set_text here repaints the whole screen.
+void refreshAprsPage()
+{
+    if (s_lbl_aprs_status == nullptr || s_lbl_aprs_list == nullptr) {
+        return;
+    }
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    const uint32_t revision = APRS_SERVICE_GetStationRevision();
+    if (revision == s_aprs_seen_revision && s_aprs_last_refresh_ms != 0u &&
+        now - s_aprs_last_refresh_ms < 3000u) {
+        return;
+    }
+    s_aprs_seen_revision = revision;
+    s_aprs_last_refresh_ms = now;
+
+    AprsConfig cfg;
+    APRS_SERVICE_GetConfig(&cfg);
+    char status[sizeof(s_shown_aprs_status)];
+    snprintf(status, sizeof(status),
+             "%s | IS %s | RF tx %s rx %s | GPS %s | rx %lu tx %lu",
+             cfg.enabled ? "ON" : "OFF",
+             APRS_SERVICE_IsNetConnected() ? "linked" : "--",
+             cfg.rf_tx_enabled ? "on" : "off",
+             cfg.rf_rx_enabled ? "on" : "off",
+             APRS_SERVICE_GpsHasFix() ? "fix" : "--",
+             static_cast<unsigned long>(APRS_SERVICE_GetRxCount()),
+             static_cast<unsigned long>(APRS_SERVICE_GetTxCount()));
+    if (strcmp(status, s_shown_aprs_status) != 0) {
+        snprintf(s_shown_aprs_status, sizeof(s_shown_aprs_status), "%s", status);
+        lv_label_set_text(s_lbl_aprs_status, status);
+    }
+
+    AprsStationInfo stations[8];
+    const size_t count = APRS_SERVICE_GetStations(stations, 8);
+    char list[sizeof(s_shown_aprs_list)];
+    size_t used = 0;
+    if (count == 0u) {
+        snprintf(list, sizeof(list), "%s",
+                 cfg.enabled ? "No stations heard yet." : "APRS is off.");
+    } else {
+        list[0] = '\0';
+        for (size_t i = 0; i < count && used < sizeof(list) - 8u; ++i) {
+            const AprsStationInfo &s = stations[i];
+            char dist[16] = "--";
+            if (!isnan(s.distance_km)) {
+                snprintf(dist, sizeof(dist), "%.1fkm", static_cast<double>(s.distance_km));
+            }
+            char spd[20] = "";
+            if (!isnan(s.speed_kmh)) {
+                snprintf(spd, sizeof(spd), "  %.0fkm/h", static_cast<double>(s.speed_kmh));
+            } else if (!isnan(s.derived_speed_kmh)) {
+                snprintf(spd, sizeof(spd), "  ~%.0fkm/h",
+                         static_cast<double>(s.derived_speed_kmh));
+            }
+            char alt[16] = "";
+            if (!isnan(s.altitude_m)) {
+                snprintf(alt, sizeof(alt), "  %.0fm", static_cast<double>(s.altitude_m));
+            }
+            char age[12];
+            if (s.age_s < 60u) {
+                snprintf(age, sizeof(age), "%lus", static_cast<unsigned long>(s.age_s));
+            } else {
+                snprintf(age, sizeof(age), "%lum", static_cast<unsigned long>(s.age_s / 60u));
+            }
+            used += static_cast<size_t>(snprintf(
+                list + used, sizeof(list) - used, "%s%-9s  %8.4f %9.4f%s%s  %s  %s  %.20s",
+                i > 0 ? "\n" : "", s.name, static_cast<double>(s.lat),
+                static_cast<double>(s.lon), alt, spd, s.via_rf ? "RF" : "IS", age,
+                s.comment));
+        }
+    }
+    if (strcmp(list, s_shown_aprs_list) != 0) {
+        snprintf(s_shown_aprs_list, sizeof(s_shown_aprs_list), "%s", list);
+        lv_label_set_text(s_lbl_aprs_list, list);
+    }
+}
+
+void buildAprs()
+{
+    clearScreen();
+    s_page = Page::Aprs;
+    lv_obj_t *scr = lv_screen_active();
+    topBar(scr);
+
+    lv_obj_t *box = panel(scr, 24, 82, 750, 270);
+    fieldLabel(box, 0, 0, "APRS Transceiver");
+    s_sw_aprs = lv_switch_create(box);
+    lv_obj_set_pos(s_sw_aprs, 640, -6);
+    lv_obj_set_size(s_sw_aprs, 64, 34);
+    if (APRS_SERVICE_IsEnabled()) {
+        lv_obj_add_state(s_sw_aprs, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(s_sw_aprs, aprsEnableEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_lbl_aprs_status = label(box, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_aprs_status, 0, 30);
+    lv_obj_set_width(s_lbl_aprs_status, 710);
+    lv_label_set_long_mode(s_lbl_aprs_status, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_aprs_status, "--");
+
+    s_lbl_aprs_list = label(box, &lv_font_montserrat_16, kColorText);
+    lv_obj_set_pos(s_lbl_aprs_list, 0, 60);
+    lv_obj_set_width(s_lbl_aprs_list, 710);
+    lv_label_set_long_mode(s_lbl_aprs_list, LV_LABEL_LONG_CLIP);
+    lv_label_set_text(s_lbl_aprs_list, "--");
+
+    s_lbl_form_status = label(scr, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_lbl_form_status, 280, 396);
+    lv_obj_set_width(s_lbl_form_status, 494);
+    lv_label_set_long_mode(s_lbl_form_status, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_lbl_form_status,
+                      tr("Server / position / RF switches: web portal APRS page or AT+APRS."));
+
+    button(scr, 24, 372, 230, 76, "Back", Action::Apps);
+
+    s_aprs_seen_revision = APRS_SERVICE_GetStationRevision() - 1u; // force fill
+    s_aprs_last_refresh_ms = 0u;
+    refreshAprsPage();
+}
+
 // ---- Games ------------------------------------------------------------------
 
 void gameExit()
@@ -3307,6 +3600,46 @@ void saveAudioForm()
         lv_label_set_text(s_lbl_form_status, ok ? "Audio config saved." : "Save failed.");
         lv_obj_set_style_text_color(s_lbl_form_status, lv_color_hex(ok ? kColorGood : kColorBad), 0);
     }
+}
+
+bool parseHexField(lv_obj_t *textarea, unsigned long max_value, unsigned long *value)
+{
+    if (textarea == nullptr || value == nullptr) return false;
+    const char *text = lv_textarea_get_text(textarea);
+    if (text == nullptr || text[0] == '\0') return false;
+    char *end = nullptr;
+    const unsigned long parsed = strtoul(text, &end, 16);
+    if (end == text || *end != '\0' || parsed > max_value) return false;
+    *value = parsed;
+    return true;
+}
+
+void saveMdcForm()
+{
+    unsigned long unit_id = 0u;
+    unsigned long opcode = 0u;
+    unsigned long argument = 0u;
+    const bool fields_ok = parseHexField(s_ta_mdc_unit_id, 0xFFFFul, &unit_id) &&
+                           parseHexField(s_ta_mdc_opcode, 0xFFul, &opcode) &&
+                           parseHexField(s_ta_mdc_argument, 0xFFul, &argument);
+    const bool ok = fields_ok &&
+        SIGNALING_SetMdcPacket(static_cast<uint8_t>(opcode),
+                               static_cast<uint8_t>(argument),
+                               static_cast<uint16_t>(unit_id));
+    formStatus(ok ? "MDC packet saved; audio cache rebuilt."
+                  : (fields_ok ? "MDC save failed: PSRAM cache allocation failed."
+                               : "MDC save failed: enter valid hexadecimal values."),
+               ok ? kColorGood : kColorBad);
+}
+
+void saveDtmfForm()
+{
+    const char *digits = s_ta_dtmf_digits != nullptr
+        ? lv_textarea_get_text(s_ta_dtmf_digits) : "";
+    const bool ok = SIGNALING_SetDtmfDigits(digits);
+    formStatus(ok ? "DTMF ID saved; audio cache rebuilt."
+                  : "DTMF save failed: enter 1-16 valid DTMF digits.",
+               ok ? kColorGood : kColorBad);
 }
 
 void resetAudioForm()
@@ -3761,10 +4094,16 @@ void action(lv_event_t *event)
         case Action::Smb: buildSmb(); break;
         case Action::Apps: buildApps(); break;
         case Action::EspNow: buildEspNow(); break;
+        case Action::Ctcss: buildCtcss(); break;
+        case Action::Mdc: buildMdc(); break;
+        case Action::Dtmf: buildDtmf(); break;
+        case Action::SaveMdc: saveMdcForm(); break;
+        case Action::SaveDtmf: saveDtmfForm(); break;
         case Action::Video: buildVideo(); break;
         case Action::VideoTx: videoTxToggle(); break;
         case Action::Game: buildGame(); break;
         case Action::Ai: buildAi(); break;
+        case Action::Aprs: buildAprs(); break;
         case Action::About: buildAbout(); break;
         case Action::SaveOtaUrl: (void)saveOtaUrl(true); break;
         case Action::CheckOta: checkOtaFromPage(); break;
@@ -3916,6 +4255,43 @@ void audioSwitchEvent(lv_event_t *event)
                 formStatus("Opus enable failed (out of memory); staying on G.711.", kColorBad);
             }
             return;
+        case AudioControl::CtcssRxMic:
+        case AudioControl::CtcssRxNrl: {
+            const SignalingRoute route = id == AudioControl::CtcssRxMic
+                                             ? SIGNAL_ROUTE_RX_MIC : SIGNAL_ROUTE_RX_NRL;
+            const bool ok = SIGNALING_SetCtcssRoute(route, checked);
+            if (!ok) {
+                if (checked) lv_obj_remove_state(obj, LV_STATE_CHECKED);
+                else lv_obj_add_state(obj, LV_STATE_CHECKED);
+            }
+            formStatus(ok ? (checked ? "CTCSS detection enabled."
+                                       : "CTCSS detection disabled.")
+                          : "CTCSS setting save failed.",
+                       ok ? kColorGood : kColorBad);
+            return;
+        }
+        case AudioControl::MdcRxMic:
+        case AudioControl::MdcRxNrl:
+        case AudioControl::MdcTxNrl:
+        case AudioControl::MdcTxSpeaker:
+        case AudioControl::DtmfRxMic:
+        case AudioControl::DtmfRxNrl:
+        case AudioControl::DtmfTxNrl:
+        case AudioControl::DtmfTxSpeaker: {
+            const bool mdc = id >= AudioControl::MdcRxMic && id <= AudioControl::MdcTxSpeaker;
+            const int base = mdc ? static_cast<int>(AudioControl::MdcRxMic)
+                                 : static_cast<int>(AudioControl::DtmfRxMic);
+            const SignalingRoute route = static_cast<SignalingRoute>(static_cast<int>(id) - base);
+            const bool ok = mdc ? SIGNALING_SetMdcRoute(route, checked)
+                                : SIGNALING_SetDtmfRoute(route, checked);
+            if (!ok) {
+                if (checked) lv_obj_remove_state(obj, LV_STATE_CHECKED);
+                else lv_obj_add_state(obj, LV_STATE_CHECKED);
+            }
+            formStatus(ok ? (checked ? "Signaling route enabled." : "Signaling route disabled.")
+                          : "Signaling setting save failed.", ok ? kColorGood : kColorBad);
+            return;
+        }
         default:
             break;
     }
@@ -4396,7 +4772,12 @@ void refreshOtaPage()
     char status_text[sizeof(s_shown_ota_status)] = {};
     uint32_t status_color = kColorSub;
     if (ota->updating) {
-        snprintf(status_text, sizeof(status_text), "%s", tr("Installing firmware..."));
+        if (ota->update_size > 0u) {
+            snprintf(status_text, sizeof(status_text), tr("Installing firmware... %u%%"),
+                     static_cast<unsigned>(ota->update_percent));
+        } else {
+            snprintf(status_text, sizeof(status_text), "%s", tr("Installing firmware..."));
+        }
         status_color = kColorWarn;
     } else if (ota->checking) {
         snprintf(status_text, sizeof(status_text), "%s", tr("Checking for updates..."));
@@ -4463,18 +4844,50 @@ void refreshDisplayNotice()
         lv_obj_set_width(s_lbl_notice, 526);
         lv_obj_set_style_text_align(s_lbl_notice, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_center(s_lbl_notice);
+        s_bar_notice_progress = lv_bar_create(s_notice_panel);
+        lv_obj_set_size(s_bar_notice_progress, 526, 10);
+        lv_bar_set_range(s_bar_notice_progress, 0, 100);
+        lv_bar_set_value(s_bar_notice_progress, 0, LV_ANIM_OFF);
+        lv_obj_set_style_radius(s_bar_notice_progress, 5, LV_PART_MAIN);
+        lv_obj_set_style_radius(s_bar_notice_progress, 5, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(s_bar_notice_progress, lv_color_hex(kColorBorder), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_bar_notice_progress, lv_color_hex(color), LV_PART_INDICATOR);
+        lv_obj_add_flag(s_bar_notice_progress, LV_OBJ_FLAG_HIDDEN);
         s_notice_sequence = 0u;
         s_notice_color = kColorUnset;
     }
     lv_obj_remove_flag(s_notice_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_notice_panel);
+    if (notice.progress_percent >= 0 && s_bar_notice_progress != nullptr) {
+        lv_obj_set_size(s_notice_panel, 560, 78);
+        lv_obj_set_pos(s_lbl_notice, 0, -2);
+        lv_obj_set_pos(s_bar_notice_progress, 0, 30);
+        lv_bar_set_value(s_bar_notice_progress, notice.progress_percent, LV_ANIM_OFF);
+        lv_obj_remove_flag(s_bar_notice_progress, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_set_size(s_notice_panel, 560, 52);
+        lv_obj_center(s_lbl_notice);
+        if (s_bar_notice_progress != nullptr) {
+            lv_obj_add_flag(s_bar_notice_progress, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     if (s_notice_sequence != notice.sequence) {
         s_notice_sequence = notice.sequence;
-        setLabel(s_lbl_notice, s_shown_notice, sizeof(s_shown_notice), tr(notice.text));
+        if (notice.progress_percent >= 0) {
+            char progress_text[40] = {};
+            snprintf(progress_text, sizeof(progress_text), tr("OTA Updating %u%%"),
+                     static_cast<unsigned>(notice.progress_percent));
+            setLabel(s_lbl_notice, s_shown_notice, sizeof(s_shown_notice), progress_text);
+        } else {
+            setLabel(s_lbl_notice, s_shown_notice, sizeof(s_shown_notice), tr(notice.text));
+        }
     }
     if (s_notice_color != color) {
         setLabelColor(s_lbl_notice, s_notice_color, color);
         lv_obj_set_style_border_color(s_notice_panel, lv_color_hex(color), 0);
+        if (s_bar_notice_progress != nullptr) {
+            lv_obj_set_style_bg_color(s_bar_notice_progress, lv_color_hex(color), LV_PART_INDICATOR);
+        }
     }
 }
 
@@ -4490,6 +4903,7 @@ void refresh()
                                s_page == Page::Audio || s_page == Page::Apps ||
                                s_page == Page::Nanny || s_page == Page::Smb ||
                                s_page == Page::Radio || s_page == Page::EspNow ||
+                               s_page == Page::Ctcss || s_page == Page::Mdc || s_page == Page::Dtmf ||
                                s_page == Page::Ai || s_page == Page::About;
         const bool keyboard_open =
             s_keyboard != nullptr && !lv_obj_has_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
@@ -4530,6 +4944,9 @@ void refresh()
     if (s_page == Page::About) {
         refreshOtaPage();
     }
+    if (s_page == Page::Aprs) {
+        refreshAprsPage();
+    }
 }
 
 // Rebuild the active page so a font-engine switch takes effect on every
@@ -4549,10 +4966,14 @@ void rebuildCurrentPage()
         case Page::Smb: buildSmb(); break;
         case Page::Apps: buildApps(); break;
         case Page::EspNow: buildEspNow(); break;
+        case Page::Ctcss: buildCtcss(); break;
+        case Page::Mdc: buildMdc(); break;
+        case Page::Dtmf: buildDtmf(); break;
         case Page::Video: buildVideo(); break;
         case Page::Game: buildGame(); break;
         case Page::Ai: buildAi(); break;
         case Page::About: buildAbout(); break;
+        case Page::Aprs: buildAprs(); break;
     }
     s_last_refresh_ms = 0;
 }
@@ -4665,7 +5086,8 @@ extern "C" void Display_Poll(void)
     vTaskGetInfo(nullptr, &lv_ts0, pdFALSE, eRunning);
 #endif
     lv_timer_handler();
-    const uint32_t lv_ms = static_cast<uint32_t>((esp_timer_get_time() - lv_t0) / 1000);
+    const uint32_t lv_us = static_cast<uint32_t>(esp_timer_get_time() - lv_t0);
+    const uint32_t lv_ms = lv_us / 1000u;
     flushLvglTelemetry();
 #if defined(CONFIG_FREERTOS_USE_TRACE_FACILITY) && CONFIG_FREERTOS_USE_TRACE_FACILITY
     // CPU time this task actually consumed inside the handler: splits
@@ -4680,6 +5102,14 @@ extern "C" void Display_Poll(void)
     static uint32_t s_lv_max_ms = 0;
     static uint32_t s_lv_slow_count = 0;
     static uint32_t s_lv_report_ms = 0;
+    static uint64_t s_lv_sum_us = 0;
+    static uint32_t s_lv_cpu_sum_ms = 0;
+    static uint32_t s_lv_pass_count = 0; // handler passes that did real work
+    s_lv_sum_us += lv_us;
+    s_lv_cpu_sum_ms += lv_cpu_ms;
+    if (lv_ms > 5u) {
+        ++s_lv_pass_count;
+    }
     if (lv_ms > s_lv_max_ms) {
         s_lv_max_ms = lv_ms;
     }
@@ -4693,13 +5123,28 @@ extern "C" void Display_Poll(void)
     }
     if (now - s_lv_report_ms >= 10000u) {
         s_lv_report_ms = now;
+        // Quiet unless something was actually slow. The full field set stays:
+        // during the RTCRAM-stack hunt the per-window cpu/inv/invkpx split was
+        // what separated "renders too often" from "each render too expensive".
         if (s_lv_max_ms > 60u) {
-            ESP_LOGI(TAG, "lv 10s digest: max=%lums slow(>60ms)=%lu",
-                     static_cast<unsigned long>(s_lv_max_ms),
-                     static_cast<unsigned long>(s_lv_slow_count));
+        ESP_LOGI(TAG, "lv 10s digest: wall=%lums cpu=%lums passes>5ms=%lu max=%lums slow(>60ms)=%lu biginv=%lu inv=%lu invkpx=%lu",
+                 static_cast<unsigned long>(s_lv_sum_us / 1000u),
+                 static_cast<unsigned long>(s_lv_cpu_sum_ms),
+                 static_cast<unsigned long>(s_lv_pass_count),
+                 static_cast<unsigned long>(s_lv_max_ms),
+                 static_cast<unsigned long>(s_lv_slow_count),
+                 static_cast<unsigned long>(s_big_invalidate_count),
+                 static_cast<unsigned long>(s_invalidate_count),
+                 static_cast<unsigned long>(s_invalidate_px / 1000u));
         }
+        s_lv_sum_us = 0;
+        s_lv_cpu_sum_ms = 0;
+        s_lv_pass_count = 0;
         s_lv_max_ms = 0;
         s_lv_slow_count = 0;
+        s_big_invalidate_count = 0;
+        s_invalidate_count = 0;
+        s_invalidate_px = 0;
     }
 }
 

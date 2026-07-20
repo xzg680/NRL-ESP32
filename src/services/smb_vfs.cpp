@@ -1,10 +1,8 @@
 #include "services/smb_vfs.h"
 
-#include "driver/board_pins.h"
-
-#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
-
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <esp_vfs.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -13,17 +11,42 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <sys/poll.h>
 #include <sys/stat.h>
 
 #include <smb2/smb2.h>
+#include <smb2/smb2-errors.h>
 #include <smb2/libsmb2.h>
+#include <smb2/libsmb2-raw.h>
+
+#include <atomic>
+// libsmb2 exposes its raw command API publicly but keeps these two helpers in
+// its internal header. Declare only the required symbols here; including the
+// complete private header collides with the S31 toolchain's MIN macro.
+extern "C" int smb2_decode_fileidfulldirectoryinformation(
+    struct smb2_context *, struct smb2_fileidfulldirectoryinformation *,
+    struct smb2_iovec *);
+extern "C" void smb2_timeout_pdus(struct smb2_context *);
 
 static const char *TAG = "SMBVFS";
 
 namespace {
 
 constexpr int kMaxOpenFiles = 8;
-constexpr int kSmbTimeoutSeconds = 10;
+// Directory enumeration on a NAS can legitimately take longer than file
+// reads, especially for large music folders. Ten seconds caused libsmb2 to
+// abort QUERY_DIRECTORY and made the browser drop the selected folder.
+constexpr int kSmbTimeoutSeconds = 30;
+constexpr size_t kMaxCachedDirEntries = 640;
+// A 4 KB reply is accepted reliably by slower NAS implementations and still
+// avoids libsmb2's very chatty 512-byte ESP default.
+constexpr uint32_t kDirectoryReplyBytes = 4096;
+constexpr size_t kMaxDirectoryQueries = 64;
+// Large directories can take more than five seconds before the first result.
+// Memory remains bounded by kMaxCachedDirEntries, so waiting longer no longer
+// risks the TLS/Web heap exhaustion caused by high-level smb2_opendir().
+constexpr int kDirectoryCommandTimeoutMs = 15000;
+constexpr int kDirectoryScanBudgetMs = 30000;
 constexpr size_t kMaxSmbText = 128;
 
 // libsmb2's context is not thread safe; the player task, playlist scan and
@@ -33,6 +56,7 @@ static struct smb2_context *s_smb = nullptr;
 static struct smb2fh *s_files[kMaxOpenFiles] = {};
 static int s_open_dirs = 0;
 static bool s_smb_bad = false;
+static std::atomic_bool s_cancel_directory_scan{false};
 static char s_server[kMaxSmbText] = {};
 static char s_share[kMaxSmbText] = {};
 static char s_user[kMaxSmbText] = {};
@@ -40,9 +64,26 @@ static char s_password[kMaxSmbText] = {};
 
 // DIR wrapper handed back through the VFS: newlib requires the first member
 // to be the plain DIR the VFS layer fills in.
+struct CachedDirEntry {
+    char name[sizeof(((struct dirent *)nullptr)->d_name)];
+    uint8_t type;
+};
+
 struct SmbVfsDir {
     DIR dir;
-    struct smb2dir *smb_dir;
+    CachedDirEntry *entries;
+    size_t count;
+    size_t index;
+    bool truncated;
+    bool context_stale;
+    bool remote_open;
+    bool first_query;
+    bool finished;
+    size_t query_count;
+    size_t empty_replies;
+    int64_t scan_started_us;
+    smb2_file_id file_id;
+    char path[256];
     struct dirent entry;
 };
 
@@ -295,73 +336,340 @@ static int vfs_stat(void *, const char *path, struct stat *st)
     return 0;
 }
 
+struct RawCommandResult {
+    volatile bool done;
+    int status;
+    smb2_file_id file_id;
+    SmbVfsDir *dir;
+};
+
+static bool raw_wait_for_reply(RawCommandResult *result, const int timeout_ms)
+{
+    const int64_t deadline_us = esp_timer_get_time() +
+                                static_cast<int64_t>(timeout_ms) * 1000LL;
+    while (!result->done) {
+        if (s_cancel_directory_scan.load()) {
+            return false;
+        }
+        const int64_t remaining_us = deadline_us - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            return false;
+        }
+        struct pollfd pfd = {};
+        pfd.fd = smb2_get_fd(s_smb);
+        pfd.events = smb2_which_events(s_smb);
+        const int poll_ms = static_cast<int>(remaining_us / 1000LL) < 1000
+                                ? static_cast<int>(remaining_us / 1000LL)
+                                : 1000;
+        const int polled = poll(&pfd, 1, poll_ms > 0 ? poll_ms : 1);
+        if (polled < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        smb2_timeout_pdus(s_smb);
+        if (pfd.revents != 0 && smb2_service(s_smb, pfd.revents) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void raw_create_cb(struct smb2_context *, const int status,
+                          void *command_data, void *private_data)
+{
+    RawCommandResult *result = static_cast<RawCommandResult *>(private_data);
+    result->status = status;
+    if (status == SMB2_STATUS_SUCCESS && command_data != nullptr) {
+        const auto *reply = static_cast<const smb2_create_reply *>(command_data);
+        memcpy(result->file_id, reply->file_id, SMB2_FD_SIZE);
+    }
+    result->done = true;
+}
+
+static void raw_close_cb(struct smb2_context *, const int status,
+                         void *, void *private_data)
+{
+    RawCommandResult *result = static_cast<RawCommandResult *>(private_data);
+    result->status = status;
+    result->done = true;
+}
+
+static void raw_query_dir_cb(struct smb2_context *smb2, const int status,
+                             void *command_data, void *private_data)
+{
+    RawCommandResult *result = static_cast<RawCommandResult *>(private_data);
+    result->status = status;
+    if (status == SMB2_STATUS_SUCCESS && command_data != nullptr && result->dir != nullptr) {
+        const auto *reply = static_cast<const smb2_query_directory_reply *>(command_data);
+        uint32_t offset = 0;
+        while (offset < reply->output_buffer_length &&
+               result->dir->count < kMaxCachedDirEntries) {
+            smb2_iovec vec = {};
+            vec.buf = reply->output_buffer + offset;
+            vec.len = reply->output_buffer_length - offset;
+            smb2_fileidfulldirectoryinformation info = {};
+            if (smb2_decode_fileidfulldirectoryinformation(smb2, &info, &vec) < 0 ||
+                info.name == nullptr) {
+                result->status = -ENOMEM;
+                break;
+            }
+
+            if (strcmp(info.name, ".") != 0 && strcmp(info.name, "..") != 0) {
+                CachedDirEntry &entry = result->dir->entries[result->dir->count];
+                const int written = snprintf(entry.name, sizeof(entry.name), "%s", info.name);
+                if (written >= 0 && static_cast<size_t>(written) < sizeof(entry.name)) {
+                    entry.type = (info.file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY)
+                                     ? DT_DIR : DT_REG;
+                    ++result->dir->count;
+                }
+            }
+            free(const_cast<char *>(info.name));
+
+            if (info.next_entry_offset == 0u) {
+                break;
+            }
+            if (info.next_entry_offset >= vec.len) {
+                result->status = -EIO;
+                break;
+            }
+            offset += info.next_entry_offset;
+        }
+        if (result->dir->count >= kMaxCachedDirEntries) {
+            result->dir->truncated = true;
+        }
+    }
+    result->done = true;
+}
+
+static bool raw_open_directory(const char *path, smb2_file_id file_id)
+{
+    smb2_create_request request = {};
+    request.requested_oplock_level = SMB2_OPLOCK_LEVEL_NONE;
+    request.impersonation_level = SMB2_IMPERSONATION_IMPERSONATION;
+    request.desired_access = SMB2_FILE_LIST_DIRECTORY | SMB2_FILE_READ_ATTRIBUTES;
+    request.file_attributes = SMB2_FILE_ATTRIBUTE_DIRECTORY;
+    request.share_access = SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE;
+    request.create_disposition = SMB2_FILE_OPEN;
+    request.create_options = SMB2_FILE_DIRECTORY_FILE;
+    request.name = smb_path(path);
+
+    RawCommandResult result = {};
+    smb2_pdu *pdu = smb2_cmd_create_async(s_smb, &request, raw_create_cb, &result);
+    if (pdu == nullptr) {
+        return false;
+    }
+    smb2_queue_pdu(s_smb, pdu);
+    if (!raw_wait_for_reply(&result, kDirectoryCommandTimeoutMs) ||
+        result.status != SMB2_STATUS_SUCCESS) {
+        return false;
+    }
+    memcpy(file_id, result.file_id, SMB2_FD_SIZE);
+    return true;
+}
+
+static bool raw_close_directory(const smb2_file_id file_id)
+{
+    smb2_close_request request = {};
+    memcpy(request.file_id, file_id, SMB2_FD_SIZE);
+    RawCommandResult result = {};
+    smb2_pdu *pdu = smb2_cmd_close_async(s_smb, &request, raw_close_cb, &result);
+    if (pdu == nullptr) {
+        return false;
+    }
+    smb2_queue_pdu(s_smb, pdu);
+    return raw_wait_for_reply(&result, kDirectoryCommandTimeoutMs) &&
+           result.status == SMB2_STATUS_SUCCESS;
+}
+
+static bool raw_read_directory_batch(SmbVfsDir *dir)
+{
+    if (dir == nullptr || dir->finished || !dir->remote_open) {
+        return true;
+    }
+    if (s_cancel_directory_scan.load()) {
+        ESP_LOGI(TAG, "directory scan canceled: %s", dir->path);
+        dir->context_stale = true;
+        dir->truncated = true;
+        dir->finished = true;
+        return dir->count > 0u;
+    }
+    const int64_t elapsed_us = esp_timer_get_time() - dir->scan_started_us;
+    const int64_t remaining_us =
+        static_cast<int64_t>(kDirectoryScanBudgetMs) * 1000LL - elapsed_us;
+    if (remaining_us <= 0 || dir->query_count >= kMaxDirectoryQueries ||
+        dir->count >= kMaxCachedDirEntries) {
+        dir->truncated = true;
+        dir->finished = true;
+        return true;
+    }
+
+    smb2_query_directory_request request = {};
+    request.file_information_class = SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION;
+    request.flags = dir->first_query ? SMB2_RESTART_SCANS : 0u;
+    memcpy(request.file_id, dir->file_id, SMB2_FD_SIZE);
+    request.name = "*";
+    request.output_buffer_length = kDirectoryReplyBytes;
+
+    RawCommandResult result = {};
+    result.dir = dir;
+    smb2_pdu *pdu = smb2_cmd_query_directory_async(
+        s_smb, &request, raw_query_dir_cb, &result);
+    if (pdu == nullptr) {
+        return false;
+    }
+    const size_t count_before = dir->count;
+    smb2_queue_pdu(s_smb, pdu);
+    const int remaining_ms = static_cast<int>(remaining_us / 1000LL);
+    const int command_timeout = remaining_ms < kDirectoryCommandTimeoutMs
+                                    ? remaining_ms : kDirectoryCommandTimeoutMs;
+    if (!raw_wait_for_reply(&result, command_timeout > 0 ? command_timeout : 1)) {
+        ESP_LOGW(TAG, "directory query %u timed out with %u entries cached",
+                 static_cast<unsigned>(dir->query_count + 1u),
+                 static_cast<unsigned>(dir->count));
+        dir->context_stale = true;
+        dir->truncated = true;
+        dir->finished = true;
+        return dir->count > 0u;
+    }
+    ++dir->query_count;
+    dir->first_query = false;
+    const uint32_t status = static_cast<uint32_t>(result.status);
+    if (status == SMB2_STATUS_NO_MORE_FILES) {
+        dir->finished = true;
+        return true;
+    }
+    if (status != SMB2_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "directory query %u failed: status=0x%08lx, %u entries cached",
+                 static_cast<unsigned>(dir->query_count),
+                 static_cast<unsigned long>(status),
+                 static_cast<unsigned>(dir->count));
+        dir->context_stale = true;
+        dir->truncated = dir->count > 0u;
+        dir->finished = true;
+        return dir->count > 0u;
+    }
+    if (dir->count == count_before) {
+        if (++dir->empty_replies >= 2u) {
+            ESP_LOGW(TAG, "directory returned repeated empty replies");
+            dir->truncated = true;
+            dir->finished = true;
+        }
+    } else {
+        dir->empty_replies = 0;
+    }
+    if (dir->count >= kMaxCachedDirEntries) {
+        dir->truncated = true;
+        dir->finished = true;
+    }
+    return true;
+}
+
 static DIR *vfs_opendir(void *, const char *path)
 {
     LockGuard lock;
     if (!smb_ensure_connected_locked()) {
         return nullptr;
     }
-    struct smb2dir *smb_dir = smb2_opendir(s_smb, smb_path(path));
-    if (smb_dir == nullptr) {
-        const char *error = smb2_get_error(s_smb);
-        if (smb_error_is_connection_loss(error)) {
-            ESP_LOGW(TAG, "opendir %s failed, reconnecting: %s", path, error);
-            if (!smb_has_open_handles_locked() && smb_connect_locked()) {
-                smb_dir = smb2_opendir(s_smb, smb_path(path));
-            } else {
-                s_smb_bad = true;
-            }
-        }
-    }
-    if (smb_dir == nullptr) {
-        errno = ENOENT;
-        return nullptr;
-    }
+    s_cancel_directory_scan.store(false);
     SmbVfsDir *dir = static_cast<SmbVfsDir *>(calloc(1, sizeof(SmbVfsDir)));
     if (dir == nullptr) {
-        smb2_closedir(s_smb, smb_dir);
         errno = ENOMEM;
         return nullptr;
     }
-    dir->smb_dir = smb_dir;
+    dir->entries = static_cast<CachedDirEntry *>(heap_caps_calloc(
+        kMaxCachedDirEntries, sizeof(CachedDirEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (dir->entries == nullptr) {
+        free(dir);
+        ESP_LOGE(TAG, "directory cache allocation failed");
+        errno = ENOMEM;
+        return nullptr;
+    }
+
+    ESP_LOGI(TAG, "directory scan started: %s", path);
+
+    if (!raw_open_directory(path, dir->file_id)) {
+        ESP_LOGW(TAG, "open directory %s failed: %s", path, smb2_get_error(s_smb));
+        // A low-level command may still own its callback data when the socket
+        // service fails. Retire this context instead of issuing another PDU.
+        s_smb_bad = true;
+        heap_caps_free(dir->entries);
+        free(dir);
+        errno = EIO;
+        return nullptr;
+    }
+    dir->remote_open = true;
+    dir->first_query = true;
+    dir->scan_started_us = esp_timer_get_time();
+    snprintf(dir->path, sizeof(dir->path), "%s", path);
     ++s_open_dirs;
     return &dir->dir;
 }
 
+static void finish_remote_dir_locked(SmbVfsDir *dir)
+{
+    if (dir == nullptr || !dir->remote_open) {
+        return;
+    }
+    if (dir->context_stale || s_smb == nullptr || s_smb_bad) {
+        s_smb_bad = true;
+    } else if (!raw_close_directory(dir->file_id)) {
+        ESP_LOGW(TAG, "close directory %s failed: %s", dir->path, smb2_get_error(s_smb));
+        s_smb_bad = true;
+    }
+    dir->remote_open = false;
+    if (s_open_dirs > 0) {
+        --s_open_dirs;
+    }
+    if (dir->truncated) {
+        ESP_LOGW(TAG, "directory %s limited to %u entries", dir->path,
+                 static_cast<unsigned>(dir->count));
+    }
+    ESP_LOGI(TAG, "directory scan finished: %s, %u entries, %lld ms%s",
+             dir->path, static_cast<unsigned>(dir->count),
+             static_cast<long long>((esp_timer_get_time() - dir->scan_started_us) / 1000LL),
+             dir->truncated ? " (partial)" : "");
+}
+
 static struct dirent *vfs_readdir(void *, DIR *pdir)
 {
-    LockGuard lock;
     SmbVfsDir *dir = reinterpret_cast<SmbVfsDir *>(pdir);
-    if (s_smb == nullptr || s_smb_bad || dir == nullptr || dir->smb_dir == nullptr) {
+    if (dir == nullptr || dir->entries == nullptr) {
         return nullptr;
     }
-    const struct smb2dirent *ent;
-    while ((ent = smb2_readdir(s_smb, dir->smb_dir)) != nullptr) {
-        if (strcmp(ent->name, ".") == 0 || strcmp(ent->name, "..") == 0) {
-            continue;
+    if (dir->index >= dir->count && !dir->finished) {
+        LockGuard lock;
+        if (s_smb == nullptr || s_smb_bad || !raw_read_directory_batch(dir)) {
+            dir->finished = true;
+            dir->context_stale = true;
         }
-        memset(&dir->entry, 0, sizeof(dir->entry));
-        snprintf(dir->entry.d_name, sizeof(dir->entry.d_name), "%s", ent->name);
-        dir->entry.d_type = (ent->st.smb2_type == SMB2_TYPE_DIRECTORY) ? DT_DIR : DT_REG;
-        return &dir->entry;
+        if (dir->finished) {
+            finish_remote_dir_locked(dir);
+        }
     }
-    return nullptr;
+    if (dir->index >= dir->count) {
+        return nullptr;
+    }
+    const CachedDirEntry &cached = dir->entries[dir->index++];
+    memset(&dir->entry, 0, sizeof(dir->entry));
+    snprintf(dir->entry.d_name, sizeof(dir->entry.d_name), "%s", cached.name);
+    dir->entry.d_type = cached.type;
+    return &dir->entry;
 }
 
 static int vfs_closedir(void *, DIR *pdir)
 {
-    LockGuard lock;
     SmbVfsDir *dir = reinterpret_cast<SmbVfsDir *>(pdir);
     if (dir == nullptr) {
         errno = EBADF;
         return -1;
     }
-    if (s_smb != nullptr && !s_smb_bad && dir->smb_dir != nullptr) {
-        smb2_closedir(s_smb, dir->smb_dir);
+    {
+        LockGuard lock;
+        finish_remote_dir_locked(dir);
     }
-    if (s_open_dirs > 0) {
-        --s_open_dirs;
-    }
+    heap_caps_free(dir->entries);
     free(dir);
     return 0;
 }
@@ -455,18 +763,7 @@ extern "C" bool SMB_VFS_Mounted(void)
     return s_smb != nullptr && !s_smb_bad;
 }
 
-#else // !S31
-
-extern "C" bool SMB_VFS_Mount(const char *, const char *, const char *, const char *)
+extern "C" void SMB_VFS_CancelDirectoryScan(void)
 {
-    return false;
+    s_cancel_directory_scan.store(true);
 }
-
-extern "C" void SMB_VFS_Unmount(void) {}
-
-extern "C" bool SMB_VFS_Mounted(void)
-{
-    return false;
-}
-
-#endif

@@ -23,6 +23,9 @@ struct NrlOtaStatus {
     bool configured;
     bool checking;
     bool updating;
+    uint32_t update_bytes;
+    uint32_t update_size;
+    uint8_t update_percent;
     uint32_t last_check_ms;
     size_t release_count;
     NrlOtaRelease releases[NRL_OTA_RELEASE_MAX];

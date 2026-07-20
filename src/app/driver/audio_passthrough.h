@@ -37,6 +37,14 @@ void AUDIO_StopPassthrough(void);
 bool AUDIO_IsPassthroughRunning(void);
 bool AUDIO_GetI2SHandles(i2s_chan_handle_t *tx_handle, i2s_chan_handle_t *rx_handle);
 
+// Temporarily retime the shared I2S TX channel for native-rate media output.
+// The caller must stop the passthrough task first and must restore 16 kHz
+// before restarting it. RX stays allocated but is not consumed while media
+// owns the bus, matching the ES8389 codec-dev playback lifecycle.
+bool AUDIO_ReconfigureOutput(uint32_t sample_rate_hz, uint8_t bits_per_sample);
+// Blocking raw write to the currently configured stereo I2S TX channel.
+bool AUDIO_WriteOutput(const void *pcm, size_t bytes);
+
 // The codec driver tracks the active audio mode by calling AUDIO_SetMode()
 // whenever it switches the DAC power path; the passthrough task reads it
 // back to forward to the frame hook.
