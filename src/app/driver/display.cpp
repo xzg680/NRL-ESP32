@@ -33,7 +33,7 @@
 #include "board_pins.h"
 #include "s31_i2c.h"
 
-#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD == NRL_BOARD_GEZIPAI
+#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD_IS_GEZIPAI_FAMILY
 
 #include "../../lib/nrl_audio_bridge.h"
 #include "../../services/aprs_service.h"
@@ -173,6 +173,7 @@ enum class MenuPage : uint8_t {
     Aprs,
     AprsSettings,
     AprsList,
+    AprsGps,
     Signaling,
     Ctcss,
     Mdc,
@@ -914,9 +915,10 @@ void buildAprsMenu()
         "< BACK / APRS",
         "APRS SETTINGS",
         "STATION LIST",
+        "GPS LIVE INFO",
         "SEND BEACON NOW",
     };
-    for (size_t i = 0; i < 4u; ++i) {
+    for (size_t i = 0; i < 5u; ++i) {
         menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
     }
 
@@ -1001,6 +1003,85 @@ void buildAprsListMenu()
     menuFooter(scr, "PTT BACK");
 }
 
+void gpsInfoLine(lv_obj_t *scr, const int y, const char *text, const uint32_t color)
+{
+    lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, color);
+    lv_obj_set_width(lbl, kWidth - 10);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 5, y);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+    lv_label_set_text(lbl, text);
+}
+
+void buildGpsInfoMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    menuRow(scr, 1, "< BACK / GPS", true);
+
+    AprsGpsInfo gps{};
+    APRS_SERVICE_GetGpsInfo(&gps);
+
+    char line[80];
+    snprintf(line, sizeof(line), "UART:%s NMEA:%s FIX:%s Q:%u",
+             gps.uart_enabled ? "ON" : "OFF",
+             gps.connected ? "OK" : "--",
+             gps.has_fix ? "YES" : "NO",
+             static_cast<unsigned>(gps.fix_quality));
+    gpsInfoLine(scr, 28, line, gps.has_fix ? kColorGood : kColorApWarn);
+
+    char sat_used[8] = "--";
+    char sat_visible[8] = "--";
+    if (gps.satellites >= 0) {
+        snprintf(sat_used, sizeof(sat_used), "%d", static_cast<int>(gps.satellites));
+    }
+    if (gps.visible_satellites >= 0) {
+        snprintf(sat_visible, sizeof(sat_visible), "%d",
+                 static_cast<int>(gps.visible_satellites));
+    }
+    if (!isnan(gps.hdop)) {
+        snprintf(line, sizeof(line), "SAT:%s/%s HDOP:%.1f GSV:%ums",
+                 sat_used, sat_visible, static_cast<double>(gps.hdop),
+                 static_cast<unsigned>(gps.gsv_age_ms));
+    } else {
+        snprintf(line, sizeof(line), "SAT:%s/%s HDOP:-- GSV:%ums",
+                 sat_used, sat_visible, static_cast<unsigned>(gps.gsv_age_ms));
+    }
+    gpsInfoLine(scr, 50, line, kColorSub);
+
+    if (gps.has_fix) {
+        snprintf(line, sizeof(line), "LAT: %.6f", gps.latitude);
+        gpsInfoLine(scr, 72, line, kColorCallIdle);
+        snprintf(line, sizeof(line), "LON: %.6f", gps.longitude);
+        gpsInfoLine(scr, 94, line, kColorCallIdle);
+    } else {
+        gpsInfoLine(scr, 72, "LAT: --", kColorWeak);
+        gpsInfoLine(scr, 94, "LON: --", kColorWeak);
+    }
+
+    if (gps.has_fix && !isnan(gps.altitude_m)) {
+        snprintf(line, sizeof(line), "ALT: %.1fm  SPD: %.1fkm/h",
+                 gps.altitude_m, static_cast<double>(gps.speed_kmh));
+    } else {
+        snprintf(line, sizeof(line), "ALT: --  SPD: --");
+    }
+    gpsInfoLine(scr, 116, line, kColorSub);
+
+    if (gps.course_valid) {
+        snprintf(line, sizeof(line), "CRS:%u  AGE:%ums",
+                 static_cast<unsigned>(gps.course_deg),
+                 static_cast<unsigned>(gps.age_ms));
+    } else {
+        snprintf(line, sizeof(line), "CRS:--  AGE:%ums",
+                 static_cast<unsigned>(gps.age_ms));
+    }
+    gpsInfoLine(scr, 138, line, kColorSub);
+
+    char footer[48];
+    snprintf(footer, sizeof(footer), "DETAIL:%u  PTT BACK",
+             static_cast<unsigned>(gps.satellite_detail_count));
+    menuFooter(scr, footer);
+}
+
 bool signalingRouteEnabled(const SignalingConfig &cfg, bool mdc, size_t index)
 {
     if (mdc) {
@@ -1067,6 +1148,7 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::Aprs) buildAprsMenu();
     else if (s_menu_page == MenuPage::AprsSettings) buildAprsSettingsMenu();
     else if (s_menu_page == MenuPage::AprsList) buildAprsListMenu();
+    else if (s_menu_page == MenuPage::AprsGps) buildGpsInfoMenu();
     else if (s_menu_page == MenuPage::Signaling) buildSignalingMenu();
     else if (s_menu_page == MenuPage::Ctcss) buildCtcssMenu();
     else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
@@ -1772,9 +1854,10 @@ size_t menuItemCount()
 {
     if (s_menu_page == MenuPage::Main) return 8u;
     if (s_menu_page == MenuPage::About) return 1u;
-    if (s_menu_page == MenuPage::Aprs) return 4u;
+    if (s_menu_page == MenuPage::Aprs) return 5u;
     if (s_menu_page == MenuPage::AprsSettings) return 8u;
     if (s_menu_page == MenuPage::AprsList) return 1u;
+    if (s_menu_page == MenuPage::AprsGps) return 1u;
     if (s_menu_page == MenuPage::Signaling) return 4u;
     if (s_menu_page == MenuPage::Ctcss) return 3u;
     if (s_menu_page == MenuPage::Mdc || s_menu_page == MenuPage::Dtmf) return 5u;
@@ -1887,6 +1970,11 @@ void confirmAprsMenu()
         s_menu_index = 0u;
         s_menu_aprs_refresh_ms = 0u;
         s_menu_aprs_revision = APRS_SERVICE_GetStationRevision();
+        buildMenuUi();
+    } else if (s_menu_index == 3u) {
+        s_menu_page = MenuPage::AprsGps;
+        s_menu_index = 0u;
+        s_menu_aprs_refresh_ms = 0u;
         buildMenuUi();
     } else {
         const bool ok = APRS_SERVICE_SendBeaconNow();
@@ -2053,6 +2141,11 @@ void processMenuInput(uint32_t now)
             s_menu_index = 0u;
             buildMenuUi();
         }
+        else if (s_menu_page == MenuPage::AprsGps) {
+            s_menu_page = MenuPage::Aprs;
+            s_menu_index = 0u;
+            buildMenuUi();
+        }
         else if (s_menu_page == MenuPage::Signaling) confirmSignalingMenu();
         else if (s_menu_page == MenuPage::Ctcss) confirmCtcssMenu();
         else if (s_menu_page == MenuPage::Mdc) confirmProtocolMenu(true);
@@ -2108,6 +2201,12 @@ void processMenuInput(uint32_t now)
             s_menu_aprs_refresh_ms = now;
             buildMenuUi();
         }
+    }
+
+    if (s_menu_page == MenuPage::AprsGps &&
+        (s_menu_aprs_refresh_ms == 0u || now - s_menu_aprs_refresh_ms >= 1000u)) {
+        s_menu_aprs_refresh_ms = now;
+        buildMenuUi();
     }
 }
 

@@ -1886,7 +1886,7 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
              value <= 5000UL &&
              EXTERNAL_RADIO_SetTailSuppressMs(static_cast<uint16_t>(value), false);
     }
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
     // Auto-calibrate the battery sense from a multimeter reading. Empty value
     // skips it (so the form can be submitted with only the manual scale).
     if (ok && s_server.hasArg("battery_actual_mv") && !s_server.arg("battery_actual_mv").empty()) {

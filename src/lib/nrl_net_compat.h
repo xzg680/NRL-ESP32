@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 // Helpers that query the WiFi netifs (created by nrl_wifi.cpp or, for the
 // remaining Arduino-WiFi callers, by arduino-esp32 itself) via IDF accessors
@@ -37,6 +38,41 @@ static inline esp_netif_t *nrlEthernetNetif(void)
     return esp_netif_get_handle_from_ifkey("ETH_DEF");
 }
 
+static inline bool nrlNetifIpv4IsUsable(uint32_t ip)
+{
+    const uint8_t *b = (const uint8_t *)&ip;
+    return ip != 0u && b[0] != 127u;
+}
+
+static inline bool nrlNetifIsConfigAp(esp_netif_t *netif)
+{
+    const char *ifkey = netif != NULL ? esp_netif_get_ifkey(netif) : NULL;
+    return ifkey != NULL && strcmp(ifkey, "WIFI_AP_DEF") == 0;
+}
+
+static inline bool nrlNetifIsWifi(esp_netif_t *netif)
+{
+    const char *ifkey = netif != NULL ? esp_netif_get_ifkey(netif) : NULL;
+    return ifkey != NULL &&
+           (strcmp(ifkey, "WIFI_STA_DEF") == 0 || strcmp(ifkey, "WIFI_AP_DEF") == 0);
+}
+
+static inline bool nrlNetifHasUsableIpv4(esp_netif_t *netif, uint32_t *out_ip)
+{
+    if (netif == NULL || nrlNetifIsConfigAp(netif) || !esp_netif_is_netif_up(netif)) {
+        return false;
+    }
+    esp_netif_ip_info_t info = {};
+    if (esp_netif_get_ip_info(netif, &info) != ESP_OK ||
+        !nrlNetifIpv4IsUsable(info.ip.addr)) {
+        return false;
+    }
+    if (out_ip != NULL) {
+        *out_ip = info.ip.addr;
+    }
+    return true;
+}
+
 static inline bool nrlWifiStaConnected(void)
 {
     esp_netif_t *netif = nrlWifiStaNetif();
@@ -60,29 +96,59 @@ static inline uint32_t nrlWifiStaIp(void)
     return (esp_netif_get_ip_info(netif, &info) == ESP_OK) ? info.ip.addr : 0u;
 }
 
-// Product-wide network view: wired Ethernet is preferred whenever it has a
-// valid address, otherwise fall back to Wi-Fi STA. Services should use these
-// helpers unless they specifically configure or report the Wi-Fi interface.
-static inline bool nrlNetworkConnected(void)
+static inline esp_netif_t *nrlExternalNetworkNetif(uint32_t *out_ip)
 {
     esp_netif_t *eth = nrlEthernetNetif();
-    if (eth != NULL && esp_netif_is_netif_up(eth)) {
-        esp_netif_ip_info_t info = {};
-        if (esp_netif_get_ip_info(eth, &info) == ESP_OK && info.ip.addr != 0u) {
-            return true;
+    if (nrlNetifHasUsableIpv4(eth, out_ip)) {
+        return eth;
+    }
+    for (esp_netif_t *netif = esp_netif_next_unsafe(NULL);
+         netif != NULL;
+         netif = esp_netif_next_unsafe(netif)) {
+        if (netif != eth && !nrlNetifIsWifi(netif) &&
+            nrlNetifHasUsableIpv4(netif, out_ip)) {
+            return netif;
         }
+    }
+    if (out_ip != NULL) {
+        *out_ip = 0u;
+    }
+    return NULL;
+}
+
+// Non-WiFi network view: Ethernet now, cellular/PPP/USB netifs later. This is
+// used by provisioning logic so "already online via cable/4G" does not get
+// mistaken for "WiFi is configured".
+static inline bool nrlExternalNetworkConnected(void)
+{
+    return nrlExternalNetworkNetif(NULL) != NULL;
+}
+
+static inline uint32_t nrlExternalNetworkIp(void)
+{
+    uint32_t ip = 0u;
+    (void)nrlExternalNetworkNetif(&ip);
+    return ip;
+}
+
+// Product-wide network view: wired Ethernet is preferred whenever it has a
+// valid address. Otherwise accept any non-WiFi netif with IPv4, so future
+// cellular/PPP/USB network interfaces automatically count as the active route.
+// Wi-Fi STA is the final fallback. Services should use these helpers unless
+// they specifically configure or report the Wi-Fi interface.
+static inline bool nrlNetworkConnected(void)
+{
+    if (nrlExternalNetworkConnected()) {
+        return true;
     }
     return nrlWifiStaConnected();
 }
 
 static inline uint32_t nrlNetworkIp(void)
 {
-    esp_netif_t *eth = nrlEthernetNetif();
-    if (eth != NULL && esp_netif_is_netif_up(eth)) {
-        esp_netif_ip_info_t info = {};
-        if (esp_netif_get_ip_info(eth, &info) == ESP_OK && info.ip.addr != 0u) {
-            return info.ip.addr;
-        }
+    const uint32_t ip = nrlExternalNetworkIp();
+    if (ip != 0u) {
+        return ip;
     }
     return nrlWifiStaIp();
 }

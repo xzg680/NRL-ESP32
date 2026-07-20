@@ -129,7 +129,7 @@ jobs:
           fail_on_unmatched_files: true
           files: dist/*-${{ matrix.board }}.bin
 
-  # USB browser flasher (esp-web-tools) for the two ESP32-S3 boards only:
+  # USB browser flasher (esp-web-tools) for the released ESP32-S3 boards only:
   # esptool-js has no ESP32-S31 support, so s31_korvo is serial-only. Builds both
   # S3 boards into separate build/<board>/ dirs, then scripts/stage_web_flasher.py
   # reads each build/<board>/flasher_args.json to copy the images + write the

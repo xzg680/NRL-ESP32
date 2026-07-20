@@ -2,12 +2,12 @@
 
 #include "board_pins.h"
 
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO || \
+#if NRL_BOARD_IS_GEZIPAI_FAMILY || NRL_BOARD == NRL_BOARD_S31_KORVO || \
     NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 #include "external_radio.h"
 #include "es8311.h"
 #include "../../lib/nrl_bt_hfp.h"  // route the volume keys to a connected headset
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
 #include "display.h"
 #endif
 #endif
@@ -30,7 +30,7 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO || \
+#if NRL_BOARD_IS_GEZIPAI_FAMILY || NRL_BOARD == NRL_BOARD_S31_KORVO || \
     NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 #include <freertos/semphr.h>
 #endif
@@ -62,6 +62,25 @@ static void writeLed(const int pin, const bool on)
     gpio_set_level((gpio_num_t)pin, on ? 0 : 1);
 }
 
+[[maybe_unused]] static void initInputPullupPin(const int pin)
+{
+    if (pin < 0) {
+        return;
+    }
+    gpio_reset_pin((gpio_num_t)pin);
+    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)pin, GPIO_PULLUP_ONLY);
+}
+
+[[maybe_unused]] static void initOutputPin(const int pin)
+{
+    if (pin < 0) {
+        return;
+    }
+    gpio_reset_pin((gpio_num_t)pin);
+    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
+}
+
 static bool blinkPhase(const unsigned long now_ms, const unsigned long period_ms)
 {
     return ((now_ms / period_ms) & 1UL) == 0UL;
@@ -69,7 +88,7 @@ static bool blinkPhase(const unsigned long now_ms, const unsigned long period_ms
 
 } // namespace
 
-#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_S31_KORVO || \
+#if NRL_BOARD_IS_GEZIPAI_FAMILY || NRL_BOARD == NRL_BOARD_S31_KORVO || \
     NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 
 // ============================================================
@@ -144,7 +163,7 @@ AutoRepeat s_btn_vol_down_repeat = {false, 0UL};
 
 bool s_volume_dirty = false;
 unsigned long s_volume_change_ms = 0UL;
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
 bool s_menu_chord_active = false;
 bool s_menu_ptt_suppressed_until_release = false;
 int s_pending_volume_delta = 0;
@@ -294,6 +313,12 @@ static void initAdcButtons()
 // Updates one debounced button; returns true once on each release->press edge.
 static bool pollButtonPressEdge(DebouncedButton &btn, const unsigned long now)
 {
+    if (btn.pin < 0) {
+        btn.raw_level = 1;
+        btn.pressed = false;
+        btn.changed_ms = now;
+        return false;
+    }
 #if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
     const int level = readAdcButtonLevel(btn.pin);
 #else
@@ -418,7 +443,7 @@ static void updateVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
     }
 }
 
-#if NRL_BOARD != NRL_BOARD_GEZIPAI
+#if !NRL_BOARD_IS_GEZIPAI_FAMILY
 static void pollVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
                              const int pct_delta, const unsigned long now)
 {
@@ -429,7 +454,7 @@ static void pollVolumeButton(DebouncedButton &btn, AutoRepeat &rep,
 // Gezipai has no touch panel. Pressing VOL+ and VOL- together opens the menu;
 // while it is active the individual keys navigate and PTT confirms. Input is
 // queued into display.cpp, where LVGL consumes it from the display task.
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
 static void pollGezipaiMenuButtons(const unsigned long now)
 {
     const bool up_edge = pollButtonPressEdge(s_btn_vol_up, now);
@@ -502,7 +527,7 @@ static void updatePtt(const unsigned long now)
     pollButtonPressEdge(s_btn_ptt, now);  // refreshes s_btn_ptt.pressed
     const bool is_pressed = s_btn_ptt.pressed;
 
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
     if (Display_MenuIsActive()) {
         if (is_pressed && !was_pressed) {
             Display_MenuConfirm();
@@ -589,29 +614,14 @@ extern "C" void STATUS_IO_Init(void)
 #if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
     initAdcButtons();
 #elif !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
-    gpio_reset_pin((gpio_num_t)NRL_PIN_BTN_VOL_UP);
-    gpio_set_direction((gpio_num_t)NRL_PIN_BTN_VOL_UP, GPIO_MODE_INPUT);
-    gpio_set_pull_mode((gpio_num_t)NRL_PIN_BTN_VOL_UP, GPIO_PULLUP_ONLY);
-    gpio_reset_pin((gpio_num_t)NRL_PIN_BTN_VOL_DOWN);
-    gpio_set_direction((gpio_num_t)NRL_PIN_BTN_VOL_DOWN, GPIO_MODE_INPUT);
-    gpio_set_pull_mode((gpio_num_t)NRL_PIN_BTN_VOL_DOWN, GPIO_PULLUP_ONLY);
-    gpio_reset_pin((gpio_num_t)NRL_PIN_BTN_PTT);
-    gpio_set_direction((gpio_num_t)NRL_PIN_BTN_PTT, GPIO_MODE_INPUT);
-    gpio_set_pull_mode((gpio_num_t)NRL_PIN_BTN_PTT, GPIO_PULLUP_ONLY);
+    initInputPullupPin(NRL_PIN_BTN_VOL_UP);
+    initInputPullupPin(NRL_PIN_BTN_VOL_DOWN);
+    initInputPullupPin(NRL_PIN_BTN_PTT);
 #endif
 
-    if (NRL_PIN_LED_PTT >= 0) {
-    gpio_reset_pin((gpio_num_t)NRL_PIN_LED_PTT);
-    gpio_set_direction((gpio_num_t)NRL_PIN_LED_PTT, GPIO_MODE_OUTPUT);
-    }
-    if (NRL_PIN_LED_AUDIO >= 0) {
-    gpio_reset_pin((gpio_num_t)NRL_PIN_LED_AUDIO);
-    gpio_set_direction((gpio_num_t)NRL_PIN_LED_AUDIO, GPIO_MODE_OUTPUT);
-    }
-    if (NRL_PIN_LED_NET >= 0) {
-    gpio_reset_pin((gpio_num_t)NRL_PIN_LED_NET);
-    gpio_set_direction((gpio_num_t)NRL_PIN_LED_NET, GPIO_MODE_OUTPUT);
-    }
+    initOutputPin(NRL_PIN_LED_PTT);
+    initOutputPin(NRL_PIN_LED_AUDIO);
+    initOutputPin(NRL_PIN_LED_NET);
     writeLed(NRL_PIN_LED_PTT,   false);
     writeLed(NRL_PIN_LED_AUDIO, false);
     writeLed(NRL_PIN_LED_NET,   false);
@@ -701,7 +711,7 @@ extern "C" void STATUS_IO_Poll(void)
     // four ADC samples separately for each key (12 conversions per poll).
     s_button_adc_value = sampleAdcButtonValue();
 #endif
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
     pollGezipaiMenuButtons(now);
 #else
     pollVolumeButton(s_btn_vol_up,   s_btn_vol_up_repeat,   +1, now);

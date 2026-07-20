@@ -9,9 +9,11 @@
 #include <freertos/task.h>
 #include <nvs_flash.h>
 
+#include "../services/config_notify.h"
 #include "../lib/ble_config.h"
 #include "../services/ai_assistant.h"
 #include "../services/aprs_service.h"
+#include "../services/cellular_rndis_service.h"
 #include "../services/signaling_service.h"
 #include "../services/espnow_link.h"
 #include "../services/video_call.h"
@@ -24,8 +26,10 @@
 #include "../lib/nrl_audio_bridge.h"
 #include "../lib/nrl_bt_hfp.h"
 #include "../lib/nrl_ethernet.h"
+#include "../lib/nrl_net_compat.h"
 #include "../lib/nrl_usb_console.h"
 #include "../lib/nrl_version.h"
+#include "../lib/nrl_wifi.h"
 #include "../lib/wifi_config_portal.h"
 #include "driver/board_pins.h"
 #include "driver/display.h"
@@ -35,6 +39,8 @@
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
 #include "main_loop_profile.h"
+
+#include <string.h>
 
 namespace {
 
@@ -46,6 +52,11 @@ volatile bool s_loop_profile_enabled = false;
 uint32_t s_loop_profile_loops = 0u;
 uint64_t s_loop_profile_total_us[MAIN_LOOP_STAGE_COUNT] = {};
 uint32_t s_loop_profile_max_us[MAIN_LOOP_STAGE_COUNT] = {};
+bool s_display_started = false;
+bool s_full_app_started = false;
+bool s_waiting_for_provisioning = false;
+uint32_t s_next_provision_wifi_attempt_ms = 0u;
+uint32_t s_seen_config_generation = 0u;
 
 static void recordMainLoopProfile(const uint32_t elapsed_us[MAIN_LOOP_STAGE_COUNT])
 {
@@ -70,6 +81,77 @@ static void logDramMark(const char *step)
     ESP_LOGI(TAG, "[DRAM] after %-14s free=%6u largest=%6u", step,
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+}
+
+static inline uint32_t nowMsApp()
+{
+    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+}
+
+static bool wifiConfigured()
+{
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    return config != nullptr && config->wifi_enabled &&
+           EXTERNAL_RADIO_GetWifiProfileCount() > 0u;
+}
+
+static WifiConnResult connectSavedWifiLight()
+{
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    if (config == nullptr || !config->wifi_enabled) {
+        return WIFI_CONN_FAILED;
+    }
+
+    const size_t count = EXTERNAL_RADIO_GetWifiProfileCount();
+    if (count == 0u) {
+        return WIFI_CONN_FAILED;
+    }
+
+    NrlWifiScanResult scanned[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
+    const bool scan_ok = nrlWifiScanStartBlocking(5000u);
+    const size_t scanned_count = scan_ok ? nrlWifiScanGetCache(scanned, EXTERNAL_RADIO_MAX_WIFI_PROFILES) : 0u;
+    bool attempted[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
+    WifiConnResult last = WIFI_CONN_FAILED;
+
+    for (size_t i = 0; i < count; ++i) {
+        bool visible = !scan_ok;
+        for (size_t j = 0; j < scanned_count; ++j) {
+            if (strcmp(config->wifi_profiles[i].ssid, scanned[j].ssid) == 0) {
+                visible = true;
+                break;
+            }
+        }
+        if (!visible) {
+            continue;
+        }
+        attempted[i] = true;
+        ESP_LOGI(TAG, "provisioning: trying saved WiFi %u/%u: \"%s\"",
+                 static_cast<unsigned>(i + 1u),
+                 static_cast<unsigned>(count),
+                 config->wifi_profiles[i].ssid);
+        last = wifiEnsureConnected(config->wifi_profiles[i].ssid,
+                                   config->wifi_profiles[i].password, 10000u);
+        if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) {
+            return last;
+        }
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        if (attempted[i]) {
+            continue;
+        }
+        ESP_LOGI(TAG, "provisioning: trying hidden/unseen saved WiFi %u/%u: \"%s\"",
+                 static_cast<unsigned>(i + 1u),
+                 static_cast<unsigned>(count),
+                 config->wifi_profiles[i].ssid);
+        last = wifiEnsureConnected(config->wifi_profiles[i].ssid,
+                                   config->wifi_profiles[i].password, 10000u);
+        if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) {
+            return last;
+        }
+    }
+
+    return last;
 }
 
 static void initSystem()
@@ -107,14 +189,8 @@ static void initSystem()
              psram_size > 0 ? "OK" : "absent");
 }
 
-static void initApp()
+static void applyPendingAudioConfig()
 {
-    logDramMark("boot");
-    EXTERNAL_RADIO_Init();
-    if (!nrlEthernetInit()) {
-        ESP_LOGE(TAG, "Ethernet initialization failed; Wi-Fi fallback remains available.");
-    }
-    logDramMark("ethernet");
 #if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
     if (const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig()) {
         ES8311_ApplyAudioConfig(config->mic_volume,
@@ -162,12 +238,14 @@ static void initApp()
         AUDIO_SetMicHpfEnabled(config->mic_hpf_enabled);
     }
 #endif
+}
 
-    STATUS_IO_Init();
+static void initStorageMusicAndDisplay()
+{
+    if (s_display_started) {
+        return;
+    }
 
-    // Removable storage + music player (no-ops on boards without the
-    // hardware). Mount before the display so the first UI frame can already
-    // show storage state.
     STORAGE_Init();
     MUSIC_Init();
     PLAYLIST_Init();
@@ -179,29 +257,21 @@ static void initApp()
     logDramMark("storage+music");
 
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
-    // Bring the LCD up early so it shows a status frame while WiFi/BLE start.
     Display_Init();
+    s_display_started = true;
     logDramMark("display");
+#else
+    s_display_started = true;
 #endif
+}
 
-    WifiConfigPortal_Init();
-    OtaService_Init();
-    logDramMark("portal+ota");
-    // BLE provisioning is only needed until WiFi credentials exist: its NimBLE
-    // host + controller cost ~66 KB of internal DRAM, which on the S3 display
-    // boards is exactly what the audio/AEC init later in boot needs. Configured
-    // devices boot WiFi-only; if the STA stays down, BLEConfig_Poll()'s
-    // fallback brings BLE provisioning back up automatically.
-    {
-        const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
-        const bool wifi_configured = (config != nullptr) && config->wifi_ssid[0] != '\0';
-        if (wifi_configured) {
-            ESP_LOGI(TAG, "WiFi configured; skipping boot BLE provisioning (Poll restores it if STA stays down)");
-        } else {
-            BLEConfig_Init();
-        }
+static bool initFullApp()
+{
+    if (s_full_app_started) {
+        return true;
     }
-    logDramMark("ble_config");
+
+    initStorageMusicAndDisplay();
 
     // Bring the audio bridge up BEFORE ES8311_Init. ES8311_Init internally
     // calls AEC_Init which mallocs ~50 KB (WebRtcNs + AFE state) from the
@@ -213,6 +283,7 @@ static void initApp()
     // passthrough task, so the ordering swap is safe.
     if (!NRLAudioBridge_Init()) {
         ESP_LOGE(TAG, "NRL audio bridge init failed.");
+        return false;
     }
     logDramMark("audio_bridge");
 
@@ -290,8 +361,90 @@ static void initApp()
     SIGNALING_Init();
     logDramMark("signaling");
 
+    s_full_app_started = true;
+    s_waiting_for_provisioning = false;
+
     ESP_LOGI(TAG, "[AT] serial console ready. Type \"AT\" for the command list, "
                   "e.g. AT+WIFI_SSID=MyNet then AT+WIFI_PASS=secret");
+    return true;
+}
+
+static void initApp()
+{
+    logDramMark("boot");
+    EXTERNAL_RADIO_Init();
+    applyPendingAudioConfig();
+    if (!nrlEthernetInit()) {
+        ESP_LOGE(TAG, "Ethernet initialization failed; Wi-Fi fallback remains available.");
+    }
+    logDramMark("ethernet");
+    if (!CELLULAR_RNDIS_Init()) {
+        ESP_LOGW(TAG, "USB RNDIS 4G initialization failed; Wi-Fi fallback remains available.");
+    }
+    logDramMark("usb4g");
+
+    STATUS_IO_Init();
+    WifiConfigPortal_Init();
+    OtaService_Init();
+    logDramMark("portal+ota");
+
+    s_seen_config_generation = CONFIG_NOTIFY_Generation();
+    if (nrlExternalNetworkConnected()) {
+        ESP_LOGI(TAG, "External network online; starting full app without BLE provisioning");
+        initFullApp();
+    } else if (wifiConfigured()) {
+        ESP_LOGI(TAG, "WiFi configured; starting full app without BLE provisioning");
+        initFullApp();
+    } else {
+        s_waiting_for_provisioning = true;
+        ESP_LOGI(TAG, "WiFi not configured; starting light provisioning mode");
+        BLEConfig_Init();
+        logDramMark("ble_config");
+        ESP_LOGI(TAG, "[AT] serial console ready in provisioning mode. Configure WiFi via web, BLE, or AT.");
+    }
+}
+
+static void pollProvisioningStart()
+{
+    if (!s_waiting_for_provisioning || s_full_app_started) {
+        return;
+    }
+
+    const uint32_t generation = CONFIG_NOTIFY_Generation();
+    if (generation != s_seen_config_generation) {
+        s_seen_config_generation = generation;
+        s_next_provision_wifi_attempt_ms = 0u;
+    }
+
+    if (nrlExternalNetworkConnected()) {
+        ESP_LOGI(TAG, "provisioning complete: external network online, stopping BLE before full app start");
+        BLEConfig_Stop();
+        initFullApp();
+        return;
+    }
+
+    if (!wifiConfigured()) {
+        return;
+    }
+
+    const uint32_t now = nowMsApp();
+    if (s_next_provision_wifi_attempt_ms != 0u &&
+        static_cast<int32_t>(now - s_next_provision_wifi_attempt_ms) < 0) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "provisioning: saved WiFi found, connecting before full app start");
+    const WifiConnResult result = connectSavedWifiLight();
+    if (result == WIFI_CONN_OK || result == WIFI_ALREADY_ON_SSID || nrlWifiStaConnected()) {
+        ESP_LOGI(TAG, "provisioning: WiFi connected, stopping BLE before full app start");
+        BLEConfig_Stop();
+        initFullApp();
+        return;
+    }
+
+    s_next_provision_wifi_attempt_ms = nowMsApp() + 30000u;
+    ESP_LOGW(TAG, "provisioning: WiFi connect failed (%u), retrying later",
+             static_cast<unsigned>(result));
 }
 
 static void mainLoopTask(void *)
@@ -315,10 +468,15 @@ static void mainLoopTask(void *)
             STATUS_IO_Poll();
             WifiConfigPortal_Poll();
             BLEConfig_Poll();
-            NRL_BtHfp_Poll();
+            pollProvisioningStart();
+            if (s_full_app_started) {
+                NRL_BtHfp_Poll();
+            }
             NRLAudioBridge_PollSerialConsole();
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
-            Display_Poll();
+            if (s_display_started) {
+                Display_Poll();
+            }
 #endif
         } else {
             uint32_t elapsed_us[MAIN_LOOP_STAGE_COUNT] = {};
@@ -337,8 +495,12 @@ static void mainLoopTask(void *)
             elapsed_us[MAIN_LOOP_STAGE_BLE] =
                 static_cast<uint32_t>(esp_timer_get_time() - started_us);
 
+            pollProvisioningStart();
+
             started_us = esp_timer_get_time();
-            NRL_BtHfp_Poll();
+            if (s_full_app_started) {
+                NRL_BtHfp_Poll();
+            }
             elapsed_us[MAIN_LOOP_STAGE_BT] =
                 static_cast<uint32_t>(esp_timer_get_time() - started_us);
 
@@ -349,7 +511,9 @@ static void mainLoopTask(void *)
 
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
             started_us = esp_timer_get_time();
-            Display_Poll();
+            if (s_display_started) {
+                Display_Poll();
+            }
             elapsed_us[MAIN_LOOP_STAGE_DISPLAY] =
                 static_cast<uint32_t>(esp_timer_get_time() - started_us);
 #endif

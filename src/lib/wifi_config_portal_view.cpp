@@ -365,7 +365,7 @@ std::string WifiConfigPortalView_BuildDeviceSections(const ExternalRadioConfig *
     const uint8_t nrl_codec = NRLAudioBridge_GetVoiceCodec();
     replaceToken(html, "{{CODEC_G711_SELECTED}}", nrl_codec == 0u ? " selected" : "");
     replaceToken(html, "{{CODEC_OPUS_SELECTED}}", nrl_codec == 1u ? " selected" : "");
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
     std::string battery_section = std::string(kWifiConfigPortalBatterySectionTemplate);
     replaceToken(battery_section, "{{BATT_RAW_MV}}", fromI32(Display_GetBatteryRawMv()));
     replaceToken(battery_section, "{{BATT_CAL_MV}}", fromI32(Display_GetBatteryCalibratedMv()));

@@ -59,7 +59,9 @@ void copyText(char *out, size_t out_size, const char *value)
 
 const char *boardType()
 {
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+    return "gezipai_4g";
+#elif NRL_BOARD == NRL_BOARD_GEZIPAI
     return "gezipai";
 #elif NRL_BOARD == NRL_BOARD_BH4TDV
     return "bh4tdv";

@@ -8,14 +8,15 @@ export.sh so `idf.py` is on PATH):
 
 Examples:
     python scripts/build.py gezipai build
+    python scripts/build.py gezipai_4g flash monitor -p COM5
     python scripts/build.py s31_korvo flash monitor -p COM5
     python scripts/build.py s31_function_coreboard flash monitor -p COM5
     
     python scripts/build.py bh4tdv fullclean
     python scripts/build.py gezipai menuconfig
 
-Boards: gezipai, bh4tdv, s31_korvo, s31_function_coreboard. If you omit the
-idf.py args it defaults to `build`.
+Boards: gezipai, gezipai_4g, bh4tdv, s31_korvo, s31_function_coreboard. If
+you omit the idf.py args it defaults to `build`.
 
 Each board gets its own build directory (build/<board>) and sdkconfig
 (build/<board>/sdkconfig), so you can switch boards without a reconfigure or
@@ -37,6 +38,13 @@ BOARDS = {
     "gezipai": dict(
         target="esp32s3",
         macro="NRL_BOARD_GEZIPAI",
+        sdkconfig=["sdkconfig.gezipai.defaults"],
+        lvgl=True,
+        extra=[],
+    ),
+    "gezipai_4g": dict(
+        target="esp32s3",
+        macro="NRL_BOARD_GEZIPAI_4G",
         sdkconfig=["sdkconfig.gezipai.defaults"],
         lvgl=True,
         extra=[],

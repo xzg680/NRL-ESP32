@@ -361,7 +361,7 @@ static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
     for (size_t i = 0; i < kFrameSamples; ++i) {
         dst[i] = mic_pcm_apply_gain(raw[i * 2]);
         if (dst_ref != nullptr) {
-#if NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD_IS_GEZIPAI_FAMILY
             dst_ref[i] = 0;
 #else
             dst_ref[i] = raw[i * 2 + 1];

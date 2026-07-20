@@ -11,6 +11,7 @@ set(app_sources
     media/opus_voice.cpp
     services/ai_assistant.cpp
     services/aprs_service.cpp
+    services/cellular_rndis_service.cpp
     services/config_notify.cpp
     services/display_notice.cpp
     services/espnow_link.cpp
@@ -118,6 +119,13 @@ list(APPEND app_priv_requires sahlberg__libsmb2 vfs)
 if(IDF_TARGET STREQUAL "esp32s31")
     list(APPEND app_priv_requires usb espressif__usb_host_msc espressif__led_strip fatfs
                                   espressif__esp_websocket_client espressif__cjson)
+endif()
+
+# USB RNDIS support is kept as an implementation option, but no current board
+# enables it by default. The Gezipai 4G hardware uses ML307 over UART instead.
+if(NRL_BOARD_ID STREQUAL "NRL_BOARD_USB_RNDIS_EXPERIMENT")
+    list(APPEND app_priv_requires usb espressif__iot_eth espressif__iot_usbh_cdc
+                                  espressif__iot_usbh_rndis)
 endif()
 
 idf_component_register(

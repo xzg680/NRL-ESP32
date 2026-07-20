@@ -17,6 +17,7 @@
 
 #include <NimBLEDevice.h>
 
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_timer.h>
@@ -40,6 +41,20 @@ constexpr char kServiceUuid[] = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kRxUuid[] = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr char kTxUuid[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 constexpr size_t kCommandBufferSize = 160;
+// IDF's nimble_port_freertos_init() aborts the whole app if the host task
+// cannot be created. NimBLEDevice::init() consumes controller/host memory
+// before that task is created, so check the whole BLE startup budget up front
+// and fail closed under DRAM pressure instead of reboot-looping.
+constexpr size_t kBleHostStackBytes =
+#if defined(CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE)
+    CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE;
+#elif defined(CONFIG_BT_NIMBLE_TASK_STACK_SIZE)
+    CONFIG_BT_NIMBLE_TASK_STACK_SIZE;
+#else
+    4096u;
+#endif
+constexpr size_t kBleMinLargestInternalBlock = kBleHostStackBytes + 32768u;
+constexpr size_t kBleMinFreeInternal = 96u * 1024u;
 
 NimBLEServer *s_server = nullptr;
 NimBLECharacteristic *s_tx = nullptr;
@@ -471,6 +486,20 @@ bool BLEConfig_Init(void)
 {
     if (s_initialized) {
         return true;
+    }
+
+    const size_t free_internal =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t largest_internal =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (free_internal < kBleMinFreeInternal ||
+        largest_internal < kBleMinLargestInternalBlock) {
+        ESP_LOGW(TAG, "BLE skipped: internal free=%u largest=%u, need free>=%u largest>=%u",
+                 static_cast<unsigned>(free_internal),
+                 static_cast<unsigned>(largest_internal),
+                 static_cast<unsigned>(kBleMinFreeInternal),
+                 static_cast<unsigned>(kBleMinLargestInternalBlock));
+        return false;
     }
 
     NimBLEDevice::init(kBleDeviceName);

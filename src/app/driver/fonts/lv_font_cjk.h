@@ -7,7 +7,7 @@
 
 #include "driver/board_pins.h"
 
-#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_GEZIPAI
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD_IS_GEZIPAI_FAMILY
 
 #include <lvgl.h>
 

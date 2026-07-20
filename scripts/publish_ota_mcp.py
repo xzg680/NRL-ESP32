@@ -31,7 +31,13 @@ from pathlib import Path
 from typing import Any
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
-BOARDS = ("gezipai", "bh4tdv", "s31_korvo", "s31_function_coreboard")
+BOARDS = ("gezipai", "gezipai_4g", "bh4tdv", "s31_korvo", "s31_function_coreboard")
+DEFAULT_PUBLISH_BOARDS = (
+    "gezipai",
+    "bh4tdv",
+    "s31_korvo",
+    "s31_function_coreboard",
+)
 REQUIRED_TOOLS = {
     "firmware.create_upload",
     "firmware.get_status",
@@ -317,7 +323,7 @@ def main() -> int:
         nargs="*",
         choices=BOARDS,
         metavar="BOARD",
-        help="board(s) to publish; omitted means all four boards",
+        help="board(s) to publish; omitted means released boards only",
     )
     parser.add_argument("--server", default=os.environ.get("OTA_SERVER_URL", ""))
     parser.add_argument(
@@ -352,7 +358,7 @@ def main() -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     version = (args.version or package_helpers.firmware_version(repo)).removeprefix("v")
-    boards = args.boards or list(BOARDS)
+    boards = args.boards or list(DEFAULT_PUBLISH_BOARDS)
     try:
         client = MCPClient(args.server, token)
         missing = REQUIRED_TOOLS - client.list_tools()

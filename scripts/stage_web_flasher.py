@@ -1,8 +1,9 @@
 """Stage the USB web-flasher (esp-web-tools) from native ESP-IDF build output.
 
-Only the ESP32-S3 boards (gezipai, bh4tdv) are web-flashable: esp-web-tools /
-esptool-js has no support for the ESP32-S31, so both S31 boards are serial-only
-(for example, `python scripts/build.py s31_function_coreboard flash`).
+Only the released ESP32-S3 boards (gezipai, bh4tdv) are web-flashable:
+esp-web-tools / esptool-js has no support for the ESP32-S31, so both S31
+boards are serial-only (for example, `python scripts/build.py
+s31_function_coreboard flash`).
 
 For each board it reads build/<board>/flasher_args.json -- the authoritative
 offset->file map ESP-IDF emits -- copies every flash image into

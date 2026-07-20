@@ -39,6 +39,12 @@ void applyDefaults()
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
     s_config.uart1_enabled = false;
     s_config.uart2_enabled = false;
+#elif NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+    // UART1 is reserved for the onboard ML307R modem on the 4G Gezipai.
+    // UART2/GPS is disabled by default because the normal Gezipai TX pin (IO9)
+    // is the LCD backlight on this hardware revision.
+    s_config.uart1_enabled = false;
+    s_config.uart2_enabled = false;
 #else
     s_config.uart1_enabled = true;
     s_config.uart2_enabled = true;
@@ -99,7 +105,16 @@ extern "C" bool SERIAL_PORT_CONFIG_IsAllowedPin(const int gpio)
         default:
             return false;
     }
-#elif NRL_BOARD == NRL_BOARD_GEZIPAI
+#elif NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+    switch (gpio) {
+        case 10: case 11: case 12: case 14:
+        case 22: case 23: case 24: case 25: case 33: case 34: case 35:
+        case 36: case 37: case 43:
+            return true;
+        default:
+            return false;
+    }
+#elif NRL_BOARD_IS_GEZIPAI_FAMILY
     switch (gpio) {
         case 8: case 9: case 10: case 11: case 12: case 13: case 14:
         case 22: case 23: case 24: case 25: case 33: case 34: case 35:
@@ -123,6 +138,9 @@ extern "C" bool SERIAL_PORT_CONFIG_IsAllowedPin(const int gpio)
 extern "C" bool SERIAL_PORT_CONFIG_Validate(const SerialPortConfig *config)
 {
     if (config == nullptr ||
+#if NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+        config->uart1_enabled ||
+#endif
         !SERIAL_PORT_CONFIG_IsAllowedPin(config->uart1_rx_pin) ||
         !SERIAL_PORT_CONFIG_IsAllowedPin(config->uart1_tx_pin) ||
         !SERIAL_PORT_CONFIG_IsAllowedPin(config->uart2_rx_pin) ||
