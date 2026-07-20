@@ -67,12 +67,26 @@ typedef struct {
 // delivered a recognized RMC/GGA sentence recently; it is intentionally
 // separate from `has_fix` so the Web page can show a receiver that is online
 // but still acquiring satellites.
+#define APRS_GPS_SATELLITE_MAX 32u
+
+typedef struct {
+    char talker[3];             // NMEA constellation/talker: GP, GL, GA, GB, GN...
+    uint16_t prn;
+    int16_t elevation_deg;      // -1 when omitted
+    int16_t azimuth_deg;        // -1 when omitted
+    int16_t snr_dbhz;           // -1 when the receiver has no signal estimate
+} AprsGpsSatelliteInfo;
+
 typedef struct {
     bool uart_enabled;
     bool connected;
     bool has_fix;
     uint8_t fix_quality;       // NMEA GGA quality (0=no fix, 1=GPS, 2=DGPS, ...)
-    int16_t satellites;        // -1 when unavailable
+    int16_t satellites;        // GGA satellites used in the fix; -1 unavailable
+    int16_t visible_satellites; // recent GSV entries; -1 when GSV unavailable
+    uint8_t satellite_detail_count;
+    AprsGpsSatelliteInfo satellite_details[APRS_GPS_SATELLITE_MAX];
+    uint32_t gsv_age_ms;
     double latitude;
     double longitude;
     double altitude_m;

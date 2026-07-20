@@ -131,6 +131,10 @@ uint32_t s_gps_last_fix_ms = 0;
 uint32_t s_gps_last_nmea_ms = 0;
 uint32_t s_gps_last_rmc_ms = 0;
 uint32_t s_gps_last_gga_ms = 0;
+AprsGpsSatelliteInfo s_gps_visible[APRS_GPS_SATELLITE_MAX] = {};
+uint32_t s_gps_visible_seen_ms[APRS_GPS_SATELLITE_MAX] = {};
+uint8_t s_gps_visible_count = 0;
+uint32_t s_gps_last_gsv_ms = 0;
 portMUX_TYPE s_gps_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // NMEA ring, filled by the APRS task from dedicated UART2.
@@ -362,6 +366,54 @@ size_t splitNmea(char *line, const char *fields[], size_t max_fields)
     return count;
 }
 
+int16_t nmeaOptionalInt(const char *field, int minimum, int maximum)
+{
+    if (field == nullptr || field[0] == '\0') return -1;
+    char *end = nullptr;
+    const long value = strtol(field, &end, 10);
+    return end != field && *end == '\0' && value >= minimum && value <= maximum
+               ? static_cast<int16_t>(value)
+               : -1;
+}
+
+void updateGsvSatellites(const char talker[3], const AprsGpsSatelliteInfo *satellites,
+                         const size_t count, const bool starts_cycle,
+                         const uint32_t received_ms)
+{
+    portENTER_CRITICAL(&s_gps_mux);
+    if (starts_cycle) {
+        size_t write = 0;
+        for (size_t read = 0; read < s_gps_visible_count; ++read) {
+            if (strncmp(s_gps_visible[read].talker, talker, 2) != 0) {
+                if (write != read) {
+                    s_gps_visible[write] = s_gps_visible[read];
+                    s_gps_visible_seen_ms[write] = s_gps_visible_seen_ms[read];
+                }
+                ++write;
+            }
+        }
+        s_gps_visible_count = static_cast<uint8_t>(write);
+    }
+    for (size_t incoming = 0; incoming < count; ++incoming) {
+        size_t target = s_gps_visible_count;
+        for (size_t existing = 0; existing < s_gps_visible_count; ++existing) {
+            if (s_gps_visible[existing].prn == satellites[incoming].prn &&
+                strncmp(s_gps_visible[existing].talker, talker, 2) == 0) {
+                target = existing;
+                break;
+            }
+        }
+        if (target == s_gps_visible_count) {
+            if (s_gps_visible_count >= APRS_GPS_SATELLITE_MAX) continue;
+            ++s_gps_visible_count;
+        }
+        s_gps_visible[target] = satellites[incoming];
+        s_gps_visible_seen_ms[target] = received_ms;
+    }
+    s_gps_last_gsv_ms = received_ms;
+    portEXIT_CRITICAL(&s_gps_mux);
+}
+
 void handleNmeaLine(char *line)
 {
     // strip checksum
@@ -454,6 +506,30 @@ void handleNmeaLine(char *line)
             s_gps_fix = false;
         }
         portEXIT_CRITICAL(&s_gps_mux);
+    } else if (strncmp(type, "GSV", 3) == 0) {
+        const size_t n = splitNmea(line, f, 20);
+        // $xxGSV,total_messages,message_number,total_visible,
+        //        prn,elevation,azimuth,snr,...[,signal_id]
+        const int16_t message_number = n >= 3 ? nmeaOptionalInt(f[2], 1, 99) : -1;
+        if (n >= 4 && message_number > 0) {
+            AprsGpsSatelliteInfo parsed[4] = {};
+            size_t parsed_count = 0;
+            const char talker[3] = {line[1], line[2], '\0'};
+            for (size_t base = 4; base + 3 < n && parsed_count < 4; base += 4) {
+                const int16_t prn = nmeaOptionalInt(f[base], 1, 999);
+                if (prn < 0) continue;
+                AprsGpsSatelliteInfo &satellite = parsed[parsed_count++];
+                satellite.talker[0] = talker[0];
+                satellite.talker[1] = talker[1];
+                satellite.talker[2] = '\0';
+                satellite.prn = static_cast<uint16_t>(prn);
+                satellite.elevation_deg = nmeaOptionalInt(f[base + 1], 0, 90);
+                satellite.azimuth_deg = nmeaOptionalInt(f[base + 2], 0, 359);
+                satellite.snr_dbhz = nmeaOptionalInt(f[base + 3], 0, 99);
+            }
+            updateGsvSatellites(talker, parsed, parsed_count, message_number == 1,
+                                nowMs());
+        }
     }
 }
 
@@ -1706,10 +1782,12 @@ extern "C" void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out)
     SERIAL_PORT_CONFIG_Get(&serial);
 
     AprsGpsInfo snapshot{};
+    const uint32_t now = nowMs();
     uint32_t last_nmea_ms = 0u;
     uint32_t last_fix_ms = 0u;
     uint32_t last_rmc_ms = 0u;
     uint32_t last_gga_ms = 0u;
+    uint32_t last_gsv_ms = 0u;
     portENTER_CRITICAL(&s_gps_mux);
     snapshot.has_fix = s_gps_fix;
     snapshot.fix_quality = s_gps_fix_quality;
@@ -1725,9 +1803,16 @@ extern "C" void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out)
     last_fix_ms = s_gps_last_fix_ms;
     last_rmc_ms = s_gps_last_rmc_ms;
     last_gga_ms = s_gps_last_gga_ms;
+    last_gsv_ms = s_gps_last_gsv_ms;
+    for (size_t i = 0; i < s_gps_visible_count &&
+                       snapshot.satellite_detail_count < APRS_GPS_SATELLITE_MAX; ++i) {
+        if ((now - s_gps_visible_seen_ms[i]) < kGpsDataFreshMs) {
+            snapshot.satellite_details[snapshot.satellite_detail_count++] =
+                s_gps_visible[i];
+        }
+    }
     portEXIT_CRITICAL(&s_gps_mux);
 
-    const uint32_t now = nowMs();
     snapshot.uart_enabled = serial.uart2_enabled;
     snapshot.age_ms = last_nmea_ms != 0u ? now - last_nmea_ms : UINT32_MAX;
     snapshot.connected = snapshot.uart_enabled && last_nmea_ms != 0u &&
@@ -1739,6 +1824,11 @@ extern "C" void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out)
                            (now - last_rmc_ms) < kGpsDataFreshMs;
     const bool gga_fresh = last_gga_ms != 0u &&
                            (now - last_gga_ms) < kGpsDataFreshMs;
+    const bool gsv_fresh = last_gsv_ms != 0u &&
+                           (now - last_gsv_ms) < kGpsDataFreshMs;
+    snapshot.gsv_age_ms = last_gsv_ms != 0u ? now - last_gsv_ms : UINT32_MAX;
+    snapshot.visible_satellites = gsv_fresh ? snapshot.satellite_detail_count : -1;
+    if (!gsv_fresh) snapshot.satellite_detail_count = 0u;
     if (!snapshot.has_fix) {
         snapshot.latitude = NAN;
         snapshot.longitude = NAN;

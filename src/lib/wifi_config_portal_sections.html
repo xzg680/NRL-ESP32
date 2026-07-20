@@ -342,7 +342,8 @@
   <div class="section-head"><h2 data-i18n="gpsLive">GPS Live Information</h2><span class="hint mono" id="gps-live-state"></span></div>
   <div class="grid">
     <div><label data-i18n="gpsFixStatus">Fix status</label><div class="mono" id="gps-live-fix">-</div></div>
-    <div><label data-i18n="gpsSatellites">Satellites</label><div class="mono" id="gps-live-satellites">-</div></div>
+    <div><label data-i18n="gpsSatellitesUsed">Satellites used</label><div class="mono" id="gps-live-satellites">-</div></div>
+    <div><label data-i18n="gpsSatellitesVisible">Satellites visible (GSV)</label><div class="mono" id="gps-live-visible">-</div></div>
     <div><label data-i18n="gpsLatitude">Latitude</label><div class="mono" id="gps-live-latitude">-</div></div>
     <div><label data-i18n="gpsLongitude">Longitude</label><div class="mono" id="gps-live-longitude">-</div></div>
     <div><label data-i18n="gpsSpeed">Speed</label><div class="mono" id="gps-live-speed">-</div></div>
@@ -350,6 +351,8 @@
     <div><label data-i18n="gpsAltitude">Altitude</label><div class="mono" id="gps-live-altitude">-</div></div>
     <div><label data-i18n="gpsAccuracy">Fix quality / HDOP</label><div class="mono" id="gps-live-accuracy">-</div></div>
     <div><label data-i18n="gpsUpdated">NMEA updated</label><div class="mono" id="gps-live-updated">-</div></div>
+    <div><label data-i18n="gpsGsvUpdated">GSV updated</label><div class="mono" id="gps-live-gsv-updated">-</div></div>
+    <div class="span-2"><label data-i18n="gpsSatelliteSignals">Satellite signals (constellation/PRN, elevation, azimuth, SNR)</label><div class="mono" id="gps-live-signals" style="white-space:pre-wrap;line-height:1.7">-</div></div>
   </div>
 </section>
 <section class="panel">
@@ -408,6 +411,7 @@
         text('gps-live-state', 'NMEA: OK');
         text('gps-live-fix', fixed ? tr('gpsFixed', 'Fixed') : tr('gpsAcquiring', 'Acquiring'));
         text('gps-live-satellites', gps.satellites === undefined ? '-' : String(gps.satellites));
+        text('gps-live-visible', gps.visible_satellites === undefined ? '-' : String(gps.visible_satellites));
         text('gps-live-latitude', fixed ? fmt(gps.lat, '', 6) : '-');
         text('gps-live-longitude', fixed ? fmt(gps.lon, '', 6) : '-');
         text('gps-live-speed', fixed ? fmt(gps.speed, ' km/h', 1) : '-');
@@ -417,6 +421,17 @@
         if (gps.hdop !== undefined) quality += ' / HDOP=' + fmt(gps.hdop, '', 1);
         text('gps-live-accuracy', quality);
         text('gps-live-updated', fmt(Number(gps.age_ms) / 1000, ' s', 1));
+        text('gps-live-gsv-updated', gps.gsv_age_ms === undefined ? '-' :
+             fmt(Number(gps.gsv_age_ms) / 1000, ' s', 1));
+        var signals = Array.isArray(gps.satellite_signals) ? gps.satellite_signals.slice() : [];
+        signals.sort(function(a, b) { return Number(b.snr) - Number(a.snr); });
+        text('gps-live-signals', signals.length ? signals.map(function(s) {
+          var id = String(s.talker || '--') + String(s.prn).padStart(2, '0');
+          var elevation = Number(s.elevation) >= 0 ? s.elevation + '\u00b0' : '--';
+          var azimuth = Number(s.azimuth) >= 0 ? s.azimuth + '\u00b0' : '--';
+          var snr = Number(s.snr) >= 0 ? s.snr + ' dB-Hz' : '--';
+          return id + '  EL ' + elevation + '  AZ ' + azimuth + '  SNR ' + snr;
+        }).join('\n') : tr('gpsNoSatelliteSignals', 'No GSV satellite signal data'));
       }
       function refresh() {
         fetch('/aprs/stations').then(function(r){ return r.json(); }).then(function(data){

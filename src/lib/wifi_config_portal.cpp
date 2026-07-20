@@ -1544,7 +1544,7 @@ static esp_err_t handleAprsStations(httpd_req_t *req)
     APRS_SERVICE_GetGpsInfo(&gps);
 
     std::string body;
-    body.reserve(1280);
+    body.reserve(4096);
     body += "{\"net\":";
     body += APRS_SERVICE_IsNetConnected() ? "true" : "false";
     body += ",\"gps\":";
@@ -1562,7 +1562,11 @@ static esp_err_t handleAprsStations(httpd_req_t *req)
     if (gps.satellites >= 0) {
         body += ",\"satellites\":" + std::to_string(gps.satellites);
     }
-    char num[64];
+    if (gps.visible_satellites >= 0) {
+        body += ",\"visible_satellites\":" + std::to_string(gps.visible_satellites);
+        body += ",\"gsv_age_ms\":" + std::to_string(gps.gsv_age_ms);
+    }
+    char num[128];
     if (gps.has_fix && isfinite(gps.latitude) && isfinite(gps.longitude)) {
         snprintf(num, sizeof(num), ",\"lat\":%.6f,\"lon\":%.6f",
                  gps.latitude, gps.longitude);
@@ -1585,6 +1589,20 @@ static esp_err_t handleAprsStations(httpd_req_t *req)
                  static_cast<double>(gps.hdop));
         body += num;
     }
+    body += ",\"satellite_signals\":[";
+    for (size_t i = 0; i < gps.satellite_detail_count; ++i) {
+        const AprsGpsSatelliteInfo &satellite = gps.satellite_details[i];
+        if (i > 0) body += ",";
+        snprintf(num, sizeof(num),
+                 "{\"talker\":\"%.2s\",\"prn\":%u,\"elevation\":%d,"
+                 "\"azimuth\":%d,\"snr\":%d}",
+                 satellite.talker, static_cast<unsigned>(satellite.prn),
+                 static_cast<int>(satellite.elevation_deg),
+                 static_cast<int>(satellite.azimuth_deg),
+                 static_cast<int>(satellite.snr_dbhz));
+        body += num;
+    }
+    body += "]";
     body += "}";
     body += ",\"stations\":[";
     for (size_t i = 0; i < count; ++i) {
