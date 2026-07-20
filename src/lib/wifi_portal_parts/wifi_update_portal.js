@@ -9,8 +9,8 @@ Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS'});
 Object.assign(translations.en,{signalingConfig:'Signaling / CTCSS'});
 Object.assign(translations.zh,{signalingConfig:'信令 / CTCSS'});
 Object.assign(translations.en,{remoteUpdating:'Installing firmware... {percent}%'});
-Object.assign(translations.en,{releaseTitle:'0.8.6 feature updates',releaseGpsLive:'Adds real-time GPS status, satellites, position, speed, course, altitude, fix quality, and HDOP to the APRS Web page.',releaseWifiProfiles:'Stores up to five WiFi networks while automatically migrating the existing network.',releaseWifiFailover:'Scans and tries saved networks by priority, with Web controls to add, update, delete, and reorder them.'});
-Object.assign(translations.zh,{releaseTitle:'0.8.6 功能更新',releaseGpsLive:'APRS 网页新增 GPS 实时状态、卫星数量、经纬度、速度、航向、海拔、定位质量和 HDOP。',releaseWifiProfiles:'最多保存 5 个 WiFi 热点，并自动迁移设备现有热点配置。',releaseWifiFailover:'扫描后按优先级依次尝试已保存热点，Web 支持新增、更新、删除及调整优先级。'});
+Object.assign(translations.en,{releaseTitle:'0.8.7 feature updates',releaseServerSelector:'Loads the available NRL platform servers into a selector and synchronizes the selected server port.'});
+Object.assign(translations.zh,{releaseTitle:'0.8.7 功能更新',releaseServerSelector:'从平台接口加载可用的 NRL 服务器下拉列表，并自动同步所选服务器端口。'});
 Object.assign(translations.zh,{remoteUpdating:'正在升级固件... {percent}%'});
 function lang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}
 function t(k,values={}){const l=lang();let text=(translations[l]&&translations[l][k])||translations.en[k]||k;Object.entries(values).forEach(([name,value])=>{text=text.replace('{'+name+'}',String(value));});return text;}
