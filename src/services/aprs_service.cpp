@@ -5,6 +5,7 @@
 #include "driver/board_pins.h"
 #include "driver/external_radio.h"
 #include "driver/gps_serial.h"
+#include "driver/serial_port_config.h"
 #include "lib/aprs/aprs_ax25.h"
 #include "lib/aprs/aprs_modem.h"
 #include "lib/aprs/parse_aprs.h"
@@ -56,6 +57,7 @@ constexpr double kAutoMoveKm = 0.3;        // early beacon after moving this far
 constexpr int32_t kDefaultLatE6 = 31888500;
 constexpr int32_t kDefaultLonE6 = 118814100;
 constexpr uint32_t kGpsFixFreshMs = 10000u;   // fix older than this = stale
+constexpr uint32_t kGpsDataFreshMs = 5000u;   // recognized NMEA older than this = disconnected
 constexpr uint32_t kIsReconnectMs = 30000u;   // APRS-IS reconnect backoff
 constexpr size_t kStationCount = 64u;         // PSRAM station table size
 constexpr size_t kRxRingSamples = 16384u;     // ~1 s of 16 kHz mic tap
@@ -120,9 +122,15 @@ double s_gps_lat = 0.0;
 double s_gps_lon = 0.0;
 double s_gps_alt_m = 0.0;
 float s_gps_speed_kmh = -1.0f;
+float s_gps_hdop = NAN;
 uint16_t s_gps_course = 0;
 int16_t s_gps_satellites = -1;
+uint8_t s_gps_fix_quality = 0;
 uint32_t s_gps_last_fix_ms = 0;
+uint32_t s_gps_last_nmea_ms = 0;
+uint32_t s_gps_last_rmc_ms = 0;
+uint32_t s_gps_last_gga_ms = 0;
+portMUX_TYPE s_gps_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // NMEA ring, filled by the APRS task from dedicated UART2.
 constexpr size_t kNmeaRingSize = 1024u;
@@ -368,35 +376,81 @@ void handleNmeaLine(char *line)
     const char *f[20] = {nullptr};
     if (strncmp(type, "RMC", 3) == 0) {
         const size_t n = splitNmea(line, f, 20);
+        const uint32_t received_ms = nowMs();
         // $xxRMC,time,status,lat,NS,lon,EW,speed_kn,course,date,...
         if (n >= 9 && f[2][0] == 'A' && f[3][0] != '\0' && f[5][0] != '\0') {
-            s_gps_lat = nmeaCoordToDeg(f[3], f[4]);
-            s_gps_lon = nmeaCoordToDeg(f[5], f[6]);
-            s_gps_speed_kmh = (f[7][0] != '\0') ? (float)(atof(f[7]) * 1.852) : -1.0f;
-            s_gps_course = (f[8][0] != '\0') ? (uint16_t)atof(f[8]) : 0;
-            s_gps_last_fix_ms = nowMs();
+            const double latitude = nmeaCoordToDeg(f[3], f[4]);
+            const double longitude = nmeaCoordToDeg(f[5], f[6]);
+            const float speed_kmh = (f[7][0] != '\0')
+                                        ? static_cast<float>(atof(f[7]) * 1.852)
+                                        : -1.0f;
+            const uint16_t course = (f[8][0] != '\0')
+                                        ? static_cast<uint16_t>(atof(f[8]))
+                                        : 0u;
+            portENTER_CRITICAL(&s_gps_mux);
+            s_gps_last_nmea_ms = received_ms;
+            s_gps_last_rmc_ms = received_ms;
+            s_gps_lat = latitude;
+            s_gps_lon = longitude;
+            s_gps_speed_kmh = speed_kmh;
+            s_gps_course = course;
+            s_gps_last_fix_ms = received_ms;
             s_gps_fix = true;
+            portEXIT_CRITICAL(&s_gps_mux);
         } else if (n >= 3 && f[2][0] == 'V') {
+            portENTER_CRITICAL(&s_gps_mux);
+            s_gps_last_nmea_ms = received_ms;
+            s_gps_last_rmc_ms = received_ms;
             s_gps_fix = false;
+            portEXIT_CRITICAL(&s_gps_mux);
+        } else {
+            portENTER_CRITICAL(&s_gps_mux);
+            s_gps_last_nmea_ms = received_ms;
+            s_gps_last_rmc_ms = received_ms;
+            portEXIT_CRITICAL(&s_gps_mux);
         }
     } else if (strncmp(type, "GGA", 3) == 0) {
         const size_t n = splitNmea(line, f, 20);
+        const uint32_t received_ms = nowMs();
         // $xxGGA,time,lat,NS,lon,EW,fix,sats,hdop,alt,M,...
-        if (n >= 8 && f[7][0] != '\0') {
-            const long satellites = strtol(f[7], nullptr, 10);
-            s_gps_satellites = (satellites >= 0 && satellites <= 99)
-                                   ? static_cast<int16_t>(satellites)
-                                   : -1;
-        }
-        if (n >= 10 && f[6][0] != '\0' && f[6][0] != '0' && f[2][0] != '\0') {
-            s_gps_lat = nmeaCoordToDeg(f[2], f[3]);
-            s_gps_lon = nmeaCoordToDeg(f[4], f[5]);
-            if (f[9][0] != '\0') {
-                s_gps_alt_m = atof(f[9]);
-            }
-            s_gps_last_fix_ms = nowMs();
+        const long quality_value = (n >= 7 && f[6][0] != '\0')
+                                       ? strtol(f[6], nullptr, 10)
+                                       : 0l;
+        const uint8_t quality = (quality_value >= 0l && quality_value <= 8l)
+                                    ? static_cast<uint8_t>(quality_value)
+                                    : 0u;
+        const long satellite_value = (n >= 8 && f[7][0] != '\0')
+                                         ? strtol(f[7], nullptr, 10)
+                                         : -1l;
+        const int16_t satellites = (satellite_value >= 0l && satellite_value <= 99l)
+                                       ? static_cast<int16_t>(satellite_value)
+                                       : -1;
+        const float hdop = (n >= 9 && f[8][0] != '\0')
+                               ? static_cast<float>(atof(f[8]))
+                               : NAN;
+        const bool valid_fix = n >= 10 && quality > 0u && f[2][0] != '\0' &&
+                               f[4][0] != '\0';
+        const double latitude = valid_fix ? nmeaCoordToDeg(f[2], f[3]) : 0.0;
+        const double longitude = valid_fix ? nmeaCoordToDeg(f[4], f[5]) : 0.0;
+        const bool altitude_valid = valid_fix && f[9][0] != '\0';
+        const double altitude_m = altitude_valid ? atof(f[9]) : 0.0;
+
+        portENTER_CRITICAL(&s_gps_mux);
+        s_gps_last_nmea_ms = received_ms;
+        s_gps_last_gga_ms = received_ms;
+        s_gps_fix_quality = quality;
+        s_gps_satellites = satellites;
+        s_gps_hdop = hdop;
+        if (valid_fix) {
+            s_gps_lat = latitude;
+            s_gps_lon = longitude;
+            if (altitude_valid) s_gps_alt_m = altitude_m;
+            s_gps_last_fix_ms = received_ms;
             s_gps_fix = true;
+        } else {
+            s_gps_fix = false;
         }
+        portEXIT_CRITICAL(&s_gps_mux);
     }
 }
 
@@ -1636,7 +1690,68 @@ extern "C" uint32_t APRS_SERVICE_GetTxCount(void) { return s_tx_count; }
 
 extern "C" bool APRS_SERVICE_GpsHasFix(void)
 {
-    return s_gps_fix && (nowMs() - s_gps_last_fix_ms) < kGpsFixFreshMs;
+    AprsGpsInfo info{};
+    APRS_SERVICE_GetGpsInfo(&info);
+    return info.has_fix;
+}
+
+extern "C" void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out)
+{
+    if (out == nullptr) return;
+
+    SerialPortConfig serial{};
+    SERIAL_PORT_CONFIG_Get(&serial);
+
+    AprsGpsInfo snapshot{};
+    uint32_t last_nmea_ms = 0u;
+    uint32_t last_fix_ms = 0u;
+    uint32_t last_rmc_ms = 0u;
+    uint32_t last_gga_ms = 0u;
+    portENTER_CRITICAL(&s_gps_mux);
+    snapshot.has_fix = s_gps_fix;
+    snapshot.fix_quality = s_gps_fix_quality;
+    snapshot.satellites = s_gps_satellites;
+    snapshot.latitude = s_gps_lat;
+    snapshot.longitude = s_gps_lon;
+    snapshot.altitude_m = s_gps_alt_m;
+    snapshot.speed_kmh = s_gps_speed_kmh;
+    snapshot.hdop = s_gps_hdop;
+    snapshot.course_deg = s_gps_course;
+    last_nmea_ms = s_gps_last_nmea_ms;
+    last_fix_ms = s_gps_last_fix_ms;
+    last_rmc_ms = s_gps_last_rmc_ms;
+    last_gga_ms = s_gps_last_gga_ms;
+    portEXIT_CRITICAL(&s_gps_mux);
+
+    const uint32_t now = nowMs();
+    snapshot.uart_enabled = serial.uart2_enabled;
+    snapshot.age_ms = last_nmea_ms != 0u ? now - last_nmea_ms : UINT32_MAX;
+    snapshot.connected = snapshot.uart_enabled && last_nmea_ms != 0u &&
+                         snapshot.age_ms < kGpsDataFreshMs;
+    snapshot.has_fix = snapshot.connected && snapshot.has_fix &&
+                       last_fix_ms != 0u && (now - last_fix_ms) < kGpsFixFreshMs;
+
+    const bool rmc_fresh = last_rmc_ms != 0u &&
+                           (now - last_rmc_ms) < kGpsDataFreshMs;
+    const bool gga_fresh = last_gga_ms != 0u &&
+                           (now - last_gga_ms) < kGpsDataFreshMs;
+    if (!snapshot.has_fix) {
+        snapshot.latitude = NAN;
+        snapshot.longitude = NAN;
+    }
+    if (!snapshot.has_fix || !rmc_fresh) {
+        snapshot.speed_kmh = NAN;
+        snapshot.course_deg = 0u;
+    }
+    if (!snapshot.connected || !gga_fresh) {
+        snapshot.fix_quality = 0u;
+        snapshot.satellites = -1;
+        snapshot.hdop = NAN;
+        snapshot.altitude_m = NAN;
+    } else if (!snapshot.has_fix) {
+        snapshot.altitude_m = NAN;
+    }
+    *out = snapshot;
 }
 
 extern "C" size_t APRS_SERVICE_GetStations(AprsStationInfo *out, size_t max_count)

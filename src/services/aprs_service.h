@@ -63,6 +63,25 @@ typedef struct {
     char comment[40];
 } AprsStationInfo;
 
+// Live GPS/NMEA snapshot for the device UI. `connected` means UART2 has
+// delivered a recognized RMC/GGA sentence recently; it is intentionally
+// separate from `has_fix` so the Web page can show a receiver that is online
+// but still acquiring satellites.
+typedef struct {
+    bool uart_enabled;
+    bool connected;
+    bool has_fix;
+    uint8_t fix_quality;       // NMEA GGA quality (0=no fix, 1=GPS, 2=DGPS, ...)
+    int16_t satellites;        // -1 when unavailable
+    double latitude;
+    double longitude;
+    double altitude_m;
+    float speed_kmh;
+    float hdop;
+    uint16_t course_deg;
+    uint32_t age_ms;           // age of the latest recognized NMEA sentence
+} AprsGpsInfo;
+
 void APRS_SERVICE_Init(void);
 
 // Master switch; persists and starts/stops the whole service.
@@ -106,6 +125,7 @@ bool APRS_SERVICE_IsNetConnected(void);
 uint32_t APRS_SERVICE_GetRxCount(void);   // frames decoded from RF
 uint32_t APRS_SERVICE_GetTxCount(void);   // beacons sent
 bool APRS_SERVICE_GpsHasFix(void);
+void APRS_SERVICE_GetGpsInfo(AprsGpsInfo *out);
 
 // Station list snapshot, ordered most-recently-heard first. Returns the
 // number of entries copied. Bump-counter lets displays skip refreshes

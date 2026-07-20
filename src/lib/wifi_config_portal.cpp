@@ -1540,17 +1540,53 @@ static esp_err_t handleAprsStations(httpd_req_t *req)
     s_server.bind(req);
     static AprsStationInfo stations[32];
     const size_t count = APRS_SERVICE_GetStations(stations, 32);
+    AprsGpsInfo gps{};
+    APRS_SERVICE_GetGpsInfo(&gps);
 
     std::string body;
-    body.reserve(1024);
+    body.reserve(1280);
     body += "{\"net\":";
     body += APRS_SERVICE_IsNetConnected() ? "true" : "false";
     body += ",\"gps\":";
-    body += APRS_SERVICE_GpsHasFix() ? "true" : "false";
+    body += gps.has_fix ? "true" : "false";
     body += ",\"rx\":" + std::to_string(APRS_SERVICE_GetRxCount());
     body += ",\"tx\":" + std::to_string(APRS_SERVICE_GetTxCount());
+    body += ",\"gps_info\":{\"enabled\":";
+    body += gps.uart_enabled ? "true" : "false";
+    body += ",\"connected\":";
+    body += gps.connected ? "true" : "false";
+    body += ",\"fix\":";
+    body += gps.has_fix ? "true" : "false";
+    body += ",\"quality\":" + std::to_string(gps.fix_quality);
+    body += ",\"age_ms\":" + std::to_string(gps.age_ms);
+    if (gps.satellites >= 0) {
+        body += ",\"satellites\":" + std::to_string(gps.satellites);
+    }
+    char num[64];
+    if (gps.has_fix && isfinite(gps.latitude) && isfinite(gps.longitude)) {
+        snprintf(num, sizeof(num), ",\"lat\":%.6f,\"lon\":%.6f",
+                 gps.latitude, gps.longitude);
+        body += num;
+    }
+    if (isfinite(gps.altitude_m)) {
+        snprintf(num, sizeof(num), ",\"alt\":%.1f", gps.altitude_m);
+        body += num;
+    }
+    if (isfinite(gps.speed_kmh)) {
+        snprintf(num, sizeof(num), ",\"speed\":%.1f",
+                 static_cast<double>(gps.speed_kmh));
+        body += num;
+    }
+    if (gps.course_deg > 0u) {
+        body += ",\"course\":" + std::to_string(gps.course_deg);
+    }
+    if (isfinite(gps.hdop)) {
+        snprintf(num, sizeof(num), ",\"hdop\":%.1f",
+                 static_cast<double>(gps.hdop));
+        body += num;
+    }
+    body += "}";
     body += ",\"stations\":[";
-    char num[32];
     for (size_t i = 0; i < count; ++i) {
         const AprsStationInfo &s = stations[i];
         if (i > 0) {
