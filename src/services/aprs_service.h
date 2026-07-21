@@ -28,6 +28,8 @@
 extern "C" {
 #endif
 
+#define APRS_COMMENT_MAX_BYTES 96u
+
 typedef struct {
     bool enabled;         // master switch
     bool net_enabled;     // APRS-IS uplink/downlink
@@ -43,7 +45,7 @@ typedef struct {
     uint16_t server_port;
     char server_host[65];
     char path[17];        // RF digi path, e.g. "WIDE1-1"
-    char comment[41];     // beacon comment
+    char comment[APRS_COMMENT_MAX_BYTES + 1u]; // UTF-8 beacon comment
 } AprsConfig;
 
 typedef struct {
@@ -60,7 +62,7 @@ typedef struct {
     uint32_t age_s;     // seconds since last heard
     uint32_t pkt_count;
     uint8_t via_rf;     // 1 = heard on RF, 0 = from APRS-IS
-    char comment[40];
+    char comment[APRS_COMMENT_MAX_BYTES + 1u];
 } AprsStationInfo;
 
 // Live GPS/NMEA snapshot for the device UI. `connected` means UART2 has

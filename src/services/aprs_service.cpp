@@ -83,8 +83,9 @@ struct PersistBlob {
     uint16_t server_port;
     char server_host[65];
     char path[17];
-    char comment[41];
+    char comment_legacy[41]; // pre-0.8.13 field; keep its offset for migration
     uint8_t auto_interval; // appended field: absent in pre-0.6.7 blobs
+    char comment_v2[APRS_COMMENT_MAX_BYTES + 1u]; // appended in 0.8.13
 } __attribute__((packed));
 
 struct StationRec {
@@ -101,7 +102,7 @@ struct StationRec {
     uint32_t last_heard_ms;
     uint32_t pkt_count;
     uint8_t via_rf;
-    char comment[40];
+    char comment[APRS_COMMENT_MAX_BYTES + 1u];
     bool used;
 };
 
@@ -190,6 +191,50 @@ inline uint32_t nowMs()
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
+// Return the longest valid UTF-8 prefix that fits in max_bytes. APRS comments
+// are persisted and displayed as UTF-8; never leave half of a multibyte code
+// point at the end of a fixed-size buffer.
+size_t validUtf8Prefix(const char *text, size_t text_len, size_t max_bytes)
+{
+    if (text == nullptr) return 0u;
+    const size_t limit = text_len < max_bytes ? text_len : max_bytes;
+    size_t i = 0u;
+    while (i < limit) {
+        const uint8_t c = static_cast<uint8_t>(text[i]);
+        size_t width = 0u;
+        if (c < 0x80u) width = 1u;
+        else if (c >= 0xC2u && c <= 0xDFu) width = 2u;
+        else if (c >= 0xE0u && c <= 0xEFu) width = 3u;
+        else if (c >= 0xF0u && c <= 0xF4u) width = 4u;
+        else break;
+        if (i + width > limit) break;
+        bool valid = true;
+        for (size_t j = 1u; j < width; ++j) {
+            if ((static_cast<uint8_t>(text[i + j]) & 0xC0u) != 0x80u) {
+                valid = false;
+                break;
+            }
+        }
+        if (!valid ||
+            (width == 3u && c == 0xE0u && static_cast<uint8_t>(text[i + 1u]) < 0xA0u) ||
+            (width == 3u && c == 0xEDu && static_cast<uint8_t>(text[i + 1u]) >= 0xA0u) ||
+            (width == 4u && c == 0xF0u && static_cast<uint8_t>(text[i + 1u]) < 0x90u) ||
+            (width == 4u && c == 0xF4u && static_cast<uint8_t>(text[i + 1u]) >= 0x90u)) {
+            break;
+        }
+        i += width;
+    }
+    return i;
+}
+
+void copyUtf8Text(char *out, size_t out_size, const char *text, size_t text_len)
+{
+    if (out == nullptr || out_size == 0u) return;
+    const size_t bytes = validUtf8Prefix(text, text_len, out_size - 1u);
+    if (bytes > 0u) memcpy(out, text, bytes);
+    out[bytes] = '\0';
+}
+
 const char *boardType()
 {
 #if NRL_BOARD == NRL_BOARD_GEZIPAI_4G
@@ -248,7 +293,10 @@ void persistConfig()
     blob.server_port = s_cfg.server_port;
     memcpy(blob.server_host, s_cfg.server_host, sizeof(blob.server_host));
     memcpy(blob.path, s_cfg.path, sizeof(blob.path));
-    memcpy(blob.comment, s_cfg.comment, sizeof(blob.comment));
+    copyUtf8Text(blob.comment_legacy, sizeof(blob.comment_legacy),
+                 s_cfg.comment, strlen(s_cfg.comment));
+    copyUtf8Text(blob.comment_v2, sizeof(blob.comment_v2),
+                 s_cfg.comment, strlen(s_cfg.comment));
 
     nvs_handle_t nvs;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
@@ -310,12 +358,22 @@ void loadConfig()
     }
     memcpy(s_cfg.path, blob.path, sizeof(s_cfg.path));
     s_cfg.path[sizeof(s_cfg.path) - 1] = '\0';
-    memcpy(s_cfg.comment, blob.comment, sizeof(s_cfg.comment));
-    s_cfg.comment[sizeof(s_cfg.comment) - 1] = '\0';
-    if (migrate_zero_position || migrate_aprs_server || migrate_tcpip_symbol) {
-        ESP_LOGI(TAG, "migrating APRS defaults: position=%d server=%d symbol=%d",
+    const bool has_extended_comment =
+        size >= offsetof(PersistBlob, comment_v2) + sizeof(blob.comment_v2);
+    const char *saved_comment = has_extended_comment
+                                    ? blob.comment_v2
+                                    : blob.comment_legacy;
+    const size_t saved_capacity = has_extended_comment
+                                      ? sizeof(blob.comment_v2)
+                                      : sizeof(blob.comment_legacy);
+    copyUtf8Text(s_cfg.comment, sizeof(s_cfg.comment), saved_comment,
+                 strnlen(saved_comment, saved_capacity));
+    const bool migrate_extended_comment = !has_extended_comment;
+    if (migrate_zero_position || migrate_aprs_server || migrate_tcpip_symbol ||
+        migrate_extended_comment) {
+        ESP_LOGI(TAG, "migrating APRS defaults: position=%d server=%d symbol=%d comment=%d",
                  (int)migrate_zero_position, (int)migrate_aprs_server,
-                 (int)migrate_tcpip_symbol);
+                 (int)migrate_tcpip_symbol, (int)migrate_extended_comment);
         persistConfig();
     }
 }
@@ -655,7 +713,7 @@ void buildPacketSummary(const struct pbuf_t *pb, char *out, size_t out_size)
         snprintf(source, sizeof(source), "UNKNOWN");
     }
 
-    char description[96] = {};
+    char description[APRS_COMMENT_MAX_BYTES + 32u] = {};
     if (pb->comment != nullptr && pb->comment_len > 0u) {
         copyDisplayText(description, sizeof(description), pb->comment, pb->comment_len);
     } else if (pb->info_start != nullptr && pb->packet_len > 0) {
@@ -775,11 +833,8 @@ void updateStation(const struct pbuf_t *pb, bool via_rf)
         slot->course_deg = pb->course;
     }
     if (pb->comment != nullptr && pb->comment_len > 0) {
-        const size_t clen = (pb->comment_len < sizeof(slot->comment) - 1)
-                                ? pb->comment_len
-                                : sizeof(slot->comment) - 1;
-        memcpy(slot->comment, pb->comment, clen);
-        slot->comment[clen] = '\0';
+        copyUtf8Text(slot->comment, sizeof(slot->comment),
+                     pb->comment, pb->comment_len);
     }
 
     double own_lat = 0.0, own_lon = 0.0;
@@ -1098,17 +1153,17 @@ void sendBeacon()
         gps_text[0] = '\0';
     }
 
-    char net_comment[200];
+    char net_comment[256];
     snprintf(net_comment, sizeof(net_comment), "%s%s@udp://%s:%u%s%s",
              gps_text, gps_text[0] != '\0' ? " " : "",
              nrl_host, (unsigned)nrl_port,
              s_cfg.comment[0] != '\0' ? " " : "", s_cfg.comment);
-    char net_info[240];
+    char net_info[300];
     buildPositionInfo(net_info, sizeof(net_info), net_comment);
     unlockCfg();
 
     if (net && s_is_socket >= 0 && s_is_logged_in) {
-        char line[300];
+        char line[360];
         snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:%s", call, net_info);
         isSendLine(line);
         // Keep satellite count on the map site's board/firmware status row,
@@ -1720,9 +1775,13 @@ extern "C" bool APRS_SERVICE_SetComment(const char *comment)
     if (s_cfg_mutex == nullptr || comment == nullptr) {
         return false;
     }
+    const size_t comment_len = strlen(comment);
+    if (comment_len > APRS_COMMENT_MAX_BYTES ||
+        validUtf8Prefix(comment, comment_len, comment_len) != comment_len) {
+        return false;
+    }
     lockCfg();
-    strncpy(s_cfg.comment, comment, sizeof(s_cfg.comment) - 1);
-    s_cfg.comment[sizeof(s_cfg.comment) - 1] = '\0';
+    copyUtf8Text(s_cfg.comment, sizeof(s_cfg.comment), comment, comment_len);
     persistConfig();
     unlockCfg();
     return true;

@@ -222,7 +222,7 @@ const translations = {
         aprsPath: 'RF path',
         aprsLat: 'Default latitude (WGS-84 ddmm.mmmm; N added automatically)',
         aprsLon: 'Default longitude (WGS-84 dddmm.mmmm; E added automatically)',
-        aprsComment: 'Beacon comment',
+        aprsComment: 'Beacon comment (up to 96 UTF-8 bytes)',
         aprsBeaconNow: 'Beacon now',
         aprsStations: 'Stations Heard',
         aprsStnCall: 'Callsign',
@@ -530,7 +530,7 @@ const translations = {
         aprsPath: '射频路径',
         aprsLat: '默认纬度 (WGS-84 ddmm.mmmm，自动补N)',
         aprsLon: '默认经度 (WGS-84 dddmm.mmmm，自动补E)',
-        aprsComment: '信标注释',
+        aprsComment: '信标注释（最多 96 个 UTF-8 字节）',
         aprsBeaconNow: '立即发信标',
         aprsStations: '收到的台站',
         aprsStnCall: '呼号',
@@ -1213,6 +1213,15 @@ const translations = {
       }
     }
 
+    function enforceUtf8ByteLimit(input) {
+      const max = Number(input.dataset.maxUtf8Bytes) || 0;
+      if (!max || typeof TextEncoder === 'undefined') return;
+      const encoder = new TextEncoder();
+      while (input.value && encoder.encode(input.value).length > max) {
+        input.value = input.value.slice(0, -1);
+      }
+    }
+
     function initPortal() {
       applyLanguage(currentLang());
       syncDhcpFields();
@@ -1230,6 +1239,10 @@ const translations = {
         expert.checked = false;
         toggleAudioExpert(false);
       }
+      document.querySelectorAll('[data-max-utf8-bytes]').forEach((input) => {
+        enforceUtf8ByteLimit(input);
+        input.addEventListener('input', () => enforceUtf8ByteLimit(input));
+      });
       document.querySelectorAll('form').forEach((form) => {
         // Intercept explicit Save-button submits: send via AJAX so the page
         // never reloads, then reflect the server's echoed values back into the

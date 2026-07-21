@@ -9,8 +9,8 @@ Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS'});
 Object.assign(translations.en,{signalingConfig:'Signaling / CTCSS'});
 Object.assign(translations.zh,{signalingConfig:'信令 / CTCSS'});
 Object.assign(translations.en,{remoteUpdating:'Installing firmware... {percent}%'});
-Object.assign(translations.en,{releaseTitle:'0.8.12 feature updates',releaseBi4umd:'Adds GPS status to Gezipai and BI4UMD displays, and improves BI4UMD GPS defaults, music list and LCD reliability.',releaseHardware:'Uses the ESP-IDF I2C master driver and improves SD card mount recovery.'});
-Object.assign(translations.zh,{releaseTitle:'0.8.12 功能更新',releaseBi4umd:'为格子派和 BI4UMD 屏幕增加 GPS 状态，并优化 BI4UMD 的 GPS 默认配置、音乐列表和 LCD 稳定性。',releaseHardware:'统一使用 ESP-IDF I2C master 驱动，并改善 SD 卡挂载恢复。'});
+Object.assign(translations.en,{releaseTitle:'0.8.13 feature updates',releaseAprsComment:'Expands APRS comments to 96 UTF-8 bytes with safe Chinese text handling and automatic migration of existing settings.'});
+Object.assign(translations.zh,{releaseTitle:'0.8.13 功能更新',releaseAprsComment:'APRS 注释扩展到 96 个 UTF-8 字节，安全处理中文并自动迁移已有配置。'});
 Object.assign(translations.zh,{remoteUpdating:'正在升级固件... {percent}%'});
 function lang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}
 function t(k,values={}){const l=lang();let text=(translations[l]&&translations[l][k])||translations.en[k]||k;Object.entries(values).forEach(([name,value])=>{text=text.replace('{'+name+'}',String(value));});return text;}
