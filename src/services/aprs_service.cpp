@@ -66,6 +66,8 @@ constexpr size_t kStationCount = 64u;         // PSRAM station table size
 constexpr size_t kRxRingSamples = 16384u;     // ~1 s of 16 kHz mic tap
 constexpr size_t kTxChunkSamples = 160u;      // 20 ms at MODEM_TX_SAMPLE_RATE
 constexpr int16_t kTxAmplitude = 180;         // per 8-bit sine step (~0.7 FS)
+constexpr size_t kPersistCommentLegacyBytes = 40u;
+constexpr size_t kPersistCommentV2Bytes = 96u;
 
 // Persisted blob (NVS). New fields append at the END: loadConfig accepts a
 // shorter (older) blob and the missing tail stays zero-initialised, so
@@ -86,9 +88,11 @@ struct PersistBlob {
     uint16_t server_port;
     char server_host[65];
     char path[17];
-    char comment_legacy[41]; // pre-0.8.13 field; keep its offset for migration
+    char comment_legacy[kPersistCommentLegacyBytes + 1u]; // pre-0.8.13 field; keep its offset for migration
     uint8_t auto_interval; // appended field: absent in pre-0.6.7 blobs
-    char comment_v2[APRS_COMMENT_MAX_BYTES + 1u]; // appended in 0.8.13
+    char comment_v2[kPersistCommentV2Bytes + 1u]; // appended in 0.8.13
+    uint8_t fixed_beacon_without_gps; // appended in 0.8.18
+    char comment_v3[APRS_COMMENT_MAX_BYTES + 1u]; // appended in 0.8.18
 } __attribute__((packed));
 
 struct StationRec {
@@ -272,6 +276,7 @@ void defaultConfig(AprsConfig &cfg)
     cfg.symbol_code = 'I'; // APRS TCP/IP symbol (/I)
     cfg.beacon_interval_s = 60;
     cfg.auto_interval = false;
+    cfg.fixed_beacon_without_gps = true;
     cfg.default_lat_e6 = kDefaultLatE6;
     cfg.default_lon_e6 = kDefaultLonE6;
     cfg.server_port = 14580;
@@ -294,6 +299,7 @@ void persistConfig()
     blob.symbol_code = s_cfg.symbol_code;
     blob.beacon_interval_s = s_cfg.beacon_interval_s;
     blob.auto_interval = s_cfg.auto_interval ? 1 : 0;
+    blob.fixed_beacon_without_gps = s_cfg.fixed_beacon_without_gps ? 1 : 0;
     blob.default_lat_e6 = s_cfg.default_lat_e6;
     blob.default_lon_e6 = s_cfg.default_lon_e6;
     blob.server_port = s_cfg.server_port;
@@ -302,6 +308,8 @@ void persistConfig()
     copyUtf8Text(blob.comment_legacy, sizeof(blob.comment_legacy),
                  s_cfg.comment, strlen(s_cfg.comment));
     copyUtf8Text(blob.comment_v2, sizeof(blob.comment_v2),
+                 s_cfg.comment, strlen(s_cfg.comment));
+    copyUtf8Text(blob.comment_v3, sizeof(blob.comment_v3),
                  s_cfg.comment, strlen(s_cfg.comment));
 
     nvs_handle_t nvs;
@@ -350,6 +358,12 @@ void loadConfig()
         s_cfg.beacon_interval_s = 60;
     }
     s_cfg.auto_interval = blob.auto_interval != 0;
+    const bool has_fixed_beacon_switch =
+        size >= offsetof(PersistBlob, fixed_beacon_without_gps) +
+                    sizeof(blob.fixed_beacon_without_gps);
+    s_cfg.fixed_beacon_without_gps = has_fixed_beacon_switch
+                                         ? blob.fixed_beacon_without_gps != 0
+                                         : true;
     const bool migrate_zero_position =
         blob.default_lat_e6 == 0 && blob.default_lon_e6 == 0;
     s_cfg.default_lat_e6 = migrate_zero_position ? kDefaultLatE6 : blob.default_lat_e6;
@@ -364,17 +378,21 @@ void loadConfig()
     }
     memcpy(s_cfg.path, blob.path, sizeof(s_cfg.path));
     s_cfg.path[sizeof(s_cfg.path) - 1] = '\0';
-    const bool has_extended_comment =
+    const bool has_comment_v2 =
         size >= offsetof(PersistBlob, comment_v2) + sizeof(blob.comment_v2);
-    const char *saved_comment = has_extended_comment
-                                    ? blob.comment_v2
-                                    : blob.comment_legacy;
-    const size_t saved_capacity = has_extended_comment
-                                      ? sizeof(blob.comment_v2)
-                                      : sizeof(blob.comment_legacy);
+    const bool has_comment_v3 =
+        size >= offsetof(PersistBlob, comment_v3) + sizeof(blob.comment_v3);
+    const char *saved_comment = has_comment_v3
+                                    ? blob.comment_v3
+                                    : (has_comment_v2 ? blob.comment_v2
+                                                      : blob.comment_legacy);
+    const size_t saved_capacity = has_comment_v3
+                                      ? sizeof(blob.comment_v3)
+                                      : (has_comment_v2 ? sizeof(blob.comment_v2)
+                                                        : sizeof(blob.comment_legacy));
     copyUtf8Text(s_cfg.comment, sizeof(s_cfg.comment), saved_comment,
                  strnlen(saved_comment, saved_capacity));
-    const bool migrate_extended_comment = !has_extended_comment;
+    const bool migrate_extended_comment = !has_comment_v3;
     if (migrate_zero_position || migrate_aprs_server || migrate_tcpip_symbol ||
         migrate_extended_comment) {
         ESP_LOGI(TAG, "migrating APRS defaults: position=%d server=%d symbol=%d comment=%d",
@@ -657,6 +675,16 @@ bool ownPosition(double *lat, double *lon, double *alt_m)
         *alt_m = 0.0;
     }
     return false;
+}
+
+bool gpsFixFresh()
+{
+    return s_gps_fix && (nowMs() - s_gps_last_fix_ms) < kGpsFixFreshMs;
+}
+
+bool beaconPositionAllowed()
+{
+    return gpsFixFresh() || s_cfg.fixed_beacon_without_gps;
 }
 
 // ---------------------------------------------------------------- stations --
@@ -1073,8 +1101,15 @@ void isPoll()
 // ----------------------------------------------------------------- beacons --
 
 // "!DDMM.mmN/DDDMM.mmE&123/045/A=001234 comment"
-void buildPositionInfo(char *out, size_t out_size, const char *comment)
+bool buildPositionInfo(char *out, size_t out_size, const char *comment)
 {
+    if (!beaconPositionAllowed()) {
+        if (out != nullptr && out_size > 0u) {
+            out[0] = '\0';
+        }
+        return false;
+    }
+
     double lat = 0.0, lon = 0.0, alt = 0.0;
     ownPosition(&lat, &lon, &alt);
 
@@ -1120,39 +1155,47 @@ void buildPositionInfo(char *out, size_t out_size, const char *comment)
                  lat_str.c_str(), s_cfg.symbol_table, lon_str.c_str(),
                  s_cfg.symbol_code, motion, alt_ft);
     }
+    return true;
 }
 
-void sendBeacon()
+bool sendBeacon()
 {
     lockCfg();
     const bool net = s_cfg.net_enabled;
     const bool rf = s_cfg.rf_tx_enabled;
+    const bool can_beacon = beaconPositionAllowed();
     char call[16];
     myCallsign(call, sizeof(call));
     char path[17];
     strncpy(path, s_cfg.path, sizeof(path));
     path[sizeof(path) - 1] = '\0';
-    char rf_info[160];
-    buildPositionInfo(rf_info, sizeof(rf_info), s_cfg.comment);
+    char rf_info[240];
 
     const ExternalRadioConfig *radio = EXTERNAL_RADIO_GetConfig();
     const char *nrl_host = (radio != nullptr && radio->server_host[0] != '\0')
                                ? radio->server_host
                                : "unknown";
     const uint16_t nrl_port = (radio != nullptr) ? radio->server_port : 0u;
-    char net_comment[256];
+    char net_comment[288];
     // Speed/course/altitude already use APRS-standard ccc/sss and /A= fields
     // in buildPositionInfo(). Do not repeat them in the free-text comment:
     // map clients render those standard fields themselves.
     snprintf(net_comment, sizeof(net_comment), "@udp://%s:%u%s%s",
              nrl_host, (unsigned)nrl_port,
              s_cfg.comment[0] != '\0' ? " " : "", s_cfg.comment);
-    char net_info[300];
-    buildPositionInfo(net_info, sizeof(net_info), net_comment);
+    char net_info[320];
+    const bool have_rf_info = can_beacon &&
+        buildPositionInfo(rf_info, sizeof(rf_info), s_cfg.comment);
+    const bool have_net_info = can_beacon &&
+        buildPositionInfo(net_info, sizeof(net_info), net_comment);
     unlockCfg();
 
-    if (net && s_is_socket >= 0 && s_is_logged_in) {
-        char line[360];
+    if (!have_rf_info && !have_net_info) {
+        return false;
+    }
+
+    if (net && have_net_info && s_is_socket >= 0 && s_is_logged_in) {
+        char line[384];
         snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:%s", call, net_info);
         isSendLine(line);
         // Keep satellite count on the map site's board/firmware status row,
@@ -1207,8 +1250,8 @@ void sendBeacon()
         s_tx_count++;
     }
 
-    if (rf) {
-        char frame_txt[300];
+    if (rf && have_rf_info) {
+        char frame_txt[320];
         if (path[0] != '\0') {
             snprintf(frame_txt, sizeof(frame_txt), "%s>NRLBOX,%s:%s", call, path, rf_info);
         } else {
@@ -1225,6 +1268,7 @@ void sendBeacon()
             }
         }
     }
+    return true;
 }
 
 // ------------------------------------------------------------------ RF TX ---
@@ -1505,15 +1549,23 @@ void aprsTask(void *)
         const bool corner = turned &&
             elapsed_ms >= (uint32_t)kAutoTurnMinIntervalS * 1000u;
         if (due || early || corner) {
-            sendBeacon();
-            s_last_beacon_ms = (now != 0u) ? now : 1u;
-            s_last_beacon_pos_valid =
-                ownPosition(&s_last_beacon_lat, &s_last_beacon_lon, nullptr);
-            s_last_beacon_course_valid = s_last_beacon_pos_valid &&
-                                         s_gps_course_valid &&
-                                         (double)s_gps_speed_kmh >= kAutoTurnMinSpeedKmh;
-            if (s_last_beacon_course_valid) {
-                s_last_beacon_course = s_gps_course;
+            if (sendBeacon()) {
+                s_last_beacon_ms = (now != 0u) ? now : 1u;
+                s_last_beacon_pos_valid =
+                    ownPosition(&s_last_beacon_lat, &s_last_beacon_lon, nullptr);
+                s_last_beacon_course_valid = s_last_beacon_pos_valid &&
+                                             s_gps_course_valid &&
+                                             (double)s_gps_speed_kmh >= kAutoTurnMinSpeedKmh;
+                if (s_last_beacon_course_valid) {
+                    s_last_beacon_course = s_gps_course;
+                }
+            } else {
+                const uint32_t retry_ms = 5000u;
+                s_last_beacon_ms = (now > effective_ms)
+                                       ? now - effective_ms + retry_ms
+                                       : (now != 0u ? now : 1u);
+                s_last_beacon_pos_valid = false;
+                s_last_beacon_course_valid = false;
             }
         }
 
@@ -1698,6 +1750,21 @@ extern "C" bool APRS_SERVICE_SetAutoInterval(bool enabled)
     return true;
 }
 
+extern "C" bool APRS_SERVICE_SetFixedBeaconWithoutGps(bool enabled)
+{
+    if (s_cfg_mutex == nullptr) {
+        return false;
+    }
+    lockCfg();
+    s_cfg.fixed_beacon_without_gps = enabled;
+    persistConfig();
+    unlockCfg();
+    if (enabled) {
+        s_last_beacon_ms = 0;
+    }
+    return true;
+}
+
 extern "C" bool APRS_SERVICE_ParseAprsCoord(const char *text, bool is_lat, double *deg_out)
 {
     if (text == nullptr || deg_out == nullptr) {
@@ -1837,6 +1904,12 @@ extern "C" void APRS_SERVICE_GetConfig(AprsConfig *out)
 extern "C" bool APRS_SERVICE_SendBeaconNow(void)
 {
     if (s_task == nullptr || !s_cfg.enabled) {
+        return false;
+    }
+    lockCfg();
+    const bool can_beacon = beaconPositionAllowed();
+    unlockCfg();
+    if (!can_beacon) {
         return false;
     }
     s_last_beacon_ms = 0;

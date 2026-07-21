@@ -336,6 +336,7 @@
     <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsRfTx">RF Transmit (AFSK)</label><input type="hidden" name="aprs_tx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_tx" value="1" onchange="submitSwitch(this)" {{APRS_TX_CHECKED}}><span data-i18n="aprsRfTxText">Modulate beacons out through the speaker into the radio</span></label></form>
     <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsRfRx">RF Receive (AFSK)</label><input type="hidden" name="aprs_rx_present" value="1"><label class="hint"><input type="checkbox" name="aprs_rx" value="1" onchange="submitSwitch(this)" {{APRS_RX_CHECKED}}><span data-i18n="aprsRfRxText">Demodulate APRS audio heard on the microphone/radio</span></label></form>
     <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsAuto">Auto interval</label><input type="hidden" name="aprs_auto_present" value="1"><label class="hint"><input type="checkbox" name="aprs_auto" value="1" onchange="submitSwitch(this)" {{APRS_AUTO_CHECKED}}><span data-i18n="aprsAutoText">With a GPS fix, beacon faster while moving (30 s at 60+ km/h, or after a 300 m jump); the interval below is the ceiling when parked</span></label></form>
+    <form class="item-form" method="post" action="/save_aprs"><label data-i18n="aprsFixed">Fixed beacon without GPS</label><input type="hidden" name="aprs_fixed_present" value="1"><label class="hint"><input type="checkbox" name="aprs_fixed" value="1" onchange="submitSwitch(this)" {{APRS_FIXED_CHECKED}}><span data-i18n="aprsFixedText">When GPS has no fix, allow periodic beacons using the configured default position</span></label></form>
   </div>
 </section>
 <section class="panel" id="gps-live-panel" hidden>
@@ -368,7 +369,7 @@
         <div><label data-i18n="aprsPath">RF path</label><input name="aprs_path" value="{{APRS_PATH}}" placeholder="WIDE1-1"></div>
         <div><label data-i18n="aprsLat">Default latitude (WGS-84 ddmm.mmmm; N added automatically)</label><input name="aprs_lat" value="{{APRS_LAT}}" placeholder="3153.3100"></div>
         <div><label data-i18n="aprsLon">Default longitude (WGS-84 dddmm.mmmm; E added automatically)</label><input name="aprs_lon" value="{{APRS_LON}}" placeholder="11848.8460"></div>
-        <div class="span-2"><label data-i18n="aprsComment">Beacon comment (up to 96 UTF-8 bytes)</label><input name="aprs_comment" value="{{APRS_COMMENT}}" maxlength="96" data-max-utf8-bytes="96"></div>
+        <div class="span-2"><label data-i18n="aprsComment">Beacon comment (up to 160 UTF-8 bytes)</label><input name="aprs_comment" value="{{APRS_COMMENT}}" maxlength="160" data-max-utf8-bytes="160"></div>
       </div>
       <div class="actions"><button class="btn-small" type="submit" data-i18n="saveItem">Save</button><button class="btn-small" type="button" onclick="submitFormAction(this, 'aprs_beacon')" data-i18n="aprsBeaconNow">Beacon now</button></div>
     </form>

@@ -1272,21 +1272,22 @@ void buildAprsSettingsMenu()
     lv_obj_t *scr = prepareContent();
     AprsConfig cfg{};
     APRS_SERVICE_GetConfig(&cfg);
-    constexpr size_t kItemCount = 8u;
+    constexpr size_t kItemCount = 9u;
     constexpr size_t kVisibleRows = 5u;
     const size_t start = menuWindowStart(kItemCount, kVisibleRows);
     const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
-    const char *names[] = {"MASTER", "APRS-IS", "RF TX", "RF RX", "AUTO PERIOD"};
+    const char *names[] = {"MASTER", "APRS-IS", "RF TX", "RF RX", "AUTO PERIOD", "FIXED POS"};
     const bool values[] = {cfg.enabled, cfg.net_enabled, cfg.rf_tx_enabled,
-                           cfg.rf_rx_enabled, cfg.auto_interval};
+                           cfg.rf_rx_enabled, cfg.auto_interval,
+                           cfg.fixed_beacon_without_gps};
     for (size_t item = start; item < end; ++item) {
         char line[40];
         if (item == 0u) {
             snprintf(line, sizeof(line), "< BACK / APRS SET");
-        } else if (item <= 5u) {
+        } else if (item <= 6u) {
             snprintf(line, sizeof(line), "%s: %s", names[item - 1u],
                      values[item - 1u] ? "ON" : "OFF");
-        } else if (item == 6u) {
+        } else if (item == 7u) {
             snprintf(line, sizeof(line), "PERIOD: %us",
                      static_cast<unsigned>(cfg.beacon_interval_s));
         } else {
@@ -2876,6 +2877,11 @@ void confirmAprsSettingsMenu()
             message = !cfg.auto_interval ? "AUTO PERIOD ON" : "AUTO PERIOD OFF";
             break;
         case 6: {
+            ok = APRS_SERVICE_SetFixedBeaconWithoutGps(!cfg.fixed_beacon_without_gps);
+            message = !cfg.fixed_beacon_without_gps ? "FIXED POS ON" : "FIXED POS OFF";
+            break;
+        }
+        case 7: {
             static constexpr uint16_t periods[] = {30u, 60u, 120u, 300u, 600u, 1200u, 3600u};
             uint16_t next = periods[0];
             for (const uint16_t period : periods) {
@@ -2888,7 +2894,7 @@ void confirmAprsSettingsMenu()
             message = "PERIOD UPDATED";
             break;
         }
-        case 7:
+        case 8:
             ok = APRS_SERVICE_SetSsid(static_cast<uint8_t>((cfg.ssid + 1u) & 0x0Fu));
             message = "SSID UPDATED";
             break;

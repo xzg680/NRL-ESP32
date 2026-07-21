@@ -697,6 +697,7 @@ std::string WifiConfigPortalView_BuildAprsSections(void)
     replaceToken(html, "{{APRS_TX_CHECKED}}", checkedAttr(cfg.rf_tx_enabled));
     replaceToken(html, "{{APRS_RX_CHECKED}}", checkedAttr(cfg.rf_rx_enabled));
     replaceToken(html, "{{APRS_AUTO_CHECKED}}", checkedAttr(cfg.auto_interval));
+    replaceToken(html, "{{APRS_FIXED_CHECKED}}", checkedAttr(cfg.fixed_beacon_without_gps));
     replaceToken(html, "{{APRS_SERVER_HOST}}", htmlEscape(cfg.server_host));
     replaceToken(html, "{{APRS_SERVER_PORT}}", fromU32(cfg.server_port));
     replaceToken(html, "{{APRS_SSID}}", fromU32(cfg.ssid));

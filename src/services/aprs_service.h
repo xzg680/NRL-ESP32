@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define APRS_COMMENT_MAX_BYTES 96u
+#define APRS_COMMENT_MAX_BYTES 160u
 
 typedef struct {
     bool enabled;         // master switch
@@ -40,6 +40,7 @@ typedef struct {
     char symbol_code;     // e.g. 'I' for the /I TCP/IP symbol
     uint16_t beacon_interval_s;
     bool auto_interval;   // SmartBeaconing-style: shorten the period while the GPS moves
+    bool fixed_beacon_without_gps; // allow default-position beacons while GPS has no fresh fix
     int32_t default_lat_e6; // microdegrees, used when GPS has no fix
     int32_t default_lon_e6;
     uint16_t server_port;
@@ -120,6 +121,7 @@ bool APRS_SERVICE_SetBeaconInterval(uint16_t seconds);      // 10..3600
 // station that changes course substantially can corner-peg after 10 s. The
 // configured interval stays the stationary/no-GPS ceiling.
 bool APRS_SERVICE_SetAutoInterval(bool enabled);
+bool APRS_SERVICE_SetFixedBeaconWithoutGps(bool enabled);
 bool APRS_SERVICE_SetDefaultPosition(double lat, double lon);
 // WGS-84 coordinates in the APRS/NMEA style used for config input:
 // "ddmm.mmmm[N|S]" for latitude, "dddmm.mmmm[E|W]" for longitude (hemisphere

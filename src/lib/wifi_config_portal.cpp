@@ -1458,6 +1458,7 @@ static void sendAprsSavedJson(const bool ok)
     appendField("aprs_tx", cfg.rf_tx_enabled ? "1" : "0");
     appendField("aprs_rx", cfg.rf_rx_enabled ? "1" : "0");
     appendField("aprs_auto", cfg.auto_interval ? "1" : "0");
+    appendField("aprs_fixed", cfg.fixed_beacon_without_gps ? "1" : "0");
     char lat[16] = {};
     char lon[16] = {};
     APRS_SERVICE_FormatAprsCoord(static_cast<double>(cfg.default_lat_e6) / 1e6,
@@ -1492,6 +1493,9 @@ static esp_err_t handleSaveAprs(httpd_req_t *req)
     }
     if (ok && s_server.hasArg("aprs_auto_present")) {
         ok = APRS_SERVICE_SetAutoInterval(s_server.hasArg("aprs_auto"));
+    }
+    if (ok && s_server.hasArg("aprs_fixed_present")) {
+        ok = APRS_SERVICE_SetFixedBeaconWithoutGps(s_server.hasArg("aprs_fixed"));
     }
     if (ok && s_server.hasArg("aprs_server")) {
         unsigned long port = 14580UL;

@@ -165,6 +165,18 @@ static bool appendKeyValueLine(uint8_t *payload,
            appendReplyBytes(payload, capacity, used, kCrLf, sizeof(kCrLf) - 1u);
 }
 
+static bool appendKeyValueLineIfFits(uint8_t *payload,
+                                     const size_t capacity,
+                                     size_t *used,
+                                     const char *key,
+                                     const char *value)
+{
+    if (key == nullptr || value == nullptr || used == nullptr) return false;
+    const size_t need = 3u + strlen(key) + 1u + strlen(value) + 2u; // AT+ key = value CRLF
+    if (*used + need > capacity) return false;
+    return appendKeyValueLine(payload, capacity, used, key, value);
+}
+
 static bool appendUnsignedLine(uint8_t *payload,
                                const size_t capacity,
                                size_t *used,
@@ -260,25 +272,29 @@ static bool appendSupportedAtList(uint8_t *payload,
     char uart1_io[24] = "0,0";
     char uart2_io[24] = "0,0";
     char uart2_config[32] = "9600,8,N,1";
-    char wifi_pass[32] = "(empty)";
     char hp_drive[4] = "OFF";
     char ptt_mode[8] = "NRL";
     char wifi_ip[16] = "0.0.0.0";
-    char wifi_mask[16] = "0.0.0.0";
-    char wifi_gw[16] = "0.0.0.0";
-    char wifi_dns[16] = "0.0.0.0";
     char mic_pcm_gain[16] = "1.0";
+    char aprs_status[8] = "OFF";
+    char aprs_net[8] = "OFF";
+    char aprs_tx[8] = "OFF";
+    char aprs_rx[8] = "OFF";
+    char aprs_auto[8] = "OFF";
+    char aprs_fixed[8] = "OFF";
+    char aprs_server[88] = "";
+    char aprs_ssid[8] = "0";
+    char aprs_symbol[4] = "/I";
+    char aprs_interval[8] = "60";
+    char aprs_pos[40] = "";
+    char mdc_packet[16] = "";
     if (config != nullptr) {
         formatSciConfig(config->sci, sci_config, sizeof(sci_config));
-        formatMaskedSecret(config->wifi_password, wifi_pass, sizeof(wifi_pass));
         snprintf(hp_drive, sizeof(hp_drive), "%s", config->hp_drive_enabled ? "ON" : "OFF");
         snprintf(ptt_mode, sizeof(ptt_mode), "%s",
                  (ESPNOW_LINK_GetPttMode() == 1u) ? "ESPNOW" : "NRL");
         const bool show_dhcp_values = config->wifi_dhcp_enabled && nrlWifiStaConnected();
         ipText(currentWifiIpValue(config->wifi_ip, nrlWifiStaIp(), show_dhcp_values), wifi_ip, sizeof(wifi_ip));
-        ipText(currentWifiIpValue(config->wifi_netmask, nrlWifiStaNetmask(), show_dhcp_values), wifi_mask, sizeof(wifi_mask));
-        ipText(currentWifiIpValue(config->wifi_gateway, nrlWifiStaGateway(), show_dhcp_values), wifi_gw, sizeof(wifi_gw));
-        ipText(currentWifiIpValue(config->wifi_dns, nrlWifiStaDns(), show_dhcp_values), wifi_dns, sizeof(wifi_dns));
         formatMicPcmGain(config->mic_pcm_gain_milli, mic_pcm_gain, sizeof(mic_pcm_gain));
     }
     SerialPortConfig serial{};
@@ -289,53 +305,102 @@ static bool appendSupportedAtList(uint8_t *payload,
              static_cast<unsigned long>(serial.uart2_baud),
              static_cast<unsigned>(serial.uart2_data_bits), serial.uart2_parity,
              static_cast<unsigned>(serial.uart2_stop_bits));
-    return appendKeyValueLine(payload, capacity, used, "WIFI_SSID", (config != nullptr) ? config->wifi_ssid : "") &&
-           appendKeyValueLine(payload, capacity, used, "WIFI_PASS", wifi_pass) &&
-           appendUnsignedLine(payload, capacity, used, "WIFI_DHCP", (config != nullptr && config->wifi_dhcp_enabled) ? 1u : 0u) &&
-           appendKeyValueLine(payload, capacity, used, "WIFI_IP", wifi_ip) &&
-           appendKeyValueLine(payload, capacity, used, "WIFI_MASK", wifi_mask) &&
-           appendKeyValueLine(payload, capacity, used, "WIFI_GW", wifi_gw) &&
-           appendKeyValueLine(payload, capacity, used, "WIFI_DNS", wifi_dns) &&
-           appendKeyValueLine(payload, capacity, used, "SCI", sci_config) &&
-           appendKeyValueLine(payload, capacity, used, "UART0", "RESERVED(LOG/AT)") &&
-           appendKeyValueLine(payload, capacity, used, "UART1", sci_config) &&
-           appendKeyValueLine(payload, capacity, used, "UART1_ENABLE", serial.uart1_enabled ? "ON" : "OFF") &&
-           appendKeyValueLine(payload, capacity, used, "UART1_IO", uart1_io) &&
-           appendKeyValueLine(payload, capacity, used, "UART2", uart2_config) &&
-           appendKeyValueLine(payload, capacity, used, "UART2_ENABLE", serial.uart2_enabled ? "ON" : "OFF") &&
-           appendKeyValueLine(payload, capacity, used, "UART2_IO", uart2_io) &&
-           appendUnsignedLine(payload, capacity, used, "CH", (config != nullptr) ? config->channel : 0u) &&
-           appendKeyValueLine(payload, capacity, used, "D_IP", (config != nullptr) ? config->server_host : "") &&
-           appendUnsignedLine(payload, capacity, used, "D_PORT", (config != nullptr) ? config->server_port : 0u) &&
-           appendUnsignedLine(payload, capacity, used, "L_PORT", (config != nullptr) ? config->local_port : 0u) &&
-           appendKeyValueLine(payload, capacity, used, "CALL", (config != nullptr) ? config->callsign : "") &&
-           appendUnsignedLine(payload, capacity, used, "SSID", (config != nullptr) ? config->callsign_ssid : 0u) &&
-           appendUnsignedLine(payload, capacity, used, "PTT_TIMEOUT", (config != nullptr) ? config->ptt_timeout_s : 0u) &&
-           appendUnsignedLine(payload, capacity, used, "VOICE_BYTES", (config != nullptr) ? config->voice_payload_bytes : 0u) &&
-           appendUnsignedLine(payload, capacity, used, "TAIL_SUPPRESS", (config != nullptr) ? config->tail_suppress_ms : 0u) &&
-#if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY
-           appendUnsignedLine(payload, capacity, used, "BATT", static_cast<unsigned>(Display_GetBatteryCalibratedMv())) &&
-           appendUnsignedLine(payload, capacity, used, "BATT_RAW", static_cast<unsigned>(Display_GetBatteryRawMv())) &&
-           appendUnsignedLine(payload, capacity, used, "BATT_CAL", (config != nullptr) ? config->battery_cal_milli : 0u) &&
-#endif
-           appendUnsignedLine(payload, capacity, used, "MIC_GAIN", (config != nullptr) ? config->mic_volume : 0u) &&
-           appendKeyValueLine(payload, capacity, used, "MIC_PCM_GAIN", mic_pcm_gain) &&
-           appendUnsignedLine(payload, capacity, used, "VOLUME", (config != nullptr) ? config->line_out_volume : 0u) &&
-           appendKeyValueLine(payload, capacity, used, "HP_DRIVE", hp_drive) &&
-           appendKeyValueLine(payload, capacity, used, "CODEC",
-                              (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711") &&
-           appendKeyValueLine(payload, capacity, used, "ESPNOW",
-                              ESPNOW_LINK_IsEnabled() ? "ON" : "OFF") &&
-           appendKeyValueLine(payload, capacity, used, "ESPNOW_RX",
-                              ESPNOW_LINK_IsRxEnabled() ? "ON" : "OFF") &&
-           appendKeyValueLine(payload, capacity, used, "ESPNOW_CODEC",
-                              (ESPNOW_LINK_GetTxCodec() == 1u) ? "OPUS" : "G711") &&
-           appendKeyValueLine(payload, capacity, used, "PTT_MODE", ptt_mode) &&
-#if defined(NRL_ENABLE_AEC) && NRL_ENABLE_AEC
-           appendKeyValueLine(payload, capacity, used, "AEC",
-                              (config != nullptr && config->aec_enabled) ? "ON" : "OFF") &&
-#endif
-           appendKeyValueLine(payload, capacity, used, "REBOOT", "1");
+    AprsConfig aprs{};
+    APRS_SERVICE_GetConfig(&aprs);
+    snprintf(aprs_status, sizeof(aprs_status), "%s", aprs.enabled ? "ON" : "OFF");
+    snprintf(aprs_net, sizeof(aprs_net), "%s", aprs.net_enabled ? "ON" : "OFF");
+    snprintf(aprs_tx, sizeof(aprs_tx), "%s", aprs.rf_tx_enabled ? "ON" : "OFF");
+    snprintf(aprs_rx, sizeof(aprs_rx), "%s", aprs.rf_rx_enabled ? "ON" : "OFF");
+    snprintf(aprs_auto, sizeof(aprs_auto), "%s", aprs.auto_interval ? "ON" : "OFF");
+    snprintf(aprs_fixed, sizeof(aprs_fixed), "%s",
+             aprs.fixed_beacon_without_gps ? "ON" : "OFF");
+    snprintf(aprs_server, sizeof(aprs_server), "%s:%u",
+             aprs.server_host, static_cast<unsigned>(aprs.server_port));
+    snprintf(aprs_ssid, sizeof(aprs_ssid), "%u", static_cast<unsigned>(aprs.ssid));
+    snprintf(aprs_symbol, sizeof(aprs_symbol), "%c%c", aprs.symbol_table, aprs.symbol_code);
+    snprintf(aprs_interval, sizeof(aprs_interval), "%u",
+             static_cast<unsigned>(aprs.beacon_interval_s));
+    {
+        char lat[16] = {};
+        char lon[16] = {};
+        APRS_SERVICE_FormatAprsCoord(static_cast<double>(aprs.default_lat_e6) / 1e6,
+                                     true, lat, sizeof(lat));
+        APRS_SERVICE_FormatAprsCoord(static_cast<double>(aprs.default_lon_e6) / 1e6,
+                                     false, lon, sizeof(lon));
+        snprintf(aprs_pos, sizeof(aprs_pos), "%s,%s", lat, lon);
+    }
+    SignalingConfig sig{};
+    SIGNALING_GetConfig(&sig);
+    snprintf(mdc_packet, sizeof(mdc_packet), "%02X,%02X,%04X",
+             static_cast<unsigned>(sig.mdc_opcode),
+             static_cast<unsigned>(sig.mdc_argument),
+             static_cast<unsigned>(sig.mdc_unit_id));
+
+    // Keep the on-wire structure unchanged: every entry remains AT+NAME=value.
+    // The NRL AT packet is capped at 1024 bytes and the server does not support
+    // fragmented replies yet, so long text fields such as APRS_COMMENT are not
+    // included here. They remain queryable with their own AT+NAME=? command.
+    const bool ok =
+        appendKeyValueLineIfFits(payload, capacity, used, "WIFI_SSID", (config != nullptr) ? config->wifi_ssid : "") &&
+        appendKeyValueLineIfFits(payload, capacity, used, "WIFI_DHCP", (config != nullptr && config->wifi_dhcp_enabled) ? "1" : "0") &&
+        appendKeyValueLineIfFits(payload, capacity, used, "WIFI_IP", wifi_ip) &&
+        appendKeyValueLineIfFits(payload, capacity, used, "SCI", sci_config) &&
+        appendKeyValueLineIfFits(payload, capacity, used, "UART0", "RESERVED(LOG/AT)") &&
+        appendKeyValueLineIfFits(payload, capacity, used, "UART1", sci_config) &&
+        appendKeyValueLineIfFits(payload, capacity, used, "UART1_ENABLE", serial.uart1_enabled ? "ON" : "OFF") &&
+        appendKeyValueLineIfFits(payload, capacity, used, "UART1_IO", uart1_io) &&
+        appendKeyValueLineIfFits(payload, capacity, used, "UART2", uart2_config) &&
+        appendKeyValueLineIfFits(payload, capacity, used, "UART2_ENABLE", serial.uart2_enabled ? "ON" : "OFF") &&
+        appendKeyValueLineIfFits(payload, capacity, used, "UART2_IO", uart2_io);
+    if (!ok) return false;
+
+    char number[16];
+    snprintf(number, sizeof(number), "%u", (config != nullptr) ? config->channel : 0u);
+    appendKeyValueLineIfFits(payload, capacity, used, "CH", number);
+    appendKeyValueLineIfFits(payload, capacity, used, "D_IP", (config != nullptr) ? config->server_host : "");
+    snprintf(number, sizeof(number), "%u", (config != nullptr) ? config->server_port : 0u);
+    appendKeyValueLineIfFits(payload, capacity, used, "D_PORT", number);
+    snprintf(number, sizeof(number), "%u", (config != nullptr) ? config->local_port : 0u);
+    appendKeyValueLineIfFits(payload, capacity, used, "L_PORT", number);
+    appendKeyValueLineIfFits(payload, capacity, used, "CALL", (config != nullptr) ? config->callsign : "");
+    snprintf(number, sizeof(number), "%u", (config != nullptr) ? config->callsign_ssid : 0u);
+    appendKeyValueLineIfFits(payload, capacity, used, "SSID", number);
+    snprintf(number, sizeof(number), "%u", (config != nullptr) ? config->mic_volume : 0u);
+    appendKeyValueLineIfFits(payload, capacity, used, "MIC_GAIN", number);
+    appendKeyValueLineIfFits(payload, capacity, used, "MIC_PCM_GAIN", mic_pcm_gain);
+    snprintf(number, sizeof(number), "%u", (config != nullptr) ? config->line_out_volume : 0u);
+    appendKeyValueLineIfFits(payload, capacity, used, "VOLUME", number);
+    appendKeyValueLineIfFits(payload, capacity, used, "HP_DRIVE", hp_drive);
+    appendKeyValueLineIfFits(payload, capacity, used, "CODEC",
+                             (NRLAudioBridge_GetVoiceCodec() == 1u) ? "OPUS" : "G711");
+    appendKeyValueLineIfFits(payload, capacity, used, "PTT_MODE", ptt_mode);
+    appendKeyValueLineIfFits(payload, capacity, used, "CTCSS_RX_MIC", sig.ctcss_rx_mic ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "CTCSS_RX_NRL", sig.ctcss_rx_nrl ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "MDC", mdc_packet);
+    appendKeyValueLineIfFits(payload, capacity, used, "MDC_RX_MIC", sig.mdc_rx_mic ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "MDC_RX_NRL", sig.mdc_rx_nrl ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "MDC_TX_NRL", sig.mdc_tx_nrl ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "MDC_TX_SPK", sig.mdc_tx_speaker ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "DTMF", sig.dtmf_digits);
+    appendKeyValueLineIfFits(payload, capacity, used, "DTMF_RX_MIC", sig.dtmf_rx_mic ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "DTMF_RX_NRL", sig.dtmf_rx_nrl ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "DTMF_TX_NRL", sig.dtmf_tx_nrl ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "DTMF_TX_SPK", sig.dtmf_tx_speaker ? "ON" : "OFF");
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS", aprs_status);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_NET", aprs_net);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_TX", aprs_tx);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_RX", aprs_rx);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_AUTO", aprs_auto);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_FIXED", aprs_fixed);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_SERVER", aprs_server);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_SSID", aprs_ssid);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_SYMBOL", aprs_symbol);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_INTERVAL", aprs_interval);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_POS", aprs_pos);
+    appendKeyValueLineIfFits(payload, capacity, used, "APRS_PATH", aprs.path);
+    appendKeyValueLineIfFits(payload, capacity, used, "READ", "123");
+    appendKeyValueLineIfFits(payload, capacity, used, "REBOOT", "1");
+    return true;
 }
 
 static bool decodeAtCommand(const uint8_t *payload, const size_t payload_size, AtCommand *out_cmd)
@@ -621,6 +686,15 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     const bool is_query = stringEqualsIgnoreCase(command.value, "?");
     const bool allow_wifi_config_write = source == NRL_AT_SOURCE_SERIAL;
     const bool allow_ota_write = source == NRL_AT_SOURCE_SERIAL;
+
+    if (stringEqualsIgnoreCase(command.command, "READ") &&
+        stringEqualsIgnoreCase(command.value, "123")) {
+        if (!appendSupportedAtList(result->payload, sizeof(result->payload), &result->payload_size)) {
+            result->should_reply = false;
+        }
+        return;
+    }
+
     SerialAtDisplayNotice display_notice(source, is_query, result);
 
     // Remote OTA commands are serial-only: an NRL network AT packet must not
@@ -1611,6 +1685,7 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     //   AT+APRS_TX=ON|OFF         AFSK beacon out through the radio
     //   AT+APRS_RX=ON|OFF         demodulate radio audio
     //   AT+APRS_AUTO=ON|OFF       speed/movement-adaptive beacon interval
+    //   AT+APRS_FIXED=ON|OFF      allow default-position beacons without GPS
     //   AT+APRS_SERVER=host:port  APRS-IS server
     //   AT+APRS_SSID=0..15        SSID appended to the radio callsign
     //   AT+APRS_SYMBOL=/I         symbol table+code (TCP/IP by default)
@@ -1625,14 +1700,15 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         if (is_query) {
             AprsConfig cfg;
             APRS_SERVICE_GetConfig(&cfg);
-            char status[112];
-            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s auto=%s gps=%s rx=%lu tx=%lu",
+            char status[128];
+            snprintf(status, sizeof(status), "%s net=%s%s rf_tx=%s rf_rx=%s auto=%s fixed=%s gps=%s rx=%lu tx=%lu",
                      cfg.enabled ? "ON" : "OFF",
                      cfg.net_enabled ? "ON" : "OFF",
                      APRS_SERVICE_IsNetConnected() ? "(conn)" : "",
                      cfg.rf_tx_enabled ? "ON" : "OFF",
                      cfg.rf_rx_enabled ? "ON" : "OFF",
                      cfg.auto_interval ? "ON" : "OFF",
+                     cfg.fixed_beacon_without_gps ? "ON" : "OFF",
                      APRS_SERVICE_GpsHasFix() ? "FIX" : "NO",
                      static_cast<unsigned long>(APRS_SERVICE_GetRxCount()),
                      static_cast<unsigned long>(APRS_SERVICE_GetTxCount()));
@@ -1652,12 +1728,14 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
     if (stringEqualsIgnoreCase(command.command, "APRS_NET") ||
         stringEqualsIgnoreCase(command.command, "APRS_TX") ||
         stringEqualsIgnoreCase(command.command, "APRS_RX") ||
-        stringEqualsIgnoreCase(command.command, "APRS_AUTO")) {
+        stringEqualsIgnoreCase(command.command, "APRS_AUTO") ||
+        stringEqualsIgnoreCase(command.command, "APRS_FIXED")) {
         AprsConfig cfg;
         APRS_SERVICE_GetConfig(&cfg);
         const bool is_net = stringEqualsIgnoreCase(command.command, "APRS_NET");
         const bool is_tx = stringEqualsIgnoreCase(command.command, "APRS_TX");
         const bool is_auto = stringEqualsIgnoreCase(command.command, "APRS_AUTO");
+        const bool is_fixed = stringEqualsIgnoreCase(command.command, "APRS_FIXED");
         if (!is_query) {
             bool enabled = false;
             bool ok = parseBoolValue(command.value, &enabled);
@@ -1668,6 +1746,8 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
                     ok = APRS_SERVICE_SetRfTxEnabled(enabled);
                 } else if (is_auto) {
                     ok = APRS_SERVICE_SetAutoInterval(enabled);
+                } else if (is_fixed) {
+                    ok = APRS_SERVICE_SetFixedBeaconWithoutGps(enabled);
                 } else {
                     ok = APRS_SERVICE_SetRfRxEnabled(enabled);
                 }
@@ -1680,7 +1760,9 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         }
         const bool state = is_net ? cfg.net_enabled
                                   : (is_tx ? cfg.rf_tx_enabled
-                                           : (is_auto ? cfg.auto_interval : cfg.rf_rx_enabled));
+                                           : (is_auto ? cfg.auto_interval
+                                                      : (is_fixed ? cfg.fixed_beacon_without_gps
+                                                                  : cfg.rf_rx_enabled)));
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                            command.command, state ? "ON" : "OFF");
         return;
