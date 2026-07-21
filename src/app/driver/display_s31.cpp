@@ -86,6 +86,7 @@ constexpr size_t kWifiOptionCount = 12u;  // max scanned SSIDs listed in the dro
 constexpr size_t kMusicListMaxRows = 48u; // keep LVGL list layout bounded on large libraries
 
 enum class Page : uint8_t {
+    Provisioning,
     Home,
     Config,
     Apps,
@@ -164,6 +165,7 @@ enum class Action : intptr_t {
     Dtmf,
     SaveMdc,
     SaveDtmf,
+    Provisioning,
 };
 
 enum class AudioControl : intptr_t {
@@ -189,6 +191,7 @@ enum class AudioControl : intptr_t {
 };
 
 bool s_ready = false;
+bool s_provisioning_mode = false;
 Page s_page = Page::Home;
 uint32_t s_last_refresh_ms = 0u;
 uint32_t s_volume_change_ms = 0u;
@@ -225,6 +228,7 @@ lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_server = nullptr;
 lv_obj_t *s_lbl_detail = nullptr;
 lv_obj_t *s_lbl_form_status = nullptr;
+lv_obj_t *s_lbl_provision_ip = nullptr;
 lv_obj_t *s_notice_panel = nullptr;
 lv_obj_t *s_lbl_notice = nullptr;
 lv_obj_t *s_bar_notice_progress = nullptr;
@@ -1010,6 +1014,8 @@ void refreshOtaPage();
 void refreshAprsPage();
 void buildAprs();
 void rebuildCurrentPage();
+void buildProvisioning();
+void refreshProvisioning();
 void stopVideoView();
 lv_obj_t *styledDropdown(lv_obj_t *parent, int x, int y, int w);
 
@@ -1245,6 +1251,7 @@ void clearScreen()
     s_lbl_server = nullptr;
     s_lbl_detail = nullptr;
     s_lbl_form_status = nullptr;
+    s_lbl_provision_ip = nullptr;
     s_notice_panel = nullptr;
     s_lbl_notice = nullptr;
     s_bar_notice_progress = nullptr;
@@ -1414,6 +1421,58 @@ void topBar(lv_obj_t *scr)
     lv_obj_align(s_lbl_cpu, LV_ALIGN_LEFT_MID, kTopCpuX, 0);
     lv_obj_set_style_text_align(s_lbl_cpu, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_lbl_cpu, tr("--/--"));
+}
+
+void buildProvisioning()
+{
+    clearScreen();
+    s_page = Page::Provisioning;
+    lv_obj_t *scr = lv_screen_active();
+
+    lv_obj_t *title = label(scr, &s_font_ui_20, kColorAccent);
+    lv_obj_set_width(title, 752);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(title, 24, 28);
+    lv_label_set_text(title, "设备尚未配网 / WiFi Setup");
+
+    lv_obj_t *box = panel(scr, 42, 80, 716, 270);
+    lv_obj_t *state = label(box, &s_font_ui_20, kColorWarn);
+    lv_obj_set_width(state, 688);
+    lv_obj_set_style_text_align(state, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(state, "正在等待网络设置，可通过 WiFi 或蓝牙完成配网");
+
+    lv_obj_t *wifi = label(box, &s_font_ui_20, kColorText);
+    lv_obj_set_pos(wifi, 18, 56);
+    lv_label_set_text(wifi, "方式 1：连接设备 WiFi 热点，浏览器访问");
+
+    s_lbl_provision_ip = label(box, &lv_font_montserrat_20, kColorGood);
+    lv_obj_set_pos(s_lbl_provision_ip, 470, 56);
+    lv_label_set_text(s_lbl_provision_ip, "192.168.4.1");
+
+    lv_obj_t *wechat = label(box, &s_font_ui_20, kColorText);
+    lv_obj_set_pos(wechat, 18, 108);
+    lv_label_set_text(wechat, "方式 2：微信小程序「NRL互联」打开设置，使用蓝牙配网");
+
+    lv_obj_t *direct = label(box, &s_font_ui_16, kColorSub);
+    lv_obj_set_width(direct, 688);
+    lv_obj_set_style_text_align(direct, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(direct, 0, 174);
+    lv_label_set_text(direct, "也可以直接点击下方按钮，在本机屏幕选择并设置 WiFi");
+
+    button(scr, 210, 374, 380, 76, "屏幕设置 WiFi", Action::Wifi);
+}
+
+void refreshProvisioning()
+{
+    if (s_lbl_provision_ip == nullptr) {
+        return;
+    }
+    char ip[16] = "192.168.4.1";
+    const uint32_t ap_ip = nrlWifiApIp();
+    if (ap_ip != 0u) {
+        nrlIpToString(ap_ip, ip, sizeof(ip));
+    }
+    lv_label_set_text(s_lbl_provision_ip, ip);
 }
 
 void buildHome()
@@ -1709,7 +1768,9 @@ void buildWifi()
     clearScreen();
     s_page = Page::Wifi;
     lv_obj_t *scr = lv_screen_active();
-    topBar(scr);
+    if (!s_provisioning_mode) {
+        topBar(scr);
+    }
     lv_obj_t *box = panel(scr, 24, 86, 750, 250);
     const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
 
@@ -1766,7 +1827,8 @@ void buildWifi()
     lv_obj_set_pos(s_lbl_form_status, 0, 174);
     lv_label_set_text(s_lbl_form_status, tr("Scan, select or type SSID, then save."));
 
-    button(scr, 24, 372, 230, 76, "Back", Action::Config);
+    button(scr, 24, 372, 230, 76, "Back",
+           s_provisioning_mode ? Action::Provisioning : Action::Config);
     button(scr, 278, 372, 146, 76, "Scan", Action::ScanWifi);
     button(scr, 442, 372, 146, 76, "Save", Action::SaveWifi);
     button(scr, 606, 372, 168, 76, "Reset", Action::ResetWifi);
@@ -4064,6 +4126,7 @@ void action(lv_event_t *event)
 {
     const Action id = static_cast<Action>(reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
     switch (id) {
+        case Action::Provisioning: buildProvisioning(); break;
         case Action::Config: buildConfig(); break;
         case Action::Home: buildHome(); break;
         case Action::Wifi: buildWifi(); break;
@@ -4954,6 +5017,7 @@ void refresh()
 void rebuildCurrentPage()
 {
     switch (s_page) {
+        case Page::Provisioning: buildProvisioning(); break;
         case Page::Home: buildHome(); break;
         case Page::Config: buildConfig(); break;
         case Page::Wifi: buildWifi(); break;
@@ -5036,11 +5100,36 @@ extern "C" void Display_Init(void)
     s_font_ui_20.fallback = &lv_font_cjk_20;
     loadUiLang(); // restore saved language before the first page is built
     initTouch();
-    buildHome();
-    refresh();
+    if (s_provisioning_mode) {
+        buildProvisioning();
+        refreshProvisioning();
+    } else {
+        buildHome();
+        refresh();
+    }
     lv_refr_now(nullptr);
     s_ready = true;
     ESP_LOGI(TAG, "display ready");
+}
+
+extern "C" void Display_SetProvisioningMode(bool enabled)
+{
+    if (s_provisioning_mode == enabled) {
+        return;
+    }
+    s_provisioning_mode = enabled;
+    s_last_refresh_ms = 0u;
+    if (!s_ready) {
+        return;
+    }
+    if (enabled) {
+        buildProvisioning();
+        refreshProvisioning();
+    } else {
+        buildHome();
+        refresh();
+    }
+    lv_refr_now(nullptr);
 }
 
 extern "C" void Display_Poll(void)
@@ -5049,6 +5138,15 @@ extern "C" void Display_Poll(void)
         return;
     }
     const uint32_t now = millis();
+    if (s_provisioning_mode) {
+        pollWifiScan();
+        if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
+            s_last_refresh_ms = now;
+            refreshProvisioning();
+        }
+        lv_timer_handler();
+        return;
+    }
     if (s_force_invalidate) {
         s_force_invalidate = false;
         lv_obj_invalidate(lv_screen_active()); // repaint after the FB benchmark

@@ -240,9 +240,11 @@ static void applyPendingAudioConfig()
 #endif
 }
 
-static void initStorageMusicAndDisplay()
+static bool s_storage_music_started = false;
+
+static void initStorageAndMusic()
 {
-    if (s_display_started) {
+    if (s_storage_music_started) {
         return;
     }
 
@@ -254,8 +256,15 @@ static void initStorageMusicAndDisplay()
     if (STORAGE_SdMounted()) {
         PLAYLIST_Scan();
     }
+    s_storage_music_started = true;
     logDramMark("storage+music");
+}
 
+static void initDisplay()
+{
+    if (s_display_started) {
+        return;
+    }
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && !(defined(NRL_SKIP_DISPLAY_INIT) && NRL_SKIP_DISPLAY_INIT)
     Display_Init();
     s_display_started = true;
@@ -271,7 +280,8 @@ static bool initFullApp()
         return true;
     }
 
-    initStorageMusicAndDisplay();
+    initStorageAndMusic();
+    initDisplay();
 
     // Bring the audio bridge up BEFORE ES8311_Init. ES8311_Init internally
     // calls AEC_Init which mallocs ~50 KB (WebRtcNs + AFE state) from the
@@ -363,6 +373,7 @@ static bool initFullApp()
 
     s_full_app_started = true;
     s_waiting_for_provisioning = false;
+    Display_SetProvisioningMode(false);
 
     ESP_LOGI(TAG, "[AT] serial console ready. Type \"AT\" for the command list, "
                   "e.g. AT+WIFI_SSID=MyNet then AT+WIFI_PASS=secret");
@@ -398,8 +409,14 @@ static void initApp()
     } else {
         s_waiting_for_provisioning = true;
         ESP_LOGI(TAG, "WiFi not configured; starting light provisioning mode");
+        // Reserve BLE controller/host memory before bringing up the display.
+        // The display remains available, but storage, music, audio and the
+        // other large services stay deferred until provisioning succeeds.
         BLEConfig_Init();
         logDramMark("ble_config");
+        Display_SetProvisioningMode(true);
+        initDisplay();
+        logDramMark("provision_display");
         ESP_LOGI(TAG, "[AT] serial console ready in provisioning mode. Configure WiFi via web, BLE, or AT.");
     }
 }

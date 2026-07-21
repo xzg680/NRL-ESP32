@@ -141,6 +141,8 @@ constexpr int kBottomBarHeight = 34;
 constexpr int kContentHeight = kHeight - kContentY - kBottomBarHeight;
 
 bool s_ready = false;
+bool s_provisioning_mode = false;
+lv_obj_t *s_lbl_provision_ip = nullptr;
 
 esp_lcd_panel_io_handle_t s_panel_io = nullptr;
 esp_lcd_panel_handle_t s_panel = nullptr;
@@ -254,6 +256,7 @@ uint32_t s_radio_name_refresh_ms = 0u;
 void refreshVolume();
 lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, uint32_t color);
 void buildUi();
+void buildProvisioningUi();
 void buildHomeContent();
 void buildMenuUi();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -992,6 +995,7 @@ void resetHomeWidgets()
     s_lbl_ip = nullptr;
     s_lbl_cpu = nullptr;
     s_lbl_gps = nullptr;
+    s_lbl_provision_ip = nullptr;
     s_shown_wifi[0] = '\0';
     s_shown_vol[0] = '\0';
     s_shown_batt[0] = '\0';
@@ -2463,6 +2467,64 @@ void refreshCpu()
 #endif
 }
 
+void buildProvisioningUi()
+{
+    lv_obj_t *scr = prepareScreen();
+
+    lv_obj_t *title = makeLabel(scr, &s_font_aprs_16, kColorAccent);
+    lv_obj_set_width(title, kWidth - 16);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(title, 8, 14);
+    lv_label_set_text(title, "WiFi / BLE 配网");
+
+    lv_obj_t *state = makeLabel(scr, &s_font_aprs_16, kColorApWarn);
+    lv_obj_set_width(state, kWidth - 16);
+    lv_obj_set_style_text_align(state, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(state, 8, 44);
+    lv_label_set_text(state, "等待网络设置...");
+
+    lv_obj_t *wifi = makeLabel(scr, &s_font_aprs_16, kColorCallIdle);
+    lv_obj_set_width(wifi, kWidth - 24);
+    lv_obj_set_pos(wifi, 12, 78);
+    lv_label_set_text(wifi, "1. 连接设备 WiFi 热点");
+
+    s_lbl_provision_ip = makeLabel(scr, &lv_font_montserrat_16, kColorIp);
+    lv_obj_set_width(s_lbl_provision_ip, kWidth - 24);
+    lv_obj_set_pos(s_lbl_provision_ip, 12, 104);
+    lv_label_set_text(s_lbl_provision_ip, "http://192.168.4.1");
+
+    lv_obj_t *wechat = makeLabel(scr, &s_font_aprs_16, kColorCallIdle);
+    lv_obj_set_width(wechat, kWidth - 24);
+    lv_obj_set_pos(wechat, 12, 138);
+    lv_label_set_text(wechat, "2. 微信小程序 NRL互联");
+
+    lv_obj_t *ble = makeLabel(scr, &s_font_aprs_16, kColorSub);
+    lv_obj_set_width(ble, kWidth - 24);
+    lv_obj_set_pos(ble, 12, 166);
+    lv_label_set_text(ble, "打开设置，使用蓝牙配网");
+
+    lv_obj_t *hint = makeLabel(scr, &lv_font_montserrat_14, kColorGood);
+    lv_obj_set_width(hint, kWidth - 16);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(hint, 8, kHeight - 30);
+    lv_label_set_text(hint, "WIFI / BLE PROVISIONING");
+}
+
+void refreshProvisioningUi()
+{
+    if (s_lbl_provision_ip == nullptr) {
+        return;
+    }
+    char ip[16] = "192.168.4.1";
+    const uint32_t ap_ip = nrlWifiApIp();
+    if (ap_ip != 0u) {
+        nrlIpToString(ap_ip, ip, sizeof(ip));
+    }
+    char url[32] = {};
+    snprintf(url, sizeof(url), "http://%s", ip);
+    lv_label_set_text(s_lbl_provision_ip, url);
+}
+
 void refreshGpsStatus()
 {
     if (s_lbl_gps == nullptr) {
@@ -3046,7 +3108,12 @@ extern "C" void Display_Init(void)
     initBatteryAdc();
     s_battery_mv = readBatteryMv();
 
-    buildUi();
+    if (s_provisioning_mode) {
+        buildProvisioningUi();
+        refreshProvisioningUi();
+    } else {
+        buildUi();
+    }
     lv_refr_now(nullptr);  // paint the first frame before the backlight is lit
 
 #if NRL_BOARD == NRL_BOARD_BI4UMD
@@ -3065,6 +3132,14 @@ extern "C" void Display_Poll(void)
     }
 
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    if (s_provisioning_mode) {
+        if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
+            s_last_refresh_ms = now;
+            refreshProvisioningUi();
+        }
+        lv_timer_handler();
+        return;
+    }
     processMenuInput(now);
     if (s_last_battery_ms == 0u || (now - s_last_battery_ms) >= kBatteryIntervalMs) {
         s_last_battery_ms = now;
@@ -3130,6 +3205,25 @@ extern "C" int Display_GetBatteryRawMv(void)
     return readBatteryRawMv();
 }
 
+extern "C" void Display_SetProvisioningMode(bool enabled)
+{
+    if (s_provisioning_mode == enabled) {
+        return;
+    }
+    s_provisioning_mode = enabled;
+    s_last_refresh_ms = 0u;
+    if (!s_ready) {
+        return;
+    }
+    if (enabled) {
+        buildProvisioningUi();
+        refreshProvisioningUi();
+    } else {
+        buildUi();
+    }
+    lv_refr_now(nullptr);
+}
+
 extern "C" int Display_GetBatteryCalibratedMv(void)
 {
     return applyBatteryCalibration(readBatteryRawMv());
@@ -3146,6 +3240,7 @@ extern "C" long Display_FramebufferBenchMBps(void) { return -1; }
 
 extern "C" void Display_Init(void) {}
 extern "C" void Display_Poll(void) {}
+extern "C" void Display_SetProvisioningMode(bool) {}
 extern "C" void Display_MenuOpen(void) {}
 extern "C" bool Display_MenuIsActive(void) { return false; }
 extern "C" void Display_MenuNavigate(int) {}

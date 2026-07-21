@@ -16,6 +16,12 @@ extern "C" {
 // once from setup(); a failure is logged and leaves Display_Poll() inert.
 void Display_Init(void);
 
+// Select the lightweight provisioning UI. This may be called before
+// Display_Init(); once the display is ready it rebuilds the active screen.
+// Provisioning mode deliberately avoids polling audio/APRS/storage services
+// that have not been started yet.
+void Display_SetProvisioningMode(bool enabled);
+
 // Refresh the on-screen values (caller callsign/SSID, clock, WiFi signal,
 // battery voltage, IP address). Call periodically from loop(); the work is
 // internally throttled so a tight 20 ms poll loop is fine.

@@ -9,8 +9,8 @@ Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS'});
 Object.assign(translations.en,{signalingConfig:'Signaling / CTCSS'});
 Object.assign(translations.zh,{signalingConfig:'信令 / CTCSS'});
 Object.assign(translations.en,{remoteUpdating:'Installing firmware... {percent}%'});
-Object.assign(translations.en,{releaseTitle:'0.8.13 feature updates',releaseAprsComment:'Expands APRS comments to 96 UTF-8 bytes with safe Chinese text handling and automatic migration of existing settings.'});
-Object.assign(translations.zh,{releaseTitle:'0.8.13 功能更新',releaseAprsComment:'APRS 注释扩展到 96 个 UTF-8 字节，安全处理中文并自动迁移已有配置。'});
+Object.assign(translations.en,{releaseTitle:'0.8.15 feature updates',releaseProvisioning:'Keeps the display available during first-time setup while deferring memory-heavy services until WiFi provisioning completes.',releaseS31Setup:'Adds dedicated WiFi/BLE setup guidance on display boards and direct touchscreen WiFi setup on S31 Korvo.'});
+Object.assign(translations.zh,{releaseTitle:'0.8.15 功能更新',releaseProvisioning:'首次配网期间保留屏幕显示，并将大内存服务延迟到 WiFi 配网完成后启动。',releaseS31Setup:'带屏幕板卡增加 WiFi/蓝牙配网引导，S31 Korvo 支持直接通过触屏设置 WiFi。'});
 Object.assign(translations.zh,{remoteUpdating:'正在升级固件... {percent}%'});
 function lang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}
 function t(k,values={}){const l=lang();let text=(translations[l]&&translations[l][k])||translations.en[k]||k;Object.entries(values).forEach(([name,value])=>{text=text.replace('{'+name+'}',String(value));});return text;}
