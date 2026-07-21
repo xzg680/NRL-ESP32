@@ -531,12 +531,36 @@ bool BLEConfig_Init(void)
     NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
     advertising->addServiceUUID(kServiceUuid);
     advertising->enableScanResponse(true);
-    advertising->start();
+    // NimBLE 2.x no longer copies the GAP device name into advertising data
+    // automatically. The WeChat mini program filters on NRL-ESP32-CFG, so an
+    // unnamed advertisement is effectively invisible even though its UART
+    // service UUID is present. Put the name in the scan response explicitly.
+    if (!advertising->setName(kBleDeviceName)) {
+        ESP_LOGE(TAG, "failed to add device name to BLE scan response");
+        NimBLEDevice::deinit(true);
+        s_server = nullptr;
+        s_tx = nullptr;
+        s_rx = nullptr;
+        return false;
+    }
+    if (!advertising->start()) {
+        ESP_LOGE(TAG, "BLE advertising start failed");
+        NimBLEDevice::deinit(true);
+        s_server = nullptr;
+        s_tx = nullptr;
+        s_rx = nullptr;
+        return false;
+    }
 
     s_initialized = true;
     s_advertising = true;
     ESP_LOGI(TAG, "advertising as %s", kBleDeviceName);
     return true;
+}
+
+bool BLEConfig_IsReady(void)
+{
+    return s_initialized;
 }
 
 void BLEConfig_Stop(void)
@@ -638,6 +662,7 @@ void BLEConfig_Poll(void)
 
 bool BLEConfig_Init(void) { return false; }
 void BLEConfig_Poll(void) {}
+bool BLEConfig_IsReady(void) { return false; }
 void BLEConfig_Stop(void) {}
 
 #endif // CONFIG_BT_NIMBLE_ENABLED

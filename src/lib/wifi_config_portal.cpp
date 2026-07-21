@@ -2957,6 +2957,15 @@ static void ensureServerRunning()
 
 } // namespace
 
+void WifiConfigPortal_GetApSsid(char *out, size_t out_size)
+{
+    if (out == nullptr || out_size == 0u) {
+        return;
+    }
+    const std::string ssid = buildApSsid();
+    snprintf(out, out_size, "%s", ssid.c_str());
+}
+
 bool WifiConfigPortal_Init(void)
 {
     EXTERNAL_RADIO_Init();

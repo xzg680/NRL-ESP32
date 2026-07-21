@@ -395,25 +395,44 @@ static void initApp()
     logDramMark("usb4g");
 
     STATUS_IO_Init();
+
+    // On a factory-fresh device reserve the BLE host/controller memory before
+    // the config portal starts WiFi, performs its pre-scan and creates the HTTP
+    // server. Those allocations previously happened first and could push both
+    // Gezipai and BI4UMD below BLEConfig_Init's internal-RAM safety threshold,
+    // leaving no NRL-ESP32-CFG advertisement at all.
+    s_seen_config_generation = CONFIG_NOTIFY_Generation();
+    if (!nrlExternalNetworkConnected() && !wifiConfigured()) {
+        s_waiting_for_provisioning = true;
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
+        ESP_LOGI(TAG, "WiFi not configured; reserving BLE before config portal");
+        if (!BLEConfig_Init()) {
+            ESP_LOGE(TAG, "BLE provisioning init failed before config portal");
+        }
+        logDramMark("ble_config");
+#else
+        ESP_LOGI(TAG, "WiFi not configured; using SoftAP/screen provisioning (BLE unavailable)");
+#endif
+    }
+
     WifiConfigPortal_Init();
     OtaService_Init();
     logDramMark("portal+ota");
 
-    s_seen_config_generation = CONFIG_NOTIFY_Generation();
     if (nrlExternalNetworkConnected()) {
         ESP_LOGI(TAG, "External network online; starting full app without BLE provisioning");
+        if (s_waiting_for_provisioning) {
+            BLEConfig_Stop();
+        }
         initFullApp();
     } else if (wifiConfigured()) {
         ESP_LOGI(TAG, "WiFi configured; starting full app without BLE provisioning");
         initFullApp();
     } else {
-        s_waiting_for_provisioning = true;
         ESP_LOGI(TAG, "WiFi not configured; starting light provisioning mode");
-        // Reserve BLE controller/host memory before bringing up the display.
-        // The display remains available, but storage, music, audio and the
-        // other large services stay deferred until provisioning succeeds.
-        BLEConfig_Init();
-        logDramMark("ble_config");
+        // BLE was reserved before the WiFi portal. The display remains
+        // available, while storage, music, audio and the other large services
+        // stay deferred until provisioning succeeds.
         Display_SetProvisioningMode(true);
         initDisplay();
         logDramMark("provision_display");

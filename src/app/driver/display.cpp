@@ -40,6 +40,8 @@
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD_IS_GEZIPAI_FAMILY
 
 #include "../../lib/nrl_audio_bridge.h"
+#include "../../lib/ble_config.h"
+#include "../../lib/wifi_config_portal.h"
 #include "../../services/aprs_service.h"
 #include "../../services/espnow_link.h"
 #include "../../services/display_notice.h"
@@ -143,6 +145,8 @@ constexpr int kContentHeight = kHeight - kContentY - kBottomBarHeight;
 bool s_ready = false;
 bool s_provisioning_mode = false;
 lv_obj_t *s_lbl_provision_ip = nullptr;
+lv_obj_t *s_lbl_provision_ssid = nullptr;
+lv_obj_t *s_lbl_provision_ble = nullptr;
 
 esp_lcd_panel_io_handle_t s_panel_io = nullptr;
 esp_lcd_panel_handle_t s_panel = nullptr;
@@ -996,6 +1000,8 @@ void resetHomeWidgets()
     s_lbl_cpu = nullptr;
     s_lbl_gps = nullptr;
     s_lbl_provision_ip = nullptr;
+    s_lbl_provision_ssid = nullptr;
+    s_lbl_provision_ble = nullptr;
     s_shown_wifi[0] = '\0';
     s_shown_vol[0] = '\0';
     s_shown_batt[0] = '\0';
@@ -2485,36 +2491,46 @@ void buildProvisioningUi()
 
     lv_obj_t *wifi = makeLabel(scr, &s_font_aprs_16, kColorCallIdle);
     lv_obj_set_width(wifi, kWidth - 24);
-    lv_obj_set_pos(wifi, 12, 78);
-    lv_label_set_text(wifi, "1. 连接设备 WiFi 热点");
+    lv_obj_set_pos(wifi, 12, 72);
+    lv_label_set_text(wifi, "1. 连接 WiFi 热点");
+
+    s_lbl_provision_ssid = makeLabel(scr, &lv_font_montserrat_14, kColorGood);
+    lv_obj_set_width(s_lbl_provision_ssid, kWidth - 16);
+    lv_obj_set_style_text_align(s_lbl_provision_ssid, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_lbl_provision_ssid, 8, 96);
+    lv_label_set_text(s_lbl_provision_ssid, "NRL3188-ESP32-XXXXXX");
 
     s_lbl_provision_ip = makeLabel(scr, &lv_font_montserrat_16, kColorIp);
     lv_obj_set_width(s_lbl_provision_ip, kWidth - 24);
-    lv_obj_set_pos(s_lbl_provision_ip, 12, 104);
+    lv_obj_set_pos(s_lbl_provision_ip, 12, 120);
     lv_label_set_text(s_lbl_provision_ip, "http://192.168.4.1");
 
     lv_obj_t *wechat = makeLabel(scr, &s_font_aprs_16, kColorCallIdle);
     lv_obj_set_width(wechat, kWidth - 24);
-    lv_obj_set_pos(wechat, 12, 138);
+    lv_obj_set_pos(wechat, 12, 148);
     lv_label_set_text(wechat, "2. 微信小程序 NRL互联");
 
     lv_obj_t *ble = makeLabel(scr, &s_font_aprs_16, kColorSub);
     lv_obj_set_width(ble, kWidth - 24);
-    lv_obj_set_pos(ble, 12, 166);
+    lv_obj_set_pos(ble, 12, 174);
     lv_label_set_text(ble, "打开设置，使用蓝牙配网");
 
-    lv_obj_t *hint = makeLabel(scr, &lv_font_montserrat_14, kColorGood);
-    lv_obj_set_width(hint, kWidth - 16);
-    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(hint, 8, kHeight - 30);
-    lv_label_set_text(hint, "WIFI / BLE PROVISIONING");
+    s_lbl_provision_ble = makeLabel(scr, &lv_font_montserrat_14, kColorGood);
+    lv_obj_set_width(s_lbl_provision_ble, kWidth - 16);
+    lv_obj_set_style_text_align(s_lbl_provision_ble, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_lbl_provision_ble, 8, kHeight - 30);
+    lv_label_set_text(s_lbl_provision_ble, "BLE CHECKING...");
 }
 
 void refreshProvisioningUi()
 {
-    if (s_lbl_provision_ip == nullptr) {
+    if (s_lbl_provision_ip == nullptr || s_lbl_provision_ssid == nullptr ||
+        s_lbl_provision_ble == nullptr) {
         return;
     }
+    char ssid[32] = {};
+    WifiConfigPortal_GetApSsid(ssid, sizeof(ssid));
+    lv_label_set_text(s_lbl_provision_ssid, ssid);
     char ip[16] = "192.168.4.1";
     const uint32_t ap_ip = nrlWifiApIp();
     if (ap_ip != 0u) {
@@ -2523,6 +2539,11 @@ void refreshProvisioningUi()
     char url[32] = {};
     snprintf(url, sizeof(url), "http://%s", ip);
     lv_label_set_text(s_lbl_provision_ip, url);
+    const bool ble_ready = BLEConfig_IsReady();
+    lv_label_set_text(s_lbl_provision_ble,
+                      ble_ready ? "BLE READY: NRL-ESP32-CFG" : "BLE FAILED - USE WIFI");
+    lv_obj_set_style_text_color(s_lbl_provision_ble,
+                                lv_color_hex(ble_ready ? kColorGood : kColorWeak), 0);
 }
 
 void refreshGpsStatus()

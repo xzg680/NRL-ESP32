@@ -56,6 +56,13 @@ if(NOT DEFINED CMAKE_MESSAGE_LOG_LEVEL)
         "Suppress noisy ESP-IDF 6.2 component-validation warnings by default")
 endif()
 
+# Keep ESP-IDF's application descriptor in sync with the firmware version
+# shown by the UI and used by OTA. Without this, esp_app_desc_t falls back to
+# a stale project/git version even when NRL_FW_VERSION is supplied by CI.
+if(NRL_FW_VERSION)
+    set(PROJECT_VER "${NRL_FW_VERSION}")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(nrl-esp32)
 

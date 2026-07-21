@@ -5,6 +5,9 @@
 
 bool BLEConfig_Init(void);
 void BLEConfig_Poll(void);
+// True while the BLE provisioning host and GATT service are active (including
+// while a provisioning client is connected and advertising is paused).
+bool BLEConfig_IsReady(void);
 
 // Tear the BLE stack fully down (advertising, host, BT controller) so the
 // shared radio is freed for WiFi-only operation -- BT/WiFi coexistence

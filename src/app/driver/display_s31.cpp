@@ -9,6 +9,7 @@
 #include "../../lib/nrl_net_compat.h"
 #include "../../lib/nrl_version.h"
 #include "../../lib/nrl_wifi.h"
+#include "../../lib/wifi_config_portal.h"
 #include "../../media/cover_decoder.h"
 #include "../../services/ai_assistant.h"
 #include "../../services/aprs_service.h"
@@ -229,6 +230,7 @@ lv_obj_t *s_lbl_server = nullptr;
 lv_obj_t *s_lbl_detail = nullptr;
 lv_obj_t *s_lbl_form_status = nullptr;
 lv_obj_t *s_lbl_provision_ip = nullptr;
+lv_obj_t *s_lbl_provision_ssid = nullptr;
 lv_obj_t *s_notice_panel = nullptr;
 lv_obj_t *s_lbl_notice = nullptr;
 lv_obj_t *s_bar_notice_progress = nullptr;
@@ -1252,6 +1254,7 @@ void clearScreen()
     s_lbl_detail = nullptr;
     s_lbl_form_status = nullptr;
     s_lbl_provision_ip = nullptr;
+    s_lbl_provision_ssid = nullptr;
     s_notice_panel = nullptr;
     s_lbl_notice = nullptr;
     s_bar_notice_progress = nullptr;
@@ -1449,14 +1452,20 @@ void buildProvisioning()
     lv_obj_set_pos(s_lbl_provision_ip, 470, 56);
     lv_label_set_text(s_lbl_provision_ip, "192.168.4.1");
 
+    s_lbl_provision_ssid = label(box, &lv_font_montserrat_20, kColorGood);
+    lv_obj_set_width(s_lbl_provision_ssid, 688);
+    lv_obj_set_style_text_align(s_lbl_provision_ssid, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_lbl_provision_ssid, 0, 98);
+    lv_label_set_text(s_lbl_provision_ssid, "NRL3188-ESP32-XXXXXX");
+
     lv_obj_t *wechat = label(box, &s_font_ui_20, kColorText);
-    lv_obj_set_pos(wechat, 18, 108);
+    lv_obj_set_pos(wechat, 18, 142);
     lv_label_set_text(wechat, "方式 2：微信小程序「NRL互联」打开设置，使用蓝牙配网");
 
     lv_obj_t *direct = label(box, &s_font_ui_16, kColorSub);
     lv_obj_set_width(direct, 688);
     lv_obj_set_style_text_align(direct, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(direct, 0, 174);
+    lv_obj_set_pos(direct, 0, 194);
     lv_label_set_text(direct, "也可以直接点击下方按钮，在本机屏幕选择并设置 WiFi");
 
     button(scr, 210, 374, 380, 76, "屏幕设置 WiFi", Action::Wifi);
@@ -1464,9 +1473,12 @@ void buildProvisioning()
 
 void refreshProvisioning()
 {
-    if (s_lbl_provision_ip == nullptr) {
+    if (s_lbl_provision_ip == nullptr || s_lbl_provision_ssid == nullptr) {
         return;
     }
+    char ssid[32] = {};
+    WifiConfigPortal_GetApSsid(ssid, sizeof(ssid));
+    lv_label_set_text(s_lbl_provision_ssid, ssid);
     char ip[16] = "192.168.4.1";
     const uint32_t ap_ip = nrlWifiApIp();
     if (ap_ip != 0u) {
