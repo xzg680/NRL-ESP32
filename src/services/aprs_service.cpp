@@ -3,6 +3,7 @@
 #include "audio/audio_router.h"
 #include "audio/audio_focus.h"
 #include "driver/board_pins.h"
+#include "driver/display.h"
 #include "driver/external_radio.h"
 #include "driver/gps_serial.h"
 #include "driver/serial_port_config.h"
@@ -49,9 +50,11 @@ constexpr uint16_t kMaxBeaconIntervalS = 3600u;
 // the last-beaconed position sends one early. The configured
 // beacon_interval_s always remains the stationary/no-GPS ceiling.
 constexpr uint16_t kAutoMinIntervalS = 30u;
+constexpr uint16_t kAutoTurnMinIntervalS = 10u;
 constexpr uint32_t kStatusSatelliteUpdateMs = 60000u;
 constexpr double kAutoFastSpeedKmh = 60.0; // at/above: beacon at the floor rate
 constexpr double kAutoSlowSpeedKmh = 3.0;  // below: treated as stationary
+constexpr double kAutoTurnMinSpeedKmh = 8.0; // reject noisy walking/stationary course
 constexpr double kAutoMoveKm = 0.3;        // early beacon after moving this far
 // WGS-84 default: 3153.3100N, 11848.8460E.
 constexpr int32_t kDefaultLatE6 = 31888500;
@@ -164,6 +167,7 @@ int s_is_socket = -1;
 bool s_is_logged_in = false;
 bool s_is_status_sent = false;
 int16_t s_is_status_satellites = -2; // -2=never sent, -1=no current fix
+int s_is_status_battery_mv = -1;
 uint32_t s_is_last_status_ms = 0;
 volatile bool s_is_reconnect_requested = false;
 uint32_t s_is_last_attempt_ms = 0;
@@ -185,6 +189,8 @@ uint32_t s_last_beacon_ms = 0; // 0 = beacon at the next enabled task tick
 double s_last_beacon_lat = 0.0;
 double s_last_beacon_lon = 0.0;
 bool s_last_beacon_pos_valid = false;
+uint16_t s_last_beacon_course = 0u;
+bool s_last_beacon_course_valid = false;
 
 inline uint32_t nowMs()
 {
@@ -936,6 +942,7 @@ void isDisconnect()
     s_is_logged_in = false;
     s_is_status_sent = false;
     s_is_status_satellites = -2;
+    s_is_status_battery_mv = -1;
     s_is_last_status_ms = 0;
     s_is_line_len = 0;
 }
@@ -1133,29 +1140,11 @@ void sendBeacon()
                                ? radio->server_host
                                : "unknown";
     const uint16_t nrl_port = (radio != nullptr) ? radio->server_port : 0u;
-    // Keep the map site's first text row focused on live navigation data and
-    // the user's endpoint/comment. The same values are also encoded in the
-    // APRS-standard ccc/sss and /A= fields by buildPositionInfo(), so APRS
-    // clients can parse them instead of relying on this human-readable text.
-    char gps_text[64];
-    const bool gps_fresh = s_gps_fix &&
-                           (nowMs() - s_gps_last_fix_ms) < kGpsFixFreshMs;
-    if (gps_fresh && isfinite(s_gps_speed_kmh) && s_gps_speed_kmh >= 0.0f &&
-        isfinite(s_gps_alt_m)) {
-        const unsigned course = (s_gps_course % 360u) == 0u
-                                    ? 360u
-                                    : static_cast<unsigned>(s_gps_course % 360u);
-        const double display_speed = fmin(static_cast<double>(s_gps_speed_kmh), 1850.0);
-        const double display_altitude = fmax(-99999.0, fmin(s_gps_alt_m, 999999.0));
-        snprintf(gps_text, sizeof(gps_text), "SPD=%.1fkm/h CRS=%03u ALT=%.0fm",
-                 display_speed, course, display_altitude);
-    } else {
-        gps_text[0] = '\0';
-    }
-
     char net_comment[256];
-    snprintf(net_comment, sizeof(net_comment), "%s%s@udp://%s:%u%s%s",
-             gps_text, gps_text[0] != '\0' ? " " : "",
+    // Speed/course/altitude already use APRS-standard ccc/sss and /A= fields
+    // in buildPositionInfo(). Do not repeat them in the free-text comment:
+    // map clients render those standard fields themselves.
+    snprintf(net_comment, sizeof(net_comment), "@udp://%s:%u%s%s",
              nrl_host, (unsigned)nrl_port,
              s_cfg.comment[0] != '\0' ? " " : "", s_cfg.comment);
     char net_info[300];
@@ -1175,26 +1164,43 @@ void sendBeacon()
                                       (status_now - s_gps_last_fix_ms) < kGpsFixFreshMs;
         const int16_t status_satellites =
             (status_gps_fresh && s_gps_satellites >= 0) ? s_gps_satellites : -1;
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_BI4UMD
+        // Report the ADC result verbatim, including 0 V or implausible
+        // high/low readings: those values are useful battery/sense diagnostics
+        // and must not be hidden by a "reasonable voltage" filter.
+        const int status_battery_mv = Display_GetBatteryCalibratedMv();
+#else
+        const int status_battery_mv = -1;
+#endif
         const bool first_fix = s_is_status_satellites < 0 && status_satellites >= 0;
         const bool lost_fix = s_is_status_satellites >= 0 && status_satellites < 0;
         const bool satellite_changed = status_satellites != s_is_status_satellites;
+        const bool battery_changed = status_battery_mv >= 0 &&
+            (s_is_status_battery_mv < 0 ||
+             abs(status_battery_mv - s_is_status_battery_mv) >= 100);
         const bool status_due = !s_is_status_sent ||
-            (satellite_changed &&
+            ((satellite_changed || battery_changed) &&
              (first_fix || lost_fix ||
               (status_now - s_is_last_status_ms) >= kStatusSatelliteUpdateMs));
         if (status_due && s_is_socket >= 0 && s_is_logged_in) {
-            if (status_satellites >= 0) {
-                snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:>NRL-ESP32,%s,v%s,SAT=%d",
-                         call, boardType(), NRL_FIRMWARE_VERSION,
-                         static_cast<int>(status_satellites));
-            } else {
-                snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:>NRL-ESP32,%s,v%s",
-                         call, boardType(), NRL_FIRMWARE_VERSION);
+            snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:>NRL-ESP32,%s,v%s",
+                     call, boardType(), NRL_FIRMWARE_VERSION);
+            size_t used = strlen(line);
+            if (status_satellites >= 0 && used < sizeof(line)) {
+                used += static_cast<size_t>(snprintf(
+                    line + used, sizeof(line) - used, ",SAT=%d",
+                    static_cast<int>(status_satellites)));
+            }
+            if (status_battery_mv >= 0 && used < sizeof(line)) {
+                snprintf(line + used, sizeof(line) - used, ",BAT=%d.%02dV",
+                         status_battery_mv / 1000,
+                         (status_battery_mv % 1000) / 10);
             }
             isSendLine(line);
             s_is_status_sent = s_is_socket >= 0 && s_is_logged_in;
             if (s_is_status_sent) {
                 s_is_status_satellites = status_satellites;
+                s_is_status_battery_mv = status_battery_mv;
                 s_is_last_status_ms = status_now;
             }
         }
@@ -1451,6 +1457,7 @@ void aprsTask(void *)
         const uint32_t now = nowMs();
         uint32_t effective_ms = (uint32_t)interval_s * 1000u;
         bool moved_far = false;
+        bool turned = false;
         if (auto_interval) {
             double lat = 0.0, lon = 0.0;
             if (ownPosition(&lat, &lon, nullptr)) { // true only on a fresh fix
@@ -1470,6 +1477,24 @@ void aprsTask(void *)
                         kAutoMoveKm) {
                     moved_far = true;
                 }
+                if (speed >= kAutoTurnMinSpeedKmh && s_gps_course_valid &&
+                    s_last_beacon_course_valid) {
+                    const unsigned current = s_gps_course % 360u;
+                    const unsigned previous = s_last_beacon_course % 360u;
+                    const unsigned raw_delta = current > previous
+                                                   ? current - previous
+                                                   : previous - current;
+                    const unsigned turn_delta = raw_delta > 180u
+                                                    ? 360u - raw_delta
+                                                    : raw_delta;
+                    // SmartBeaconing-style corner pegging: require a larger
+                    // turn at low speed, where GPS course is less stable, and
+                    // become more responsive as road speed increases.
+                    double turn_threshold = 15.0 + 300.0 / speed;
+                    if (turn_threshold < 20.0) turn_threshold = 20.0;
+                    if (turn_threshold > 60.0) turn_threshold = 60.0;
+                    turned = (double)turn_delta >= turn_threshold;
+                }
             }
         }
         const uint32_t elapsed_ms = now - s_last_beacon_ms;
@@ -1477,11 +1502,19 @@ void aprsTask(void *)
         // A large position jump beacons early, but never more often than the
         // auto floor -- a fast mover is already pacing at that rate.
         const bool early = moved_far && elapsed_ms >= (uint32_t)kAutoMinIntervalS * 1000u;
-        if (due || early) {
+        const bool corner = turned &&
+            elapsed_ms >= (uint32_t)kAutoTurnMinIntervalS * 1000u;
+        if (due || early || corner) {
             sendBeacon();
             s_last_beacon_ms = (now != 0u) ? now : 1u;
             s_last_beacon_pos_valid =
                 ownPosition(&s_last_beacon_lat, &s_last_beacon_lon, nullptr);
+            s_last_beacon_course_valid = s_last_beacon_pos_valid &&
+                                         s_gps_course_valid &&
+                                         (double)s_gps_speed_kmh >= kAutoTurnMinSpeedKmh;
+            if (s_last_beacon_course_valid) {
+                s_last_beacon_course = s_gps_course;
+            }
         }
 
         Ax25TransmitCheck();

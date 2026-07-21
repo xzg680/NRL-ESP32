@@ -36,7 +36,7 @@ bool Display_MenuIsActive(void);
 void Display_MenuNavigate(int direction);
 void Display_MenuConfirm(void);
 
-// Battery sense (gezipai only; returns 0 on boards without a battery ADC).
+// Battery sense (Geizipai/BI4UMD; returns 0 on boards without a battery ADC).
 // Both readings are in millivolts. The raw reading is the uncalibrated ADC
 // voltage * 3 (divider); the calibrated reading additionally multiplies by
 // the configured battery_cal_milli / 1000 correction factor.

@@ -116,7 +116,8 @@ bool APRS_SERVICE_SetSsid(uint8_t ssid);                    // 0..15
 bool APRS_SERVICE_SetSymbol(char table, char code);
 bool APRS_SERVICE_SetBeaconInterval(uint16_t seconds);      // 10..3600
 // Auto interval: with a fresh GPS fix the beacon period scales down with
-// speed (floor 30 s at 60+ km/h) and a >300 m move beacons early; the
+// speed (floor 30 s at 60+ km/h), a >300 m move beacons early, and a moving
+// station that changes course substantially can corner-peg after 10 s. The
 // configured interval stays the stationary/no-GPS ceiling.
 bool APRS_SERVICE_SetAutoInterval(bool enabled);
 bool APRS_SERVICE_SetDefaultPosition(double lat, double lon);
