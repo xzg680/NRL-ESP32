@@ -31,7 +31,7 @@
 #include "display.h"
 
 #include "board_pins.h"
-#include "s31_i2c.h"
+#include "i2c1.h"
 #if NRL_BOARD == NRL_BOARD_BI4UMD
 #include "display_bi4umd.h"
 #include "touch_bi4umd.h"
@@ -126,6 +126,7 @@ constexpr uint32_t kColorDuplex   = 0xA78BFA;  // transmitting + receiving
 lv_font_t s_font_aprs_16;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
 lv_font_t s_font_music_20;
+constexpr size_t kBi4umdMusicListMaxRows = 48u;
 #endif
 
 // Battery pack assumed to be a single Li-ion cell (3.0 V .. 4.2 V).
@@ -163,11 +164,13 @@ lv_obj_t *s_lbl_vol = nullptr;
 lv_obj_t *s_lbl_batt = nullptr;
 lv_obj_t *s_lbl_ip = nullptr;
 lv_obj_t *s_lbl_cpu = nullptr;
+lv_obj_t *s_lbl_gps = nullptr;
 lv_obj_t *s_lbl_hint = nullptr;
 lv_obj_t *s_lbl_ota = nullptr;
 lv_obj_t *s_bar_ota = nullptr;
 lv_obj_t *s_content = nullptr;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
+lv_obj_t *s_lbl_signaling = nullptr;
 enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings };
 Bi4umdPage s_bi4umd_page = Bi4umdPage::Radio;
 lv_obj_t *s_lbl_music_title = nullptr;
@@ -237,7 +240,11 @@ char s_shown_vol[16] = {};
 char s_shown_batt[20] = {};
 char s_shown_ip[96] = {};
 char s_shown_cpu[12] = {};
+char s_shown_gps[16] = {};
 char s_shown_ota[160] = {}; // sized for a scrolling APRS monitor line
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+char s_shown_signaling[160] = {};
+#endif
 int s_shown_state = -1;  // caption: -1 unset, 0 standby, 1 last heard, 2 rx, 3 tx
 bool s_shown_media = false;
 char s_cached_radio_path[256] = {};
@@ -414,10 +421,16 @@ bool onColorTransDone(esp_lcd_panel_io_handle_t /*io*/,
 void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-    (void)disp;
     const int32_t count = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
-    BI4UMD_Display_Flush(s_panel_io, area->x1, area->y1, area->x2, area->y2,
-                         px_map, static_cast<size_t>(count));
+    if (!BI4UMD_Display_Flush(s_panel_io, area->x1, area->y1,
+                              area->x2, area->y2, px_map,
+                              static_cast<size_t>(count))) {
+        // A failed queued transfer has no completion callback. Release LVGL's
+        // render buffer here so one SPI error cannot freeze all later frames.
+        ESP_LOGE(TAG, "[LCD] BI4UMD flush failed (%ld pixels)",
+                 static_cast<long>(count));
+        lv_display_flush_ready(disp);
+    }
 #else
     esp_lcd_panel_handle_t panel =
         static_cast<esp_lcd_panel_handle_t>(lv_display_get_user_data(disp));
@@ -746,7 +759,7 @@ void touchRead(lv_indev_t * /*indev*/, lv_indev_data_t *data)
 bool initTouch()
 {
     i2c_master_bus_handle_t i2c_bus = nullptr;
-    if (!S31_I2C_GetBus(&i2c_bus)) {
+    if (!I2C_MasterGetBus(&i2c_bus)) {
         ESP_LOGW(TAG, "[LCD] touch I2C unavailable");
         return false;
     }
@@ -954,6 +967,8 @@ void resetCenterWidgets()
     s_shown_state = -1;
     s_shown_media = false;
 #if NRL_BOARD == NRL_BOARD_BI4UMD
+    s_lbl_signaling = nullptr;
+    s_shown_signaling[0] = '\0';
     s_lbl_music_title = nullptr;
     s_lbl_music_artist = nullptr;
     s_lbl_music_state = nullptr;
@@ -976,11 +991,13 @@ void resetHomeWidgets()
     s_lbl_batt = nullptr;
     s_lbl_ip = nullptr;
     s_lbl_cpu = nullptr;
+    s_lbl_gps = nullptr;
     s_shown_wifi[0] = '\0';
     s_shown_vol[0] = '\0';
     s_shown_batt[0] = '\0';
     s_shown_ip[0] = '\0';
     s_shown_cpu[0] = '\0';
+    s_shown_gps[0] = '\0';
 }
 
 lv_obj_t *prepareScreen()
@@ -1468,7 +1485,9 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
     else if (s_menu_page == MenuPage::Dtmf) buildProtocolMenu(false);
     else buildMainMenu();
+#if NRL_BOARD == NRL_BOARD_BI4UMD
     addBi4umdMenuButtons();
+#endif
 }
 
 #if NRL_DISPLAY_BUS_RGB
@@ -1631,10 +1650,21 @@ void rebuildBi4umdMusicList()
         return;
     }
 
-    for (size_t i = 0; i < count; ++i) {
+    const size_t row_count = count < kBi4umdMusicListMaxRows
+                                 ? count : kBi4umdMusicListMaxRows;
+    size_t start = 0u;
+    if (current >= 0 && count > row_count) {
+        start = static_cast<size_t>(current);
+        if (start > row_count / 2u) start -= row_count / 2u;
+        else start = 0u;
+        if (start + row_count > count) start = count - row_count;
+    }
+
+    for (size_t row_index = 0; row_index < row_count; ++row_index) {
+        const size_t i = start + row_index;
         const char *path = PLAYLIST_GetPath(i);
         lv_obj_t *row = lv_button_create(s_list_music);
-        lv_obj_set_pos(row, 2, static_cast<int>(i * 32u));
+        lv_obj_set_pos(row, 2, static_cast<int>(row_index * 32u));
         lv_obj_set_size(row, kWidth - 28, 29);
         lv_obj_set_style_radius(row, 4, 0);
         lv_obj_set_style_bg_color(row,
@@ -1650,6 +1680,16 @@ void rebuildBi4umdMusicList()
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
         lv_obj_align(label, LV_ALIGN_LEFT_MID, 4, 0);
         lv_label_set_text(label, bi4umdMusicBasename(path));
+    }
+    if (count > row_count) {
+        char text[64] = {};
+        snprintf(text, sizeof(text), "Showing %u-%u of %u",
+                 static_cast<unsigned>(start + 1u),
+                 static_cast<unsigned>(start + row_count),
+                 static_cast<unsigned>(count));
+        lv_obj_t *more = makeLabel(s_list_music, &lv_font_montserrat_14, kColorSub);
+        lv_obj_set_pos(more, 6, static_cast<int>(row_count * 32u + 4u));
+        lv_label_set_text(more, text);
     }
 }
 
@@ -1926,10 +1966,25 @@ void buildHomeContent()
     // Gezipai is not a touch screen: this is deliberately only a notification.
     // Upgrade confirmation is AT+OTA=LATEST, the local /update page, or the
     // physical VOL+ + VOL- chord handled by status_io.cpp.
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    // BI4UMD has an extra 80 vertical pixels. Keep decoded MDC/DTMF/CTCSS
+    // signaling on its own row so it never displaces the APRS monitor.
+    s_lbl_signaling = makeLabel(content, &s_font_aprs_16, kColorAccent);
+    lv_obj_set_width(s_lbl_signaling, kWidth);
+    lv_obj_set_style_text_align(s_lbl_signaling, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lbl_signaling, LV_ALIGN_TOP_MID, 0, 136);
+    lv_label_set_long_mode(s_lbl_signaling, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(s_lbl_signaling, "");
+#endif
+
     s_lbl_ota = makeLabel(content, &s_font_aprs_16, kColorApWarn);
     lv_obj_set_width(s_lbl_ota, kWidth);
     lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 164);
+#else
     lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 136);
+#endif
     // Doubles as the APRS monitor ticker; long packet lines scroll circularly.
     lv_label_set_long_mode(s_lbl_ota, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_ota, "");
@@ -2025,10 +2080,14 @@ void buildUi()
     // ---- Bottom IP bar: address on the left, per-core CPU load on the right ----
     lv_obj_t *bottom = makeBar(scr, kHeight - kBottomBarHeight, kBottomBarHeight);
     s_lbl_ip = makeLabel(bottom, &lv_font_montserrat_16, kColorIp);
-    lv_obj_set_width(s_lbl_ip, 156);
+    lv_obj_set_width(s_lbl_ip, 124);
     lv_label_set_long_mode(s_lbl_ip, LV_LABEL_LONG_DOT);
     lv_obj_align(s_lbl_ip, LV_ALIGN_LEFT_MID, 8, 0);
     lv_label_set_text(s_lbl_ip, "---");
+
+    s_lbl_gps = makeLabel(bottom, &lv_font_montserrat_16, kColorWeak);
+    lv_obj_align(s_lbl_gps, LV_ALIGN_CENTER, 38, 0);
+    lv_label_set_text(s_lbl_gps, LV_SYMBOL_GPS);
 
     s_lbl_cpu = makeLabel(bottom, &lv_font_montserrat_16, kColorSub);
     lv_obj_align(s_lbl_cpu, LV_ALIGN_RIGHT_MID, -8, 0);
@@ -2404,6 +2463,29 @@ void refreshCpu()
 #endif
 }
 
+void refreshGpsStatus()
+{
+    if (s_lbl_gps == nullptr) {
+        return;
+    }
+    AprsGpsInfo gps{};
+    APRS_SERVICE_GetGpsInfo(&gps);
+
+    char text[sizeof(s_shown_gps)] = {};
+    uint32_t color = kColorSub;
+    if (gps.has_fix) {
+        const int satellites = gps.satellites >= 0 ? gps.satellites : 0;
+        snprintf(text, sizeof(text), LV_SYMBOL_GPS " %d", satellites);
+        color = kColorGood;
+    } else {
+        snprintf(text, sizeof(text), LV_SYMBOL_GPS);
+        color = gps.uart_enabled ? kColorWeak : kColorSub;
+    }
+    if (setLabel(s_lbl_gps, s_shown_gps, sizeof(s_shown_gps), text)) {
+        lv_obj_set_style_text_color(s_lbl_gps, lv_color_hex(color), 0);
+    }
+}
+
 void refreshIp()
 {
     char ip_text[96];
@@ -2475,9 +2557,26 @@ void refreshOtaNotice()
     int progress_percent = -1;
     DisplayNoticeSnapshot notice = {};
     DISPLAY_NOTICE_Get(&notice);
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    char signaling[sizeof(s_shown_signaling)] = {};
+    SIGNALING_GetLastResult(signaling, sizeof(signaling));
+    if (s_lbl_signaling != nullptr &&
+        setLabel(s_lbl_signaling, s_shown_signaling,
+                 sizeof(s_shown_signaling), signaling)) {
+        lv_obj_set_style_text_color(s_lbl_signaling, lv_color_hex(kColorAccent), 0);
+    }
+#endif
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
-    const bool notice_active = notice.text[0] != '\0' &&
+    bool notice_active = notice.text[0] != '\0' &&
         (notice.duration_ms == 0u || now - notice.posted_ms < notice.duration_ms);
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    // Signaling_service also posts each decode as a generic notice. It is
+    // already visible on the dedicated row, so do not duplicate it below.
+    if (notice_active && signaling[0] != '\0' &&
+        strcmp(notice.text, signaling) == 0) {
+        notice_active = false;
+    }
+#endif
     if (notice_active) {
         snprintf(text, sizeof(text), "%.*s",
                  static_cast<int>(sizeof(text) - 1u), notice.text);
@@ -2981,6 +3080,7 @@ extern "C" void Display_Poll(void)
             refreshWifi();
             refreshBattery();
             refreshCpu();
+            refreshGpsStatus();
         }
         lv_timer_handler();
         return;
@@ -2998,6 +3098,7 @@ extern "C" void Display_Poll(void)
             refreshWifi();
             refreshBattery();
             refreshCpu();
+            refreshGpsStatus();
         }
         lv_timer_handler();
         return;
@@ -3018,6 +3119,7 @@ extern "C" void Display_Poll(void)
         refreshWifi();
         refreshBattery();
         refreshCpu();
+        refreshGpsStatus();
     }
 
     lv_timer_handler();

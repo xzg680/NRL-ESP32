@@ -80,18 +80,9 @@ static uint8_t es7210_gain_reg_from_volume(uint8_t volume) {
 }
 
 static bool es7210_write_reg(uint8_t reg, uint8_t value) {
+    const uint8_t data[] = {reg, value};
     for (int attempt = 0; attempt < 2; ++attempt) {
-        bool ok = true;
-        I2C_Start();
-        if (I2C_Write((s_es7210_addr << 1) | I2C_WRITE) < 0) {
-            ok = false;
-        } else if (I2C_Write(reg) < 0) {
-            ok = false;
-        } else if (I2C_Write(value) < 0) {
-            ok = false;
-        }
-        I2C_Stop();
-        if (ok) {
+        if (I2C_MasterTransmit(s_es7210_addr, data, sizeof(data), 100)) {
             return true;
         }
         ESP_LOGE(TAG, "I2C write failed: addr=0x%02X reg=0x%02X value=0x%02X attempt=%d",
@@ -109,25 +100,7 @@ static bool es7210_read_reg(uint8_t reg, uint8_t *value) {
         return false;
     }
     for (int attempt = 0; attempt < 2; ++attempt) {
-        bool ok = true;
-        I2C_Start();
-        if (I2C_Write((s_es7210_addr << 1) | I2C_WRITE) < 0) {
-            ok = false;
-            goto stop_once;
-        }
-        if (I2C_Write(reg) < 0) {
-            ok = false;
-            goto stop_once;
-        }
-        I2C_Start();
-        if (I2C_Write((s_es7210_addr << 1) | I2C_READ) < 0) {
-            ok = false;
-            goto stop_once;
-        }
-        *value = I2C_Read(true);
-    stop_once:
-        I2C_Stop();
-        if (ok) {
+        if (I2C_MasterTransmitReceive(s_es7210_addr, &reg, 1u, value, 1u, 100)) {
             return true;
         }
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -151,10 +124,7 @@ static bool es7210_apply_mic_gain(void) {
 // s_es7210_addr when one acknowledges an I2C write.
 static bool es7210_detect_address(void) {
     for (uint8_t addr : kEs7210AddrCandidates) {
-        I2C_Start();
-        const bool ack = (I2C_Write((addr << 1) | I2C_WRITE) >= 0);
-        I2C_Stop();
-        if (ack) {
+        if (I2C_MasterProbe(addr, 50)) {
             s_es7210_addr = addr;
             ESP_LOGI(TAG, "found device at I2C addr 0x%02X",
                      static_cast<unsigned>(addr));
@@ -225,7 +195,11 @@ bool ES7210_Init(void) {
         return true;
     }
 
-    I2C_Init();
+    i2c_master_bus_handle_t i2c_bus = nullptr;
+    if (!I2C_MasterGetBus(&i2c_bus)) {
+        ESP_LOGE(TAG, "I2C master bus unavailable");
+        return false;
+    }
 
     if (!es7210_detect_address()) {
         return false;

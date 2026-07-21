@@ -1,201 +1,138 @@
-/* Copyright 2023 Dual Tachyon
- * https://github.com/DualTachyon
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- *     Unless required by applicable law or agreed to in writing, software
- *     distributed under the License is distributed on an "AS IS" BASIS,
- *     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *     See the License for the specific language governing permissions and
- *     limitations under the License.
- */
-
 #include "i2c1.h"
-#include <driver/gpio.h>
-#include <esp_rom_sys.h>
 
-static constexpr uint32_t I2C_DELAY_US = 5;
+#include "board_pins.h"
 
-static inline void I2C_SDA_Low(void)
+#include <esp_err.h>
+#include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+namespace {
+
+constexpr i2c_port_num_t kI2cPort = I2C_NUM_0;
+constexpr uint32_t kBusSpeedHz = 100000u;
+constexpr size_t kMaxDevices = 12u;
+const char *TAG = "I2C";
+
+struct CachedDevice {
+    uint8_t address;
+    i2c_master_dev_handle_t handle;
+};
+
+i2c_master_bus_handle_t s_bus = nullptr;
+SemaphoreHandle_t s_init_mutex = nullptr;
+CachedDevice s_devices[kMaxDevices] = {};
+size_t s_device_count = 0u;
+
+bool ensureInitMutex()
 {
-    gpio_set_direction((gpio_num_t)I2C_PIN_SDA, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)I2C_PIN_SDA, 0);
+    if (s_init_mutex != nullptr) return true;
+    s_init_mutex = xSemaphoreCreateMutex();
+    return s_init_mutex != nullptr;
 }
 
-static inline void I2C_SDA_Release(void)
+bool ensureBusLocked()
 {
-    // Release SDA as open-drain high. The internal pull-up enabled in
-    // I2C_Init is a fallback if the external pull-up is missing or weak.
-    gpio_set_direction((gpio_num_t)I2C_PIN_SDA, GPIO_MODE_INPUT);
-}
-
-static inline void I2C_SCL_Low(void)
-{
-    gpio_set_direction((gpio_num_t)I2C_PIN_SCL, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)I2C_PIN_SCL, 0);
-}
-
-static inline void I2C_SCL_Release(void)
-{
-    // Release SCL as open-drain high. EEPROM usually does not stretch the
-    // clock, but open-drain behavior is more robust on the shared bus.
-    gpio_set_direction((gpio_num_t)I2C_PIN_SCL, GPIO_MODE_INPUT);
-}
-
-static inline void I2C_RestoreSharedPinsForKeyboard(void)
-{
-    // KEY4/KEY5 share the I2C pins. Restore them as output-high after each
-    // transfer so the keyboard matrix is not left in input-pullup mode.
-    gpio_set_direction((gpio_num_t)I2C_PIN_SDA, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)I2C_PIN_SDA, 1);
-    gpio_set_direction((gpio_num_t)I2C_PIN_SCL, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)I2C_PIN_SCL, 1);
-}
-
-// I2C init.
-void I2C_Init(void) {
-    // Optional I2C bus enable pin.
-#ifdef I2C_PIN_EN
-    gpio_reset_pin((gpio_num_t)I2C_PIN_EN);
-    gpio_set_direction((gpio_num_t)I2C_PIN_EN, GPIO_MODE_OUTPUT);
-    gpio_set_level((gpio_num_t)I2C_PIN_EN, 0);
-#endif
-
-    // Configure internal pull-ups once so the input-mode "release" leaves the
-    // line at a high level even without an external pull-up.
-    gpio_reset_pin((gpio_num_t)I2C_PIN_SDA);
-    gpio_set_pull_mode((gpio_num_t)I2C_PIN_SDA, GPIO_PULLUP_ONLY);
-    gpio_reset_pin((gpio_num_t)I2C_PIN_SCL);
-    gpio_set_pull_mode((gpio_num_t)I2C_PIN_SCL, GPIO_PULLUP_ONLY);
-
-    // Idle state: SCL/SDA are both high (open-drain released).
-    I2C_SDA_Release();
-    I2C_SCL_Release();
-}
-
-// I2C start condition.
-// SDA goes high-to-low while SCL is high.
-void I2C_Start(void) {
-    I2C_SDA_Release();
-    I2C_SCL_Release();
-    esp_rom_delay_us(I2C_DELAY_US);
-    I2C_SDA_Low();
-    esp_rom_delay_us(I2C_DELAY_US);
-    I2C_SCL_Low();
-    esp_rom_delay_us(I2C_DELAY_US);
-}
-
-// I2C stop condition.
-// SDA goes low-to-high while SCL is high.
-void I2C_Stop(void) {
-    I2C_SDA_Low();
-    esp_rom_delay_us(I2C_DELAY_US);
-    I2C_SCL_Release();
-    esp_rom_delay_us(I2C_DELAY_US);
-    I2C_SDA_Release();
-    esp_rom_delay_us(I2C_DELAY_US);
-
-    // Keep keyboard scanning happy on the shared pins.
-    I2C_RestoreSharedPinsForKeyboard();
-}
-
-// Read one I2C byte.
-// bFinal: true for the last byte (send NAK), false to send ACK.
-uint8_t I2C_Read(bool bFinal) {
-    uint8_t Data = 0;
-
-    // Release SDA so the slave can drive it.
-    I2C_SDA_Release();
-
-    for (uint8_t i = 0; i < 8; i++) {
-        I2C_SCL_Release();
-        esp_rom_delay_us(I2C_DELAY_US);
-        Data = (uint8_t)((Data << 1) | (gpio_get_level((gpio_num_t)I2C_PIN_SDA) ? 1U : 0U));
-        I2C_SCL_Low();
-        esp_rom_delay_us(I2C_DELAY_US);
+    if (s_bus != nullptr) return true;
+    i2c_master_bus_config_t config = {};
+    config.i2c_port = kI2cPort;
+    config.sda_io_num = static_cast<gpio_num_t>(NRL_PIN_I2C_SDA);
+    config.scl_io_num = static_cast<gpio_num_t>(NRL_PIN_I2C_SCL);
+    config.clk_source = I2C_CLK_SRC_DEFAULT;
+    config.glitch_ignore_cnt = 7;
+    config.flags.enable_internal_pullup = true;
+    const esp_err_t err = i2c_new_master_bus(&config, &s_bus);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bus init failed: %s", esp_err_to_name(err));
+        return false;
     }
-
-    // ACK/NAK
-    if (bFinal) {
-        I2C_SDA_Release(); // NAK
-    } else {
-        I2C_SDA_Low();     // ACK
-    }
-    esp_rom_delay_us(I2C_DELAY_US);
-    I2C_SCL_Release();
-    esp_rom_delay_us(I2C_DELAY_US);
-    I2C_SCL_Low();
-    esp_rom_delay_us(I2C_DELAY_US);
-    I2C_SDA_Release();
-
-    return Data;
+    ESP_LOGI(TAG, "master bus ready: port=%d sda=%d scl=%d",
+             static_cast<int>(kI2cPort), NRL_PIN_I2C_SDA, NRL_PIN_I2C_SCL);
+    return true;
 }
 
-// Write one I2C byte.
-// Returns 0 when ACK is received, -1 when no ACK is received.
-int I2C_Write(uint8_t Data) {
-    // Send 8 data bits, MSB first.
-    for (uint8_t i = 0; i < 8; i++) {
-        if (Data & 0x80) {
-            I2C_SDA_Release();
-        } else {
-            I2C_SDA_Low();
+bool getDevice(const uint8_t address, i2c_master_dev_handle_t *out_device)
+{
+    if (out_device == nullptr || address > 0x7Fu || !ensureInitMutex()) {
+        return false;
+    }
+    if (xSemaphoreTake(s_init_mutex, portMAX_DELAY) != pdTRUE) return false;
+
+    bool ok = false;
+    do {
+        if (!ensureBusLocked()) break;
+
+        for (size_t i = 0; i < s_device_count; ++i) {
+            if (s_devices[i].address == address) {
+                *out_device = s_devices[i].handle;
+                ok = true;
+                break;
+            }
         }
-        Data <<= 1;
-        esp_rom_delay_us(I2C_DELAY_US);
-        I2C_SCL_Release();
-        esp_rom_delay_us(I2C_DELAY_US);
-        I2C_SCL_Low();
-        esp_rom_delay_us(I2C_DELAY_US);
-    }
-
-    // ACK: release SDA and let the slave pull it low.
-    I2C_SDA_Release();
-    esp_rom_delay_us(I2C_DELAY_US);
-    I2C_SCL_Release();
-    esp_rom_delay_us(I2C_DELAY_US);
-    const int ret = gpio_get_level((gpio_num_t)I2C_PIN_SDA) ? -1 : 0;
-    I2C_SCL_Low();
-    esp_rom_delay_us(I2C_DELAY_US);
-
-    return ret;
-}
-
-// Read an I2C data buffer.
-int I2C_ReadBuffer(void *pBuffer, uint8_t Size) {
-    uint8_t *pData = (uint8_t *)pBuffer;
-    uint8_t i;
-
-    if (Size == 1) {
-        *pData = I2C_Read(true);
-        return 1;
-    }
-
-    for (i = 0; i < Size - 1; i++) {
-        esp_rom_delay_us(1);
-        pData[i] = I2C_Read(false);
-    }
-
-    esp_rom_delay_us(1);
-    pData[i++] = I2C_Read(true);
-
-    return Size;
-}
-
-// Write an I2C data buffer.
-int I2C_WriteBuffer(const void *pBuffer, uint8_t Size) {
-    const uint8_t *pData = (const uint8_t *)pBuffer;
-    uint8_t i;
-
-    for (i = 0; i < Size; i++) {
-        if (I2C_Write(*pData++) < 0) {
-            return -1;
+        if (ok) break;
+        if (s_device_count >= kMaxDevices) {
+            ESP_LOGE(TAG, "device cache full for address 0x%02X", address);
+            break;
         }
-    }
 
-    return 0;
+        i2c_device_config_t device_config = {};
+        device_config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+        device_config.device_address = address;
+        device_config.scl_speed_hz = kBusSpeedHz;
+        i2c_master_dev_handle_t device = nullptr;
+        const esp_err_t err = i2c_master_bus_add_device(s_bus, &device_config, &device);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "add device 0x%02X failed: %s", address, esp_err_to_name(err));
+            break;
+        }
+        s_devices[s_device_count++] = {address, device};
+        *out_device = device;
+        ok = true;
+    } while (false);
+
+    xSemaphoreGive(s_init_mutex);
+    return ok;
+}
+
+} // namespace
+
+bool I2C_MasterGetBus(i2c_master_bus_handle_t *out_bus)
+{
+    if (out_bus == nullptr || !ensureInitMutex()) return false;
+    if (xSemaphoreTake(s_init_mutex, portMAX_DELAY) != pdTRUE) return false;
+    const bool ok = ensureBusLocked();
+    if (ok) *out_bus = s_bus;
+    xSemaphoreGive(s_init_mutex);
+    return ok;
+}
+
+bool I2C_MasterProbe(const uint8_t address, const int timeout_ms)
+{
+    i2c_master_bus_handle_t bus = nullptr;
+    if (!I2C_MasterGetBus(&bus)) return false;
+    return i2c_master_probe(bus, address, timeout_ms) == ESP_OK;
+}
+
+bool I2C_MasterTransmit(const uint8_t address, const uint8_t *data,
+                        const size_t size, const int timeout_ms)
+{
+    if (data == nullptr || size == 0u) return false;
+    i2c_master_dev_handle_t device = nullptr;
+    return getDevice(address, &device) &&
+           i2c_master_transmit(device, data, size, timeout_ms) == ESP_OK;
+}
+
+bool I2C_MasterTransmitReceive(const uint8_t address,
+                               const uint8_t *write_data, const size_t write_size,
+                               uint8_t *read_data, const size_t read_size,
+                               const int timeout_ms)
+{
+    if (write_data == nullptr || write_size == 0u ||
+        read_data == nullptr || read_size == 0u) {
+        return false;
+    }
+    i2c_master_dev_handle_t device = nullptr;
+    return getDevice(address, &device) &&
+           i2c_master_transmit_receive(device, write_data, write_size,
+                                       read_data, read_size, timeout_ms) == ESP_OK;
 }

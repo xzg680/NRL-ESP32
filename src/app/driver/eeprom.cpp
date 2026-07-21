@@ -200,10 +200,7 @@ static bool EEPROM_WaitReady(uint8_t controlByteWrite, uint32_t timeoutMs)
 {
     const uint32_t start = (uint32_t)(esp_timer_get_time() / 1000ULL);
     while ((uint32_t)((esp_timer_get_time() / 1000ULL) - start) < timeoutMs) {
-        I2C_Start();
-        const int ack = I2C_Write(controlByteWrite);
-        I2C_Stop();
-        if (ack == 0) {
+        if (I2C_MasterProbe(static_cast<uint8_t>(controlByteWrite >> 1), 20)) {
             return true;
         }
         esp_rom_delay_us(EEPROM_READY_POLL_INTERVAL_US);
@@ -213,7 +210,8 @@ static bool EEPROM_WaitReady(uint8_t controlByteWrite, uint32_t timeoutMs)
 
 // EEPROM 初始化
 void EEPROM_Init(void) {
-    I2C_Init();
+    i2c_master_bus_handle_t bus = nullptr;
+    (void)I2C_MasterGetBus(&bus);
 }
 
 
@@ -268,33 +266,15 @@ void EEPROM_ReadBuffer(uint32_t Address, void *pBuffer, uint8_t Size) {
     }
 #endif
 
-    portDISABLE_INTERRUPTS();
-    I2C_Start();
-
     // 24xx 系列控制字节: 1010 A2 A1 A0 R/W
     // 对于 512KB 线性空间（2x256KB），使用 Address[18:16] 映射到 A2..A0
     const uint8_t IIC_ADD = EEPROM_ControlByteWrite(Address);
-
-    if (I2C_Write(IIC_ADD) < 0 ||
-        I2C_Write((Address >> 8) & 0xFF) < 0 ||
-        I2C_Write((Address >> 0) & 0xFF) < 0) {
-        I2C_Stop();
-        portENABLE_INTERRUPTS();
-        return;
-    }
-
-    I2C_Start();
-
-    if (I2C_Write(IIC_ADD + 1) < 0) {
-        I2C_Stop();
-        portENABLE_INTERRUPTS();
-        return;
-    }
-
-    I2C_ReadBuffer(pBuffer, Size);
-
-    I2C_Stop();
-    portENABLE_INTERRUPTS();
+    const uint8_t word_address[] = {
+        static_cast<uint8_t>(Address >> 8), static_cast<uint8_t>(Address),
+    };
+    (void)I2C_MasterTransmitReceive(static_cast<uint8_t>(IIC_ADD >> 1),
+                                    word_address, sizeof(word_address),
+                                    static_cast<uint8_t *>(pBuffer), Size, 200);
 
 }
 
@@ -305,26 +285,12 @@ bool EEPROM_Probe(uint32_t Address)
         return Address < EEPROM_SharedLogicalSize();
     }
 #endif
-    portDISABLE_INTERRUPTS();
-    I2C_Start();
-
     const uint8_t iic_add = EEPROM_ControlByteWrite(Address);
-    if (I2C_Write(iic_add) < 0) {
-        I2C_Stop();
-        portENABLE_INTERRUPTS();
-        return false;
-    }
-
-    // 发送 16-bit word address（块内寻址）
-    if (I2C_Write((Address >> 8) & 0xFF) < 0 || I2C_Write(Address & 0xFF) < 0) {
-        I2C_Stop();
-        portENABLE_INTERRUPTS();
-        return false;
-    }
-
-    I2C_Stop();
-    portENABLE_INTERRUPTS();
-    return true;
+    const uint8_t word_address[] = {
+        static_cast<uint8_t>(Address >> 8), static_cast<uint8_t>(Address),
+    };
+    return I2C_MasterTransmit(static_cast<uint8_t>(iic_add >> 1),
+                              word_address, sizeof(word_address), 100);
 }
 
 void EEPROM_WriteBuffer(uint32_t Address, const void *pBuffer, uint8_t WRITE_SIZE) {
@@ -393,27 +359,21 @@ void EEPROM_WriteBuffer(uint32_t Address, const void *pBuffer, uint8_t WRITE_SIZ
     if (memcmp(pBuffer, buffer, WRITE_SIZE) != 0) {
         const uint8_t IIC_ADD = EEPROM_ControlByteWrite(Address);
 
-        portDISABLE_INTERRUPTS();
-
-        I2C_Start();
-
-        if (I2C_Write(IIC_ADD) < 0 ||
-            I2C_Write((Address >> 8) & 0xFF) < 0 ||
-            I2C_Write((Address) & 0xFF) < 0 ||
-            I2C_WriteBuffer(pBuffer, WRITE_SIZE) < 0) {
-            I2C_Stop();
-            portENABLE_INTERRUPTS();
+        uint8_t transaction[257] = {};
+        transaction[0] = static_cast<uint8_t>(Address >> 8);
+        transaction[1] = static_cast<uint8_t>(Address);
+        memcpy(transaction + 2, pBuffer, WRITE_SIZE);
+        if (!I2C_MasterTransmit(static_cast<uint8_t>(IIC_ADD >> 1),
+                                transaction, static_cast<size_t>(WRITE_SIZE) + 2u,
+                                500)) {
             if (EEPROM_POST_WRITE_DELAY_MS > 0U) {
                 vTaskDelay(pdMS_TO_TICKS(EEPROM_POST_WRITE_DELAY_MS));
             }
             return;
         }
-        I2C_Stop();
 
         // 写周期 ACK 轮询（比固定 delay 更可靠）
         (void)EEPROM_WaitReady(IIC_ADD, EEPROM_WRITE_READY_TIMEOUT_MS);
-
-        portENABLE_INTERRUPTS();
     }
     // 兜底延时，避免某些器件/布线在连续访问时不稳
     if (EEPROM_POST_WRITE_DELAY_MS > 0U) {

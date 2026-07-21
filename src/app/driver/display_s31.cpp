@@ -26,7 +26,7 @@
 #include "external_radio.h"
 #include "fonts/lv_font_cjk.h"
 #include "game_tetris.h"
-#include "s31_i2c.h"
+#include "i2c1.h"
 #include "status_io.h"
 
 #include <dirent.h>
@@ -655,7 +655,7 @@ void touchRead(lv_indev_t *, lv_indev_data_t *data)
 bool initTouch()
 {
     i2c_master_bus_handle_t bus = nullptr;
-    if (!S31_I2C_GetBus(&bus)) {
+    if (!I2C_MasterGetBus(&bus)) {
         ESP_LOGW(TAG, "touch I2C unavailable");
         return false;
     }

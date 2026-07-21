@@ -24,23 +24,8 @@ bool readRegisters(const uint8_t reg, uint8_t *data, const uint8_t size)
         return false;
     }
 
-    bool ok = true;
-    I2C_Start();
-    if (I2C_Write((NRL_TOUCH_I2C_ADDR << 1) | I2C_WRITE) < 0 ||
-        I2C_Write(reg) < 0) {
-        ok = false;
-        goto stop;
-    }
-    I2C_Start();
-    if (I2C_Write((NRL_TOUCH_I2C_ADDR << 1) | I2C_READ) < 0) {
-        ok = false;
-        goto stop;
-    }
-    I2C_ReadBuffer(data, size);
-
-stop:
-    I2C_Stop();
-    return ok;
+    return I2C_MasterTransmitReceive(NRL_TOUCH_I2C_ADDR, &reg, 1u,
+                                     data, size, 50);
 }
 
 } // namespace
@@ -64,9 +49,7 @@ bool BI4UMD_Touch_Init(void)
     gpio_set_level(static_cast<gpio_num_t>(NRL_PIN_TOUCH_RST), 1);
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    I2C_Init();
-    uint8_t count = 0;
-    if (!readRegisters(kRegTouchCount, &count, 1)) {
+    if (!I2C_MasterProbe(NRL_TOUCH_I2C_ADDR, 100)) {
         ESP_LOGW(TAG, "controller 0x%02X not found", NRL_TOUCH_I2C_ADDR);
         return false;
     }

@@ -1,11 +1,11 @@
 #include "services/storage_service.h"
-#include "services/music_playlist.h"
-
 #include "driver/board_pins.h"
 
+#include <atomic>
 #include <esp_log.h>
 #include <stdio.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 static const char *TAG = "STORAGE";
@@ -24,11 +24,19 @@ static const char *TAG = "STORAGE";
 #endif
 
 namespace {
-static bool s_sd_mounted = false;
-static TaskHandle_t s_sd_retry_task = nullptr;
+static std::atomic_bool s_sd_mounted{false};
+static SemaphoreHandle_t s_sd_mount_mutex = nullptr;
 
-static void storage_mount_sdcard(void)
+static bool ensure_sd_mount_mutex(void)
 {
+    if (s_sd_mount_mutex != nullptr) return true;
+    s_sd_mount_mutex = xSemaphoreCreateMutex();
+    return s_sd_mount_mutex != nullptr;
+}
+
+static bool storage_mount_sdcard_locked(void)
+{
+    if (s_sd_mounted.load()) return true;
 #if defined(NRL_SDCARD_NATIVE_SDMMC) && NRL_SDCARD_NATIVE_SDMMC
     // Allow the card's power rail and external pull-ups to settle after reset.
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -61,46 +69,35 @@ static void storage_mount_sdcard(void)
         // still in its factory exFAT format, which this FatFs build cannot
         // read (IDF hardcodes FF_FS_EXFAT=0).
         ESP_LOGW(TAG, "TF card detected but has no FAT filesystem (exFAT/NTFS "
-                      "unsupported): reformat it as FAT32 on a PC, or erase + "
-                      "format in-device with AT+SDFORMAT=YES");
-        return;
+                      "unsupported): reformat it as FAT32 on a PC");
+        return false;
     }
     if (err != ESP_OK) {
         // No card inserted is a normal condition; the music player simply
         // has nothing to index. AT+SDMOUNT=1 retries after a hot insert.
         ESP_LOGW(TAG, "TF card mount failed: %s (no card inserted?)", esp_err_to_name(err));
-        return;
+        return false;
     }
-    s_sd_mounted = true;
+    s_sd_mounted.store(true);
     ESP_LOGI(TAG, "TF card mounted at %s: %s %lluMB",
              "/sdcard",
              (card != nullptr) ? card->cid.name : "?",
              (card != nullptr)
                  ? (static_cast<unsigned long long>(card->csd.capacity) * card->csd.sector_size) / (1024ULL * 1024ULL)
                  : 0ULL);
-}
-
-static void storage_sd_retry_task(void *)
-{
-    // A failed native SDMMC probe can leave the host GPIO matrix reserved even
-    // when no card is present. Repeating the probe immediately then reports a
-    // misleading GPIO conflict. Retry explicitly through AT+SDMOUNT after a
-    // card is inserted instead of probing thirty times at boot.
-    storage_mount_sdcard();
-    if (s_sd_mounted) {
-        (void)PLAYLIST_Scan();
-    }
-    s_sd_retry_task = nullptr;
-    vTaskDelete(nullptr);
+    return true;
 }
 } // namespace
 
 extern "C" bool STORAGE_SdMountRetry(void)
 {
-    if (!s_sd_mounted) {
-        storage_mount_sdcard();
+    if (!ensure_sd_mount_mutex() ||
+        xSemaphoreTake(s_sd_mount_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
     }
-    return s_sd_mounted;
+    const bool mounted = storage_mount_sdcard_locked();
+    xSemaphoreGive(s_sd_mount_mutex);
+    return mounted;
 }
 
 extern "C" bool STORAGE_SdFormat(void)
@@ -108,32 +105,40 @@ extern "C" bool STORAGE_SdFormat(void)
 #if defined(NRL_SDCARD_NATIVE_SDMMC) && NRL_SDCARD_NATIVE_SDMMC
     return false;
 #else
-    if (s_sd_mounted) {
-        // Card already works; refuse to erase it from here.
+    if (!ensure_sd_mount_mutex() ||
+        xSemaphoreTake(s_sd_mount_mutex, portMAX_DELAY) != pdTRUE) {
         return false;
     }
-    bsp_sdcard_config_t cfg = BSP_SDCARD_DEFAULT_CONFIG();
-    cfg.format_if_mount_failed = true;
-    sdmmc_card_t *card = nullptr;
-    const esp_err_t err = bsp_sdcard_mount(&cfg, &card);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "TF card format failed: %s", esp_err_to_name(err));
-        return false;
+    bool formatted = false;
+    if (!s_sd_mounted.load()) {
+        bsp_sdcard_config_t cfg = BSP_SDCARD_DEFAULT_CONFIG();
+        cfg.format_if_mount_failed = true;
+        sdmmc_card_t *card = nullptr;
+        const esp_err_t err = bsp_sdcard_mount(&cfg, &card);
+        if (err == ESP_OK) {
+            s_sd_mounted.store(true);
+            formatted = true;
+            ESP_LOGI(TAG, "TF card formatted and mounted at %s",
+                     bsp_sdcard_get_mount_point());
+        } else {
+            ESP_LOGE(TAG, "TF card format failed: %s", esp_err_to_name(err));
+        }
     }
-    s_sd_mounted = true;
-    ESP_LOGI(TAG, "TF card formatted and mounted at %s", bsp_sdcard_get_mount_point());
-    return true;
+    // A mounted card is deliberately not reported as formatted: callers use
+    // false to mean that no destructive format operation was performed.
+    xSemaphoreGive(s_sd_mount_mutex);
+    return formatted;
 #endif
 }
 
 extern "C" bool STORAGE_SdMounted(void)
 {
-    return s_sd_mounted;
+    return s_sd_mounted.load();
 }
 
 extern "C" const char *STORAGE_SdMountPoint(void)
 {
-    return s_sd_mounted ? "/sdcard" : nullptr;
+    return s_sd_mounted.load() ? "/sdcard" : nullptr;
 }
 
 #else // !NRL_HAS_SDCARD
@@ -523,15 +528,9 @@ extern "C" bool STORAGE_SmbGetConfig(char *server, const size_t server_size,
 extern "C" bool STORAGE_Init(void)
 {
 #if defined(NRL_HAS_SDCARD) && NRL_HAS_SDCARD
-    if (!s_sd_mounted) {
-        storage_mount_sdcard();
-#if defined(NRL_SDCARD_NATIVE_SDMMC) && NRL_SDCARD_NATIVE_SDMMC
-        if (!s_sd_mounted && s_sd_retry_task == nullptr) {
-            (void)xTaskCreate(storage_sd_retry_task, "sd_retry", 4096, nullptr, 2,
-                              &s_sd_retry_task);
-        }
-#endif
-    }
+    // Probe once at startup. If no card is present, a later explicit
+    // STORAGE_SdMountRetry() (UI or AT+SDMOUNT) performs the next attempt.
+    (void)STORAGE_SdMountRetry();
 #endif
 #if defined(NRL_HAS_USB_HOST) && NRL_HAS_USB_HOST
     static bool usb_started = false;

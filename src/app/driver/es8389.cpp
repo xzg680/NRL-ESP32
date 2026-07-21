@@ -3,7 +3,7 @@
 #include "driver/audio_passthrough.h"
 #include "driver/board_pins.h"
 #include "driver/external_radio.h"
-#include "driver/s31_i2c.h"
+#include "driver/i2c1.h"
 
 #if defined(NRL_AUDIO_CODEC_ES8389) && NRL_AUDIO_CODEC_ES8389
 
@@ -40,7 +40,7 @@ static bool es8389_init_i2c(void) {
         return true;
     }
 
-    if (!S31_I2C_GetBus(&s_i2c_bus)) {
+    if (!I2C_MasterGetBus(&s_i2c_bus)) {
         ESP_LOGE(TAG, "shared I2C bus unavailable");
         return false;
     }

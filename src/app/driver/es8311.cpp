@@ -160,26 +160,9 @@ static uint32_t s_adceq_b1 = 0U;
 static uint32_t s_adceq_b2 = 0U;
 
 static bool es8311_write_reg(uint8_t reg, uint8_t value) {
-    bool ok = false;
+    const uint8_t data[] = {reg, value};
     for (int attempt = 0; attempt < 2; ++attempt) {
-        I2C_Start();
-        ok = true;
-        if (I2C_Write((kEs8311Addr << 1) | I2C_WRITE) < 0) {
-            ok = false;
-            goto stop_once;
-        }
-        if (I2C_Write(reg) < 0) {
-            ok = false;
-            goto stop_once;
-        }
-        if (I2C_Write(value) < 0) {
-            ok = false;
-            goto stop_once;
-        }
-
-    stop_once:
-        I2C_Stop();
-        if (ok) {
+        if (I2C_MasterTransmit(kEs8311Addr, data, sizeof(data), 100)) {
             return true;
         }
         ESP_LOGI(TAG, "I2C write failed: reg=0x%02X value=0x%02X attempt=%d",
@@ -197,27 +180,7 @@ static bool es8311_read_reg(const uint8_t reg, uint8_t *value) {
     }
 
     for (int attempt = 0; attempt < 2; ++attempt) {
-        bool ok = true;
-        I2C_Start();
-        if (I2C_Write((kEs8311Addr << 1) | I2C_WRITE) < 0) {
-            ok = false;
-            goto stop_read_once;
-        }
-        if (I2C_Write(reg) < 0) {
-            ok = false;
-            goto stop_read_once;
-        }
-
-        I2C_Start();
-        if (I2C_Write((kEs8311Addr << 1) | I2C_READ) < 0) {
-            ok = false;
-            goto stop_read_once;
-        }
-        *value = I2C_Read(true);
-
-    stop_read_once:
-        I2C_Stop();
-        if (ok) {
+        if (I2C_MasterTransmitReceive(kEs8311Addr, &reg, 1u, value, 1u, 100)) {
             return true;
         }
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -734,7 +697,11 @@ extern "C" bool ES8311_Init(void) {
                  kPinPaEnActiveLevel ? "HIGH" : "LOW");
     }
 
-    I2C_Init();
+    i2c_master_bus_handle_t i2c_bus = nullptr;
+    if (!I2C_MasterGetBus(&i2c_bus)) {
+        ESP_LOGE(TAG, "I2C master bus unavailable");
+        return false;
+    }
 
     // I2S/MCLK must be running BEFORE codec register config.
     // ES8311 internal DAC bias circuits require MCLK to establish

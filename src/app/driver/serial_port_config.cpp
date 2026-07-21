@@ -38,10 +38,14 @@ bool s_initialized = false;
 
 void applyDefaults()
 {
-#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_BI4UMD || \
-    NRL_BOARD == NRL_BOARD_GEZIPAI_4G
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_GEZIPAI_4G
     s_config.uart1_enabled = false;
     s_config.uart2_enabled = false;
+#elif NRL_BOARD == NRL_BOARD_BI4UMD
+    // The board's U0 header is wired to its onboard GPS. Use UART2 on the
+    // mapped GPIO44/43 pins so USB Serial/JTAG remains the console.
+    s_config.uart1_enabled = false;
+    s_config.uart2_enabled = true;
 #else
     s_config.uart1_enabled = true;
     s_config.uart2_enabled = true;

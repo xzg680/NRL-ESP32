@@ -31,6 +31,3 @@ web-flasher/index.html
 web-flasher.tgz
 scripts/cache/
 /sdkconfig.old
-ota-server/dist/nrl-ota-linux-amd64
-ota-server/dist/
-ota-server/frontend/dist/
