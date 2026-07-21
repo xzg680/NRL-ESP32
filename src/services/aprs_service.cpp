@@ -196,6 +196,8 @@ const char *boardType()
     return "gezipai_4g";
 #elif NRL_BOARD == NRL_BOARD_GEZIPAI
     return "gezipai";
+#elif NRL_BOARD == NRL_BOARD_BI4UMD
+    return "bi4umd";
 #elif NRL_BOARD == NRL_BOARD_BH4TDV
     return "bh4tdv";
 #elif NRL_BOARD == NRL_BOARD_S31_KORVO
@@ -510,8 +512,6 @@ void handleNmeaLine(char *line)
         portEXIT_CRITICAL(&s_gps_mux);
     } else if (strncmp(type, "GSV", 3) == 0) {
         const size_t n = splitNmea(line, f, 20);
-        // $xxGSV,total_messages,message_number,total_visible,
-        //        prn,elevation,azimuth,snr,...[,signal_id]
         const int16_t message_number = n >= 3 ? nmeaOptionalInt(f[2], 1, 99) : -1;
         if (n >= 4 && message_number > 0) {
             AprsGpsSatelliteInfo parsed[4] = {};
@@ -1092,7 +1092,7 @@ void sendBeacon()
                                     : static_cast<unsigned>(s_gps_course % 360u);
         const double display_speed = fmin(static_cast<double>(s_gps_speed_kmh), 1850.0);
         const double display_altitude = fmax(-99999.0, fmin(s_gps_alt_m, 999999.0));
-        snprintf(gps_text, sizeof(gps_text), "%.1fkm/h,%03u,%.0fm",
+        snprintf(gps_text, sizeof(gps_text), "SPD=%.1fkm/h CRS=%03u ALT=%.0fm",
                  display_speed, course, display_altitude);
     } else {
         gps_text[0] = '\0';

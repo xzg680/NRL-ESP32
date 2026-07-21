@@ -1,6 +1,8 @@
 #include "serial_port_config.h"
 
 #include "board_pins.h"
+#include "gps_serial.h"
+#include "sci_serial.h"
 
 #include <esp_log.h>
 #include <nvs.h>
@@ -36,13 +38,8 @@ bool s_initialized = false;
 
 void applyDefaults()
 {
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
-    s_config.uart1_enabled = false;
-    s_config.uart2_enabled = false;
-#elif NRL_BOARD == NRL_BOARD_GEZIPAI_4G
-    // UART1 is reserved for the onboard ML307R modem on the 4G Gezipai.
-    // UART2/GPS is disabled by default because the normal Gezipai TX pin (IO9)
-    // is the LCD backlight on this hardware revision.
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_BI4UMD || \
+    NRL_BOARD == NRL_BOARD_GEZIPAI_4G
     s_config.uart1_enabled = false;
     s_config.uart2_enabled = false;
 #else
@@ -114,11 +111,19 @@ extern "C" bool SERIAL_PORT_CONFIG_IsAllowedPin(const int gpio)
         default:
             return false;
     }
-#elif NRL_BOARD_IS_GEZIPAI_FAMILY
+#elif NRL_BOARD == NRL_BOARD_GEZIPAI
     switch (gpio) {
         case 8: case 9: case 10: case 11: case 12: case 13: case 14:
         case 22: case 23: case 24: case 25: case 33: case 34: case 35:
         case 36: case 37: case 43: case 44:
+            return true;
+        default:
+            return false;
+    }
+#elif NRL_BOARD == NRL_BOARD_BI4UMD
+    switch (gpio) {
+        case 2: case 3: case 19: case 20: case 22: case 23: case 24: case 25:
+        case 33: case 34: case 35: case 36: case 37: case 43: case 44:
             return true;
         default:
             return false;
@@ -141,27 +146,33 @@ extern "C" bool SERIAL_PORT_CONFIG_Validate(const SerialPortConfig *config)
 #if NRL_BOARD == NRL_BOARD_GEZIPAI_4G
         config->uart1_enabled ||
 #endif
-        !SERIAL_PORT_CONFIG_IsAllowedPin(config->uart1_rx_pin) ||
-        !SERIAL_PORT_CONFIG_IsAllowedPin(config->uart1_tx_pin) ||
-        !SERIAL_PORT_CONFIG_IsAllowedPin(config->uart2_rx_pin) ||
-        !SERIAL_PORT_CONFIG_IsAllowedPin(config->uart2_tx_pin) ||
         !validFormat(config->uart2_baud, config->uart2_data_bits,
                      config->uart2_parity, config->uart2_stop_bits)) {
         return false;
     }
-    if (config->uart1_rx_pin == config->uart1_tx_pin ||
-        config->uart2_rx_pin == config->uart2_tx_pin) {
+    if (config->uart1_enabled &&
+        (!SERIAL_PORT_CONFIG_IsAllowedPin(config->uart1_rx_pin) ||
+         !SERIAL_PORT_CONFIG_IsAllowedPin(config->uart1_tx_pin) ||
+         config->uart1_rx_pin == config->uart1_tx_pin)) {
         return false;
     }
-    // A disabled port does not reserve its GPIOs. This allows a board header
-    // such as Gezipai U0 (GPIO44/43) to be handed from UART1/SCI to UART2/GPS
-    // in one Web/AT configuration update.
+    if (config->uart2_enabled) {
+        // GPS/NMEA receivers commonly expose TX only, so UART2 needs a valid
+        // ESP RX pin but its TX output may remain unassigned (-1).
+        if (!SERIAL_PORT_CONFIG_IsAllowedPin(config->uart2_rx_pin) ||
+            (config->uart2_tx_pin != -1 &&
+             !SERIAL_PORT_CONFIG_IsAllowedPin(config->uart2_tx_pin)) ||
+            (config->uart2_tx_pin >= 0 &&
+             config->uart2_rx_pin == config->uart2_tx_pin)) {
+            return false;
+        }
+    }
     if (config->uart1_enabled && config->uart2_enabled) {
         const int uart1_pins[] = {config->uart1_rx_pin, config->uart1_tx_pin};
         const int uart2_pins[] = {config->uart2_rx_pin, config->uart2_tx_pin};
         for (const int uart1_pin : uart1_pins) {
             for (const int uart2_pin : uart2_pins) {
-                if (uart1_pin == uart2_pin) return false;
+                if (uart2_pin >= 0 && uart1_pin == uart2_pin) return false;
             }
         }
     }
@@ -188,6 +199,14 @@ extern "C" void SERIAL_PORT_CONFIG_Init(void)
                 blob.uart2_baud, blob.uart2_data_bits,
                 blob.uart2_parity, blob.uart2_stop_bits,
             };
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+            // Older BI4UMD builds persisted UART1 as unassigned. Migrate only
+            // that legacy value to the board's confirmed RX=2/TX=3 mapping.
+            if (loaded.uart1_rx_pin < 0 && loaded.uart1_tx_pin < 0) {
+                loaded.uart1_rx_pin = NRL_PIN_SCI_RX;
+                loaded.uart1_tx_pin = NRL_PIN_SCI_TX;
+            }
+#endif
             if (SERIAL_PORT_CONFIG_Validate(&loaded)) s_config = loaded;
         }
     }
@@ -219,5 +238,24 @@ extern "C" bool SERIAL_PORT_CONFIG_Set(const SerialPortConfig *config, const boo
              static_cast<unsigned long>(s_config.uart2_baud),
              static_cast<unsigned>(s_config.uart2_data_bits),
              s_config.uart2_parity, static_cast<unsigned>(s_config.uart2_stop_bits));
+    return true;
+}
+
+extern "C" bool SERIAL_PORT_CONFIG_ReloadDrivers(void)
+{
+    // Stop both first. This matters when one UART takes GPIOs previously used
+    // by the other UART in the same configuration transaction.
+    SCI_SERIAL_Stop();
+    GPS_SERIAL_Stop();
+
+    const bool sci_ok = SCI_SERIAL_Init();
+    const bool gps_ok = GPS_SERIAL_Init();
+    if (!sci_ok || !gps_ok) {
+        SCI_SERIAL_Stop();
+        GPS_SERIAL_Stop();
+        ESP_LOGE(TAG, "UART reload failed: UART1=%s UART2=%s",
+                 sci_ok ? "ok" : "failed", gps_ok ? "ok" : "failed");
+        return false;
+    }
     return true;
 }

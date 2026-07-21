@@ -1,0 +1,13 @@
+ota.example.com {
+    root * /nrlota/www
+    encode zstd gzip
+
+    handle_path /nrlota/api/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+}

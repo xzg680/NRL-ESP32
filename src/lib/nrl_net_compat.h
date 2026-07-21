@@ -116,9 +116,6 @@ static inline esp_netif_t *nrlExternalNetworkNetif(uint32_t *out_ip)
     return NULL;
 }
 
-// Non-WiFi network view: Ethernet now, cellular/PPP/USB netifs later. This is
-// used by provisioning logic so "already online via cable/4G" does not get
-// mistaken for "WiFi is configured".
 static inline bool nrlExternalNetworkConnected(void)
 {
     return nrlExternalNetworkNetif(NULL) != NULL;
@@ -131,11 +128,7 @@ static inline uint32_t nrlExternalNetworkIp(void)
     return ip;
 }
 
-// Product-wide network view: wired Ethernet is preferred whenever it has a
-// valid address. Otherwise accept any non-WiFi netif with IPv4, so future
-// cellular/PPP/USB network interfaces automatically count as the active route.
-// Wi-Fi STA is the final fallback. Services should use these helpers unless
-// they specifically configure or report the Wi-Fi interface.
+// Prefer Ethernet/cellular/USB network interfaces, then Wi-Fi STA.
 static inline bool nrlNetworkConnected(void)
 {
     if (nrlExternalNetworkConnected()) {

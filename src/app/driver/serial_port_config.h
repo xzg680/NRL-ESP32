@@ -26,6 +26,8 @@ void SERIAL_PORT_CONFIG_Get(SerialPortConfig *out);
 bool SERIAL_PORT_CONFIG_Set(const SerialPortConfig *config, bool persist);
 bool SERIAL_PORT_CONFIG_Validate(const SerialPortConfig *config);
 bool SERIAL_PORT_CONFIG_IsAllowedPin(int gpio);
+// Restarts UART1 and UART2 together so pin hand-offs are applied atomically.
+bool SERIAL_PORT_CONFIG_ReloadDrivers(void);
 
 #ifdef __cplusplus
 }

@@ -3,9 +3,8 @@
 
 Each upload contains every image listed by build/<board>/flasher_args.json.
 The server stores the complete package for flashing and registers its app image
-as the device OTA release. With no board arguments, the currently released
-boards are published in one run. Experimental boards such as gezipai_4g can be
-published explicitly by passing their board name.
+as the device OTA release. With no board arguments, all six boards are
+published in one run.
 
 Required environment: OTA_SERVER_URL, OTA_UPLOAD_TOKEN.
 Optional environment: OTA_VERSION, OTA_CHANNEL (stable/beta), OTA_RELEASE_NOTES.
@@ -26,17 +25,12 @@ from pathlib import Path
 CHIP_FAMILY = {
     "gezipai": "ESP32-S3",
     "gezipai_4g": "ESP32-S3",
+    "bi4umd": "ESP32-S3",
     "bh4tdv": "ESP32-S3",
     "s31_korvo": "",
     "s31_function_coreboard": "",
 }
 BOARDS = tuple(CHIP_FAMILY)
-DEFAULT_PUBLISH_BOARDS = (
-    "gezipai",
-    "bh4tdv",
-    "s31_korvo",
-    "s31_function_coreboard",
-)
 
 
 def firmware_version(repo: Path) -> str:
@@ -143,13 +137,13 @@ def publish_package(base: str, token: str, meta: dict, files: list[tuple[str, Pa
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Publish complete flash packages and OTA releases."
+        description="Publish complete flash packages and OTA releases for all four boards."
     )
     parser.add_argument(
         "boards",
         nargs="*",
         metavar="BOARD",
-        help="board(s) to publish; omitted means released boards only",
+        help="board(s) to publish; omitted means all four boards",
     )
     parser.add_argument("--version")
     parser.add_argument("--channel", default=os.environ.get("OTA_CHANNEL", "stable"))
@@ -173,7 +167,7 @@ def main() -> int:
         raise SystemExit("channel must be stable or beta")
 
     repo = Path(__file__).resolve().parent.parent
-    boards = args.boards or list(DEFAULT_PUBLISH_BOARDS)
+    boards = args.boards or list(BOARDS)
     version = (args.version or firmware_version(repo)).removeprefix("v")
 
     packages: list[tuple[dict, list[tuple[str, Path]]]] = []

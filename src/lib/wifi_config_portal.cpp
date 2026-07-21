@@ -1375,12 +1375,19 @@ static esp_err_t handleSaveSerial(httpd_req_t *req)
     auto parseNumber = [](const std::string &text, unsigned long max, unsigned long *out) {
         return parseUIntArg(text, out) && *out <= max;
     };
+    auto parsePin = [](const std::string &text, int *out) {
+        if (out == nullptr || text.empty()) return false;
+        char *end = nullptr;
+        const long value = strtol(text.c_str(), &end, 10);
+        if (end == text.c_str() || *end != '\0' || value < -1L || value > 127L) {
+            return false;
+        }
+        *out = static_cast<int>(value);
+        return true;
+    };
     unsigned long value = 0u;
-    bool ok =
-        parseNumber(s_server.arg("uart1_rx_pin"), 127u, &value);
-    if (ok) updated.uart1_rx_pin = static_cast<int>(value);
-    if (ok) ok = parseNumber(s_server.arg("uart1_tx_pin"), 127u, &value);
-    if (ok) updated.uart1_tx_pin = static_cast<int>(value);
+    bool ok = parsePin(s_server.arg("uart1_rx_pin"), &updated.uart1_rx_pin);
+    if (ok) ok = parsePin(s_server.arg("uart1_tx_pin"), &updated.uart1_tx_pin);
     if (ok) ok = parseNumber(s_server.arg("uart1_baud"), 921600u, &value) && value >= 300u;
     if (ok) new_sci.baud = static_cast<uint32_t>(value);
     if (ok) ok = parseNumber(s_server.arg("uart1_data_bits"), 8u, &value) && value >= 5u;
@@ -1393,10 +1400,8 @@ static esp_err_t handleSaveSerial(httpd_req_t *req)
     if (ok) ok = parseNumber(s_server.arg("uart1_stop_bits"), 2u, &value) && value >= 1u;
     if (ok) new_sci.stop_bits = static_cast<uint8_t>(value);
 
-    if (ok) ok = parseNumber(s_server.arg("uart2_rx_pin"), 127u, &value);
-    if (ok) updated.uart2_rx_pin = static_cast<int>(value);
-    if (ok) ok = parseNumber(s_server.arg("uart2_tx_pin"), 127u, &value);
-    if (ok) updated.uart2_tx_pin = static_cast<int>(value);
+    if (ok) ok = parsePin(s_server.arg("uart2_rx_pin"), &updated.uart2_rx_pin);
+    if (ok) ok = parsePin(s_server.arg("uart2_tx_pin"), &updated.uart2_tx_pin);
     if (ok) ok = parseNumber(s_server.arg("uart2_baud"), 921600u, &value) && value >= 300u;
     if (ok) updated.uart2_baud = static_cast<uint32_t>(value);
     if (ok) ok = parseNumber(s_server.arg("uart2_data_bits"), 8u, &value) && value >= 5u;
@@ -1416,14 +1421,13 @@ static esp_err_t handleSaveSerial(httpd_req_t *req)
     if (ok) ok = EXTERNAL_RADIO_SaveConfig();
     // Reload UART1 unconditionally because its GPIOs may have changed even
     // when baud/data/parity/stop are unchanged.
-    if (ok) ok = SCI_SERIAL_ReloadPins() && GPS_SERIAL_ReloadConfig();
+    if (ok) ok = SERIAL_PORT_CONFIG_ReloadDrivers();
     if (!ok) {
         (void)EXTERNAL_RADIO_SetSciConfig(old_sci.baud, old_sci.data_bits,
                                           old_sci.parity, old_sci.stop_bits, false);
         (void)EXTERNAL_RADIO_SaveConfig();
         (void)SERIAL_PORT_CONFIG_Set(&before, true);
-        (void)SCI_SERIAL_ReloadPins();
-        (void)GPS_SERIAL_ReloadConfig();
+        (void)SERIAL_PORT_CONFIG_ReloadDrivers();
         ESP_LOGE(TAG, "serial config save via web failed (invalid/conflicting GPIO or UART params)");
     }
     sendSerialSavedJson(ok);

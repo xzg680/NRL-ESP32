@@ -32,6 +32,10 @@
 
 #include "board_pins.h"
 #include "s31_i2c.h"
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+#include "display_bi4umd.h"
+#include "touch_bi4umd.h"
+#endif
 
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && NRL_BOARD_IS_GEZIPAI_FAMILY
 
@@ -40,8 +44,10 @@
 #include "../../services/espnow_link.h"
 #include "../../services/display_notice.h"
 #include "../../services/music_player.h"
+#include "../../services/music_playlist.h"
 #include "../../services/ota_service.h"
 #include "../../services/radio_favorites.h"
+#include "../../services/storage_service.h"
 #include "../../services/signaling_service.h"
 #include "../../lib/nrl_version.h"
 #include "external_radio.h"
@@ -118,6 +124,9 @@ constexpr uint32_t kColorDuplex   = 0xA78BFA;  // transmitting + receiving
 // APRS packets may contain Chinese comments. Keep the normal Latin UI font,
 // but fall back to the bundled 16px GB2312 font for the ticker only.
 lv_font_t s_font_aprs_16;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+lv_font_t s_font_music_20;
+#endif
 
 // Battery pack assumed to be a single Li-ion cell (3.0 V .. 4.2 V).
 constexpr int kBatteryMinMv = 3000;
@@ -141,6 +150,8 @@ uint8_t *s_draw_buf = nullptr;
 esp_lcd_touch_handle_t s_touch = nullptr;
 esp_lcd_panel_io_handle_t s_touch_io = nullptr;
 lv_indev_t *s_touch_indev = nullptr;
+#elif NRL_BOARD == NRL_BOARD_BI4UMD
+lv_indev_t *s_touch_indev = nullptr;
 #endif
 
 lv_obj_t *s_lbl_caption = nullptr;
@@ -156,6 +167,22 @@ lv_obj_t *s_lbl_hint = nullptr;
 lv_obj_t *s_lbl_ota = nullptr;
 lv_obj_t *s_bar_ota = nullptr;
 lv_obj_t *s_content = nullptr;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+enum class Bi4umdPage : uint8_t { Radio, Music, MusicList, Settings };
+Bi4umdPage s_bi4umd_page = Bi4umdPage::Radio;
+lv_obj_t *s_lbl_music_title = nullptr;
+lv_obj_t *s_lbl_music_artist = nullptr;
+lv_obj_t *s_lbl_music_state = nullptr;
+lv_obj_t *s_lbl_music_format = nullptr;
+lv_obj_t *s_lbl_music_source = nullptr;
+lv_obj_t *s_list_music = nullptr;
+lv_obj_t *s_btn_music_play_label = nullptr;
+lv_obj_t *s_btn_music_repeat_label = nullptr;
+lv_obj_t *s_lbl_settings_mic = nullptr;
+lv_obj_t *s_lbl_settings_volume = nullptr;
+char s_shown_music_path[256] = {};
+bool s_shown_music_playing = false;
+#endif
 
 adc_oneshot_unit_handle_t s_adc = nullptr;
 adc_cali_handle_t s_adc_cali = nullptr;
@@ -218,9 +245,17 @@ char s_cached_radio_name[RADIO_FAV_NAME_SIZE] = {};
 uint32_t s_radio_name_refresh_ms = 0u;
 
 void refreshVolume();
+lv_obj_t *makeLabel(lv_obj_t *parent, const lv_font_t *font, uint32_t color);
 void buildUi();
 void buildHomeContent();
 void buildMenuUi();
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+void buildBi4umdMusicContent();
+void buildBi4umdMusicListContent();
+void buildBi4umdSettingsContent();
+void refreshBi4umdMusic();
+void rebuildBi4umdMusicList();
+#endif
 
 NrlOtaStatus *otaUiSnapshot()
 {
@@ -244,6 +279,13 @@ NrlOtaStatus *otaUiSnapshot()
 
 bool initPanel()
 {
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (!BI4UMD_Display_Init(&s_panel_io)) {
+        ESP_LOGI(TAG,"[LCD] BI4UMD ILI9341V init failed");
+        return false;
+    }
+    return true;
+#else
 #if NRL_PIN_DISPLAY_BL >= 0
     // Backlight off until the first frame is drawn, to avoid a white flash.
     gpio_config_t bl_cfg = {};
@@ -344,6 +386,7 @@ bool initPanel()
     esp_lcd_panel_mirror(s_panel, false, false);
     esp_lcd_panel_disp_on_off(s_panel, true);
     return true;
+#endif
 }
 
 //============================ LVGL <-> esp_lcd ===============================
@@ -370,6 +413,12 @@ bool onColorTransDone(esp_lcd_panel_io_handle_t /*io*/,
 // RGB565, LVGL renders little-endian) and DMA it to the panel.
 void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    (void)disp;
+    const int32_t count = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
+    BI4UMD_Display_Flush(s_panel_io, area->x1, area->y1, area->x2, area->y2,
+                         px_map, static_cast<size_t>(count));
+#else
     esp_lcd_panel_handle_t panel =
         static_cast<esp_lcd_panel_handle_t>(lv_display_get_user_data(disp));
 
@@ -385,6 +434,7 @@ void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
                               area->x2 + 1, area->y2 + 1, px_map);
 #if NRL_DISPLAY_BUS_RGB
     lv_display_flush_ready(disp);
+#endif
 #endif
 }
 
@@ -415,13 +465,261 @@ bool initLvgl()
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_tick_set_cb(lvglTick);
 
-#if NRL_DISPLAY_BUS_ST7789
+#if NRL_DISPLAY_BUS_ST7789 || NRL_DISPLAY_BUS_ILI9341
     esp_lcd_panel_io_callbacks_t io_cbs = {};
     io_cbs.on_color_trans_done = onColorTransDone;
     esp_lcd_panel_io_register_event_callbacks(s_panel_io, &io_cbs, s_disp);
 #endif
     return true;
 }
+
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+void bi4umdTouchRead(lv_indev_t *, lv_indev_data_t *data)
+{
+    uint16_t x = 0;
+    uint16_t y = 0;
+    if (data != nullptr && BI4UMD_Touch_Read(&x, &y)) {
+        data->point.x = static_cast<int16_t>(x);
+        data->point.y = static_cast<int16_t>(y);
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else if (data != nullptr) {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
+bool initBi4umdTouch()
+{
+    if (!BI4UMD_Touch_Init()) return false;
+    s_touch_indev = lv_indev_create();
+    if (s_touch_indev == nullptr) return false;
+    lv_indev_set_type(s_touch_indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_display(s_touch_indev, s_disp);
+    lv_indev_set_read_cb(s_touch_indev, bi4umdTouchRead);
+    return true;
+}
+
+void bi4umdPttEvent(lv_event_t *event)
+{
+    const lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED) STATUS_IO_SetSoftPtt(true);
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) STATUS_IO_SetSoftPtt(false);
+}
+
+bool bi4umdIsRadioPath(const char *path)
+{
+    return path != nullptr &&
+           (strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0);
+}
+
+size_t bi4umdScanSdMusic()
+{
+    if (!STORAGE_SdMounted() && !STORAGE_SdMountRetry()) {
+        return 0u;
+    }
+
+    size_t tracks = PLAYLIST_Scan();
+    if (PLAYLIST_AtRoot()) {
+        const size_t dirs = PLAYLIST_DirCount();
+        for (size_t i = 0; i < dirs; ++i) {
+            const char *path = PLAYLIST_GetDirPath(i);
+            if (path != nullptr && strncmp(path, "/sdcard", 7) == 0) {
+                if (PLAYLIST_EnterDir(i)) {
+                    tracks = PLAYLIST_Count();
+                }
+                break;
+            }
+        }
+    }
+    return tracks;
+}
+
+void bi4umdShowRadioPage(lv_event_t *)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_bi4umd_page = Bi4umdPage::Radio;
+    buildHomeContent();
+}
+
+void bi4umdShowMusicPage(lv_event_t *)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_bi4umd_page = Bi4umdPage::Music;
+    buildBi4umdMusicContent();
+    if (!MUSIC_IsPlaying() && PLAYLIST_Count() == 0u) {
+        const size_t tracks = bi4umdScanSdMusic();
+        char status[40] = {};
+        snprintf(status, sizeof(status), STORAGE_SdMounted() ? "SD: %u tracks" : "SD mount failed",
+                 static_cast<unsigned>(tracks));
+        lv_label_set_text(s_lbl_music_source, status);
+        rebuildBi4umdMusicList();
+    }
+}
+
+void bi4umdShowMusicListPage(lv_event_t *)
+{
+    s_bi4umd_page = Bi4umdPage::MusicList;
+    buildBi4umdMusicListContent();
+}
+
+void bi4umdShowSettingsPage(lv_event_t *)
+{
+    STATUS_IO_SetSoftPtt(false);
+    s_bi4umd_page = Bi4umdPage::Settings;
+    buildBi4umdSettingsContent();
+}
+
+void bi4umdOpenMainMenu(lv_event_t *)
+{
+    s_bi4umd_page = Bi4umdPage::Radio;
+    Display_MenuOpen();
+}
+
+void bi4umdMenuUp(lv_event_t *) { Display_MenuNavigate(1); }
+void bi4umdMenuDown(lv_event_t *) { Display_MenuNavigate(-1); }
+void bi4umdMenuConfirm(lv_event_t *) { Display_MenuConfirm(); }
+
+void addBi4umdMenuButtons()
+{
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (s_content == nullptr) return;
+    auto menu_button = [](int x, const char *text, lv_event_cb_t callback) {
+        lv_obj_t *button = lv_button_create(s_content);
+        lv_obj_set_pos(button, x,
+                       s_menu_page == MenuPage::AprsList || s_menu_page == MenuPage::AprsGps
+                           ? 208 : 178);
+        lv_obj_set_size(button, 64, 38);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
+        lv_obj_set_style_border_width(button, 1, 0);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(button, &s_font_aprs_16, kColorCallIdle);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (s_menu_page == MenuPage::AprsList || s_menu_page == MenuPage::AprsGps) {
+        menu_button(166, "返回", bi4umdMenuConfirm);
+        return;
+    }
+    if (s_menu_page == MenuPage::About) {
+        menu_button(88, "返回", bi4umdMenuConfirm);
+        return;
+    }
+#endif
+    menu_button(10, "上", bi4umdMenuUp);
+    menu_button(88, "下", bi4umdMenuDown);
+    menu_button(166, "确认", bi4umdMenuConfirm);
+#endif
+}
+
+void bi4umdMusicPrev(lv_event_t *)
+{
+    if (bi4umdIsRadioPath(MUSIC_CurrentPath())) (void)RADIO_FAV_Prev();
+    else (void)PLAYLIST_Prev();
+}
+
+void bi4umdMusicNext(lv_event_t *)
+{
+    if (bi4umdIsRadioPath(MUSIC_CurrentPath())) (void)RADIO_FAV_Next();
+    else (void)PLAYLIST_Next();
+}
+
+void bi4umdMusicToggle(lv_event_t *)
+{
+    if (MUSIC_IsPlaying()) {
+        MUSIC_Stop();
+        return;
+    }
+
+    char path[256] = {};
+    snprintf(path, sizeof(path), "%s", MUSIC_CurrentPath());
+    if (path[0] != '\0') {
+        (void)MUSIC_PlayFile(path);
+        return;
+    }
+
+    MUSIC_GetRadioUrl(path, sizeof(path));
+    if (path[0] != '\0') (void)MUSIC_PlayFile(path);
+    else (void)PLAYLIST_Next();
+}
+
+void bi4umdMusicRepeat(lv_event_t *)
+{
+    (void)PLAYLIST_ToggleRepeatMode();
+    refreshBi4umdMusic();
+}
+
+void bi4umdMusicRefresh(lv_event_t *)
+{
+    lv_label_set_text(s_lbl_music_source, "Scanning SD...");
+    lv_refr_now(nullptr);
+    const size_t tracks = bi4umdScanSdMusic();
+    char status[40] = {};
+    snprintf(status, sizeof(status), STORAGE_SdMounted() ? "SD: %u tracks" : "SD mount failed",
+             static_cast<unsigned>(tracks));
+    lv_label_set_text(s_lbl_music_source, status);
+    rebuildBi4umdMusicList();
+}
+
+void bi4umdMusicAdjustVolume(const int delta)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    int volume = static_cast<int>(cfg->line_out_volume) + delta;
+    if (volume < 0) volume = 0;
+    if (volume > 255) volume = 255;
+    if (volume != static_cast<int>(cfg->line_out_volume)) {
+        EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(volume), true);
+        refreshVolume();
+    }
+}
+
+void bi4umdMusicVolumeDown(lv_event_t *) { bi4umdMusicAdjustVolume(-16); }
+void bi4umdMusicVolumeUp(lv_event_t *) { bi4umdMusicAdjustVolume(16); }
+
+void refreshBi4umdSettingsValues()
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    char text[12] = {};
+    if (s_lbl_settings_mic != nullptr) {
+        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg->mic_volume));
+        lv_label_set_text(s_lbl_settings_mic, text);
+    }
+    if (s_lbl_settings_volume != nullptr) {
+        snprintf(text, sizeof(text), "%u", static_cast<unsigned>(cfg->line_out_volume));
+        lv_label_set_text(s_lbl_settings_volume, text);
+    }
+}
+
+void bi4umdSettingsAdjustMic(const int delta)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) return;
+    int value = static_cast<int>(cfg->mic_volume) + delta;
+    if (value < 0) value = 0;
+    if (value > 255) value = 255;
+    if (value != static_cast<int>(cfg->mic_volume)) {
+        EXTERNAL_RADIO_SetMicVolume(static_cast<uint8_t>(value), true);
+        refreshBi4umdSettingsValues();
+    }
+}
+
+void bi4umdSettingsMicDown(lv_event_t *) { bi4umdSettingsAdjustMic(-16); }
+void bi4umdSettingsMicUp(lv_event_t *) { bi4umdSettingsAdjustMic(16); }
+void bi4umdSettingsVolumeDown(lv_event_t *)
+{
+    bi4umdMusicAdjustVolume(-16);
+    refreshBi4umdSettingsValues();
+}
+void bi4umdSettingsVolumeUp(lv_event_t *)
+{
+    bi4umdMusicAdjustVolume(16);
+    refreshBi4umdSettingsValues();
+}
+#endif
 
 #if NRL_DISPLAY_BUS_RGB
 void touchRead(lv_indev_t * /*indev*/, lv_indev_data_t *data)
@@ -655,6 +953,18 @@ void resetCenterWidgets()
     s_shown_ota[0] = '\0';
     s_shown_state = -1;
     s_shown_media = false;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    s_lbl_music_title = nullptr;
+    s_lbl_music_artist = nullptr;
+    s_lbl_music_state = nullptr;
+    s_lbl_music_format = nullptr;
+    s_lbl_music_source = nullptr;
+    s_list_music = nullptr;
+    s_btn_music_play_label = nullptr;
+    s_btn_music_repeat_label = nullptr;
+    s_lbl_settings_mic = nullptr;
+    s_lbl_settings_volume = nullptr;
+#endif
 }
 
 void resetHomeWidgets()
@@ -784,7 +1094,7 @@ void buildMainMenu()
         "ABOUT",
     };
     constexpr size_t kItemCount = sizeof(items) / sizeof(items[0]);
-    constexpr size_t kVisibleRows = 6u;
+    constexpr size_t kVisibleRows = 7u;
     const size_t start = menuWindowStart(kItemCount, kVisibleRows);
     const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
     for (size_t i = start; i < end; ++i) {
@@ -863,9 +1173,6 @@ void buildOtaMenu()
             lv_obj_set_size(bar, kWidth - 40, 10);
             lv_bar_set_range(bar, 0, 100);
             lv_bar_set_value(bar, ota->update_percent, LV_ANIM_OFF);
-            lv_obj_set_style_radius(bar, 5, LV_PART_MAIN);
-            lv_obj_set_style_radius(bar, 5, LV_PART_INDICATOR);
-            lv_obj_set_style_bg_color(bar, lv_color_hex(kColorCaption), LV_PART_MAIN);
             lv_obj_set_style_bg_color(bar, lv_color_hex(kColorTx), LV_PART_INDICATOR);
         }
     } else if (ota->release_count == 0u) {
@@ -975,8 +1282,8 @@ void buildAprsListMenu()
     lv_obj_t *scr = prepareContent();
     menuRow(scr, 1, "< BACK / STATIONS", true);
 
-    AprsStationInfo stations[5];
-    const size_t count = APRS_SERVICE_GetStations(stations, 5);
+    AprsStationInfo stations[8];
+    const size_t count = APRS_SERVICE_GetStations(stations, 8);
     if (!APRS_SERVICE_IsEnabled()) {
         lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, kColorSub);
         lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 60);
@@ -998,7 +1305,7 @@ void buildAprsListMenu()
         char line[64];
         snprintf(line, sizeof(line), "%s %s %s %s",
                  s.name, dist, s.via_rf ? "RF" : "IS", age);
-        menuRow(scr, 25 + static_cast<int>(i) * 24, line, false);
+        menuRow(scr, 25 + static_cast<int>(i) * 22, line, false);
     }
     menuFooter(scr, "PTT BACK");
 }
@@ -1022,12 +1329,10 @@ void buildGpsInfoMenu()
     APRS_SERVICE_GetGpsInfo(&gps);
 
     char line[80];
-    snprintf(line, sizeof(line), "UART:%s NMEA:%s FIX:%s Q:%u",
+    snprintf(line, sizeof(line), "UART:%s  NMEA:%s",
              gps.uart_enabled ? "ON" : "OFF",
-             gps.connected ? "OK" : "--",
-             gps.has_fix ? "YES" : "NO",
-             static_cast<unsigned>(gps.fix_quality));
-    gpsInfoLine(scr, 28, line, gps.has_fix ? kColorGood : kColorApWarn);
+             gps.connected ? "OK" : "--");
+    gpsInfoLine(scr, 25, line, gps.connected ? kColorGood : kColorApWarn);
 
     char sat_used[8] = "--";
     char sat_visible[8] = "--";
@@ -1038,48 +1343,57 @@ void buildGpsInfoMenu()
         snprintf(sat_visible, sizeof(sat_visible), "%d",
                  static_cast<int>(gps.visible_satellites));
     }
-    if (!isnan(gps.hdop)) {
-        snprintf(line, sizeof(line), "SAT:%s/%s HDOP:%.1f GSV:%ums",
-                 sat_used, sat_visible, static_cast<double>(gps.hdop),
-                 static_cast<unsigned>(gps.gsv_age_ms));
-    } else {
-        snprintf(line, sizeof(line), "SAT:%s/%s HDOP:-- GSV:%ums",
-                 sat_used, sat_visible, static_cast<unsigned>(gps.gsv_age_ms));
+    char gsv_age[16] = "--";
+    if (gps.gsv_age_ms != UINT32_MAX) {
+        snprintf(gsv_age, sizeof(gsv_age), "%.1fs",
+                 static_cast<double>(gps.gsv_age_ms) / 1000.0);
     }
-    gpsInfoLine(scr, 50, line, kColorSub);
+    snprintf(line, sizeof(line), "FIX:%s Q:%u SAT:%s/%s",
+             gps.has_fix ? "YES" : "NO",
+             static_cast<unsigned>(gps.fix_quality), sat_used, sat_visible);
+    gpsInfoLine(scr, 43, line, gps.has_fix ? kColorGood : kColorApWarn);
+
+    if (!isnan(gps.hdop)) {
+        snprintf(line, sizeof(line), "HDOP:%.1f  GSV:%s",
+                 static_cast<double>(gps.hdop), gsv_age);
+    } else {
+        snprintf(line, sizeof(line), "HDOP:--  GSV:%s", gsv_age);
+    }
+    gpsInfoLine(scr, 61, line, kColorSub);
 
     if (gps.has_fix) {
         snprintf(line, sizeof(line), "LAT: %.6f", gps.latitude);
-        gpsInfoLine(scr, 72, line, kColorCallIdle);
+        gpsInfoLine(scr, 79, line, kColorCallIdle);
         snprintf(line, sizeof(line), "LON: %.6f", gps.longitude);
-        gpsInfoLine(scr, 94, line, kColorCallIdle);
+        gpsInfoLine(scr, 97, line, kColorCallIdle);
     } else {
-        gpsInfoLine(scr, 72, "LAT: --", kColorWeak);
-        gpsInfoLine(scr, 94, "LON: --", kColorWeak);
+        gpsInfoLine(scr, 79, "LAT: --", kColorWeak);
+        gpsInfoLine(scr, 97, "LON: --", kColorWeak);
     }
 
     if (gps.has_fix && !isnan(gps.altitude_m)) {
-        snprintf(line, sizeof(line), "ALT: %.1fm  SPD: %.1fkm/h",
+        snprintf(line, sizeof(line), "ALT:%.1fm SPD:%.1fkm/h",
                  gps.altitude_m, static_cast<double>(gps.speed_kmh));
     } else {
-        snprintf(line, sizeof(line), "ALT: --  SPD: --");
+        snprintf(line, sizeof(line), "ALT:-- SPD:--");
     }
-    gpsInfoLine(scr, 116, line, kColorSub);
+    gpsInfoLine(scr, 115, line, kColorSub);
 
+    char nmea_age[16] = "--";
+    if (gps.age_ms != UINT32_MAX) {
+        snprintf(nmea_age, sizeof(nmea_age), "%.1fs",
+                 static_cast<double>(gps.age_ms) / 1000.0);
+    }
     if (gps.course_valid) {
-        snprintf(line, sizeof(line), "CRS:%u  AGE:%ums",
-                 static_cast<unsigned>(gps.course_deg),
-                 static_cast<unsigned>(gps.age_ms));
+        snprintf(line, sizeof(line), "CRS:%u AGE:%s SIG:%u",
+                 static_cast<unsigned>(gps.course_deg), nmea_age,
+                 static_cast<unsigned>(gps.satellite_detail_count));
     } else {
-        snprintf(line, sizeof(line), "CRS:--  AGE:%ums",
-                 static_cast<unsigned>(gps.age_ms));
+        snprintf(line, sizeof(line), "CRS:-- AGE:%s SIG:%u", nmea_age,
+                 static_cast<unsigned>(gps.satellite_detail_count));
     }
-    gpsInfoLine(scr, 138, line, kColorSub);
-
-    char footer[48];
-    snprintf(footer, sizeof(footer), "DETAIL:%u  PTT BACK",
-             static_cast<unsigned>(gps.satellite_detail_count));
-    menuFooter(scr, footer);
+    gpsInfoLine(scr, 133, line, kColorSub);
+    menuFooter(scr, "PTT BACK");
 }
 
 bool signalingRouteEnabled(const SignalingConfig &cfg, bool mdc, size_t index)
@@ -1154,6 +1468,7 @@ void buildMenuUi()
     else if (s_menu_page == MenuPage::Mdc) buildProtocolMenu(true);
     else if (s_menu_page == MenuPage::Dtmf) buildProtocolMenu(false);
     else buildMainMenu();
+    addBi4umdMenuButtons();
 }
 
 #if NRL_DISPLAY_BUS_RGB
@@ -1266,6 +1581,323 @@ void buildWideUi()
 }
 #endif
 
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+lv_obj_t *makeBi4umdMusicButton(lv_obj_t *parent, int x, const char *text,
+                                lv_event_cb_t callback)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_set_pos(button, x, kContentHeight - 52);
+    lv_obj_set_size(button, 38, 44);
+    lv_obj_set_style_radius(button, 6, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(button, 1, 0);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    return button;
+}
+
+const char *bi4umdMusicBasename(const char *path)
+{
+    if (path == nullptr || path[0] == '\0') return "--";
+    const char *slash = strrchr(path, '/');
+    return slash != nullptr ? slash + 1 : path;
+}
+
+void bi4umdMusicSelect(lv_event_t *event)
+{
+    const size_t index = static_cast<size_t>(
+        reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
+    if (PLAYLIST_PlayIndex(index)) {
+        rebuildBi4umdMusicList();
+        refreshBi4umdMusic();
+    }
+}
+
+void rebuildBi4umdMusicList()
+{
+    if (s_list_music == nullptr) return;
+    lv_obj_clean(s_list_music);
+
+    const size_t count = PLAYLIST_Count();
+    const int current = PLAYLIST_CurrentIndex();
+    if (count == 0u) {
+        lv_obj_t *empty = makeLabel(s_list_music, &s_font_aprs_16, kColorSub);
+        lv_obj_center(empty);
+        lv_label_set_text(empty, "No music files");
+        return;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        const char *path = PLAYLIST_GetPath(i);
+        lv_obj_t *row = lv_button_create(s_list_music);
+        lv_obj_set_pos(row, 2, static_cast<int>(i * 32u));
+        lv_obj_set_size(row, kWidth - 28, 29);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_bg_color(row,
+                                  lv_color_hex(static_cast<int>(i) == current ? 0x14505A : 0x101A24), 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_add_event_cb(row, bi4umdMusicSelect, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+
+        lv_obj_t *label = makeLabel(row, &s_font_aprs_16,
+                                    static_cast<int>(i) == current ? kColorCallIdle : kColorSub);
+        lv_obj_set_width(label, kWidth - 48);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 4, 0);
+        lv_label_set_text(label, bi4umdMusicBasename(path));
+    }
+}
+
+void refreshBi4umdMusic()
+{
+    if (s_bi4umd_page != Bi4umdPage::Music || s_lbl_music_title == nullptr) return;
+
+    const bool playing = MUSIC_IsPlaying();
+    const char *path = MUSIC_CurrentPath();
+    const MediaTrackInfo *track = MUSIC_GetTrackInfo();
+    const bool changed = strncmp(s_shown_music_path, path, sizeof(s_shown_music_path)) != 0;
+    if (changed || playing != s_shown_music_playing) {
+        snprintf(s_shown_music_path, sizeof(s_shown_music_path), "%s", path);
+        s_shown_music_playing = playing;
+
+        const char *title = (track != nullptr && track->title[0] != '\0')
+                                ? track->title : bi4umdMusicBasename(path);
+        lv_label_set_text(s_lbl_music_title, title);
+        lv_label_set_text(s_lbl_music_artist,
+                          (track != nullptr && track->artist[0] != '\0') ? track->artist : "");
+        lv_label_set_text(s_lbl_music_state, playing ? "PLAYING" : "STOPPED");
+        lv_obj_set_style_text_color(s_lbl_music_state,
+                                    lv_color_hex(playing ? kColorGood : kColorSub), 0);
+        lv_label_set_text(s_btn_music_play_label, playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+
+        char source[96] = {};
+        if (bi4umdIsRadioPath(path)) {
+            const int favorite = RADIO_FAV_IndexOfUrl(path);
+            if (favorite >= 0) {
+                (void)RADIO_FAV_Get(static_cast<size_t>(favorite), source, sizeof(source), nullptr, 0u);
+            }
+            if (source[0] == '\0') snprintf(source, sizeof(source), "Internet radio");
+        } else if (path != nullptr && path[0] != '\0') {
+            snprintf(source, sizeof(source), "%s", path);
+        } else {
+            snprintf(source, sizeof(source), "No track selected");
+        }
+        lv_label_set_text(s_lbl_music_source, source);
+        rebuildBi4umdMusicList();
+    }
+
+    char format[40] = {};
+    uint32_t rate = 0;
+    uint8_t bits = 0;
+    uint8_t channels = 0;
+    if (playing && MUSIC_GetStreamInfo(&rate, &bits, &channels)) {
+        snprintf(format, sizeof(format), "%lukHz  %ubit  %uch",
+                 static_cast<unsigned long>(rate / 1000u),
+                 static_cast<unsigned>(bits), static_cast<unsigned>(channels));
+    }
+    lv_label_set_text(s_lbl_music_format, format);
+    lv_label_set_text(s_btn_music_repeat_label,
+                      PLAYLIST_GetRepeatMode() == PLAYLIST_REPEAT_ONE ? "单" : "循");
+}
+
+void buildBi4umdMusicContent()
+{
+    lv_obj_t *content = prepareContent();
+
+    lv_obj_t *brand = makeLabel(content, &lv_font_montserrat_14, kColorSub);
+    lv_obj_align(brand, LV_ALIGN_TOP_LEFT, 12, 7);
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    lv_label_set_text(brand, (config != nullptr && config->callsign[0] != '\0')
+                            ? config->callsign : "NOCALL");
+    lv_obj_t *heading = makeLabel(content, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_align(heading, LV_ALIGN_TOP_LEFT, 12, 25);
+    lv_label_set_text(heading, "Music Player");
+
+    s_lbl_music_state = makeLabel(content, &lv_font_montserrat_14, kColorSub);
+    lv_obj_align(s_lbl_music_state, LV_ALIGN_TOP_RIGHT, -8, 9);
+    lv_label_set_text(s_lbl_music_state, "STOPPED");
+
+    s_lbl_music_title = makeLabel(content, &s_font_music_20, kColorCallIdle);
+    lv_obj_set_width(s_lbl_music_title, kWidth - 24);
+    lv_label_set_long_mode(s_lbl_music_title, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_align(s_lbl_music_title, LV_ALIGN_TOP_LEFT, 12, 58);
+    lv_label_set_text(s_lbl_music_title, "--");
+
+    s_lbl_music_artist = makeLabel(content, &s_font_aprs_16, kColorSub);
+    lv_obj_add_flag(s_lbl_music_artist, LV_OBJ_FLAG_HIDDEN);
+
+    s_lbl_music_format = makeLabel(content, &lv_font_montserrat_14, kColorAccent);
+    lv_obj_align(s_lbl_music_format, LV_ALIGN_TOP_LEFT, 12, 86);
+
+    s_lbl_music_source = makeLabel(content, &s_font_aprs_16, kColorCaption);
+    lv_obj_set_width(s_lbl_music_source, kWidth - 24);
+    lv_obj_set_style_text_align(s_lbl_music_source, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(s_lbl_music_source, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_align(s_lbl_music_source, LV_ALIGN_TOP_LEFT, 12, 108);
+
+    auto make_upper_button = [content](int x, const char *text, lv_event_cb_t callback) {
+        lv_obj_t *button = lv_button_create(content);
+        lv_obj_set_pos(button, x, 136);
+        lv_obj_set_size(button, 38, 44);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
+        lv_obj_set_style_border_width(button, 1, 0);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+        return button;
+    };
+    make_upper_button(31, LV_SYMBOL_PREV, bi4umdMusicPrev);
+    lv_obj_t *play = make_upper_button(78, LV_SYMBOL_PLAY, bi4umdMusicToggle);
+    s_btn_music_play_label = lv_obj_get_child(play, 0);
+    make_upper_button(125, LV_SYMBOL_NEXT, bi4umdMusicNext);
+    make_upper_button(172, LV_SYMBOL_REFRESH, bi4umdMusicRefresh);
+
+    makeBi4umdMusicButton(content, 8, LV_SYMBOL_MINUS, bi4umdMusicVolumeDown);
+    makeBi4umdMusicButton(content, 55, LV_SYMBOL_PLUS, bi4umdMusicVolumeUp);
+    lv_obj_t *repeat = makeBi4umdMusicButton(content, 102, "循", bi4umdMusicRepeat);
+    s_btn_music_repeat_label = lv_obj_get_child(repeat, 0);
+    lv_obj_set_style_text_font(s_btn_music_repeat_label, &s_font_aprs_16, 0);
+    makeBi4umdMusicButton(content, 149, LV_SYMBOL_LIST, bi4umdShowMusicListPage);
+    makeBi4umdMusicButton(content, 196, LV_SYMBOL_HOME, bi4umdShowRadioPage);
+
+    s_shown_music_path[0] = '\1';
+    refreshBi4umdMusic();
+}
+
+void buildBi4umdMusicListContent()
+{
+    lv_obj_t *content = prepareContent();
+
+    lv_obj_t *back = lv_button_create(content);
+    lv_obj_set_pos(back, 8, 6);
+    lv_obj_set_size(back, 32, 30);
+    lv_obj_set_style_radius(back, 5, 0);
+    lv_obj_add_event_cb(back, bi4umdShowMusicPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *back_label = makeLabel(back, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(back_label, LV_SYMBOL_LEFT);
+    lv_obj_center(back_label);
+
+    lv_obj_t *heading = makeLabel(content, &s_font_music_20, kColorAccent);
+    lv_obj_align(heading, LV_ALIGN_TOP_LEFT, 50, 10);
+    lv_label_set_text(heading, "Music List");
+
+    char count_text[24] = {};
+    snprintf(count_text, sizeof(count_text), "%u tracks",
+             static_cast<unsigned>(PLAYLIST_Count()));
+    lv_obj_t *count = makeLabel(content, &lv_font_montserrat_14, kColorSub);
+    lv_obj_align(count, LV_ALIGN_TOP_RIGHT, -8, 13);
+    lv_label_set_text(count, count_text);
+
+    s_list_music = lv_obj_create(content);
+    lv_obj_set_pos(s_list_music, 8, 44);
+    lv_obj_set_size(s_list_music, kWidth - 16, kContentHeight - 52);
+    lv_obj_set_style_bg_color(s_list_music, lv_color_hex(0x0B121A), 0);
+    lv_obj_set_style_border_color(s_list_music, lv_color_hex(0x1C4B52), 0);
+    lv_obj_set_style_border_width(s_list_music, 1, 0);
+    lv_obj_set_style_radius(s_list_music, 5, 0);
+    lv_obj_set_style_pad_all(s_list_music, 3, 0);
+    lv_obj_set_scroll_dir(s_list_music, LV_DIR_VER);
+    rebuildBi4umdMusicList();
+}
+
+void buildBi4umdSettingsContent()
+{
+    lv_obj_t *content = prepareContent();
+
+    lv_obj_t *menu = lv_button_create(content);
+    lv_obj_set_pos(menu, 8, 6);
+    lv_obj_set_size(menu, 56, 40);
+    lv_obj_set_style_radius(menu, 6, 0);
+    lv_obj_set_style_bg_color(menu, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(menu, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(menu, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(menu, 1, 0);
+    lv_obj_add_event_cb(menu, bi4umdOpenMainMenu, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *menu_label = makeLabel(menu, &s_font_aprs_16, kColorCallIdle);
+    lv_label_set_text(menu_label, "主菜单");
+    lv_obj_center(menu_label);
+
+    auto square_button = [content](int x, int y, const char *text, lv_event_cb_t callback) {
+        lv_obj_t *button = lv_button_create(content);
+        lv_obj_set_pos(button, x, y);
+        lv_obj_set_size(button, 40, 38);
+        lv_obj_set_style_radius(button, 6, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x10212A), 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
+        lv_obj_set_style_border_width(button, 1, 0);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+
+    lv_obj_t *mic_name = makeLabel(content, &s_font_aprs_16, kColorSub);
+    lv_obj_set_pos(mic_name, 12, 88);
+    lv_label_set_text(mic_name, "麦克风");
+    square_button(88, 78, LV_SYMBOL_MINUS, bi4umdSettingsMicDown);
+    s_lbl_settings_mic = makeLabel(content, &lv_font_montserrat_16, kColorCallIdle);
+    lv_obj_set_width(s_lbl_settings_mic, 44);
+    lv_obj_set_style_text_align(s_lbl_settings_mic, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_lbl_settings_mic, 132, 88);
+    square_button(184, 78, LV_SYMBOL_PLUS, bi4umdSettingsMicUp);
+
+    lv_obj_t *volume_name = makeLabel(content, &s_font_aprs_16, kColorSub);
+    lv_obj_set_pos(volume_name, 12, 142);
+    lv_label_set_text(volume_name, "音量");
+    square_button(88, 132, LV_SYMBOL_MINUS, bi4umdSettingsVolumeDown);
+    s_lbl_settings_volume = makeLabel(content, &lv_font_montserrat_16, kColorCallIdle);
+    lv_obj_set_width(s_lbl_settings_volume, 44);
+    lv_obj_set_style_text_align(s_lbl_settings_volume, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_lbl_settings_volume, 132, 142);
+    square_button(184, 132, LV_SYMBOL_PLUS, bi4umdSettingsVolumeUp);
+
+    lv_obj_t *ptt = lv_button_create(content);
+    lv_obj_remove_style_all(ptt);
+    lv_obj_set_pos(ptt, 60, 194);
+    lv_obj_set_size(ptt, 120, 44);
+    lv_obj_set_style_radius(ptt, 6, 0);
+    lv_obj_set_style_bg_color(ptt, lv_color_hex(0x142033), 0);
+    lv_obj_set_style_bg_color(ptt, lv_color_hex(0x8B1E2D), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(ptt, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(ptt, lv_color_hex(kColorTx), 0);
+    lv_obj_set_style_border_color(ptt, lv_color_hex(0xFF3030), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(ptt, 0, 0);
+    lv_obj_set_style_outline_width(ptt, 0, 0);
+    lv_obj_set_style_shadow_width(ptt, 0, 0);
+    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_PRESS_LOST, nullptr);
+    lv_obj_t *ptt_label = makeLabel(ptt, &lv_font_montserrat_20, kColorCallIdle);
+    lv_label_set_text(ptt_label, "PTT");
+    lv_obj_center(ptt_label);
+
+    lv_obj_t *home = lv_button_create(content);
+    lv_obj_set_pos(home, kWidth - 48, kContentHeight - 48);
+    lv_obj_set_size(home, 40, 40);
+    lv_obj_set_style_radius(home, 6, 0);
+    lv_obj_set_style_bg_color(home, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(home, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(home, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(home, 1, 0);
+    lv_obj_add_event_cb(home, bi4umdShowRadioPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *home_label = makeLabel(home, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(home_label, LV_SYMBOL_HOME);
+    lv_obj_center(home_label);
+
+    refreshBi4umdSettingsValues();
+}
+#endif
+
 void buildHomeContent()
 {
     lv_obj_t *content = prepareContent();
@@ -1284,11 +1916,11 @@ void buildHomeContent()
     lv_obj_set_width(s_lbl_ssid, kWidth - 16);
     lv_obj_set_style_text_align(s_lbl_ssid, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_lbl_ssid, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_align(s_lbl_ssid, LV_ALIGN_TOP_MID, 0, 86);
+    lv_obj_align(s_lbl_ssid, LV_ALIGN_TOP_MID, 0, 74);
     lv_label_set_text(s_lbl_ssid, "SSID -");
 
     s_lbl_time = makeLabel(content, &lv_font_montserrat_28, kColorTime);
-    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 112);
+    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_MID, 0, 100);
     lv_label_set_text(s_lbl_time, "--:--:--");
 
     // Gezipai is not a touch screen: this is deliberately only a notification.
@@ -1297,21 +1929,64 @@ void buildHomeContent()
     s_lbl_ota = makeLabel(content, &s_font_aprs_16, kColorApWarn);
     lv_obj_set_width(s_lbl_ota, kWidth);
     lv_obj_set_style_text_align(s_lbl_ota, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 148);
+    lv_obj_align(s_lbl_ota, LV_ALIGN_TOP_MID, 0, 136);
     // Doubles as the APRS monitor ticker; long packet lines scroll circularly.
     lv_label_set_long_mode(s_lbl_ota, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_label_set_text(s_lbl_ota, "");
 
     s_bar_ota = lv_bar_create(content);
-    lv_obj_set_pos(s_bar_ota, 20, 165);
-    lv_obj_set_size(s_bar_ota, kWidth - 40, 4);
+    lv_obj_set_pos(s_bar_ota, 16, kContentHeight - 9);
+    lv_obj_set_size(s_bar_ota, kWidth - 32, 5);
     lv_bar_set_range(s_bar_ota, 0, 100);
     lv_bar_set_value(s_bar_ota, 0, LV_ANIM_OFF);
-    lv_obj_set_style_radius(s_bar_ota, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_bar_ota, 2, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_bar_ota, lv_color_hex(kColorCaption), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_bar_ota, lv_color_hex(kColorApWarn), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_bar_ota, lv_color_hex(kColorTx), LV_PART_INDICATOR);
     lv_obj_add_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
+
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    lv_obj_t *music = lv_button_create(content);
+    lv_obj_set_pos(music, 8, kContentHeight - 48);
+    lv_obj_set_size(music, 40, 40);
+    lv_obj_set_style_radius(music, 6, 0);
+    lv_obj_set_style_bg_color(music, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(music, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(music, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(music, 1, 0);
+    lv_obj_add_event_cb(music, bi4umdShowMusicPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *music_label = makeLabel(music, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(music_label, LV_SYMBOL_AUDIO);
+    lv_obj_center(music_label);
+
+    lv_obj_t *settings = lv_button_create(content);
+    lv_obj_set_pos(settings, kWidth - 48, kContentHeight - 48);
+    lv_obj_set_size(settings, 40, 40);
+    lv_obj_set_style_radius(settings, 6, 0);
+    lv_obj_set_style_bg_color(settings, lv_color_hex(0x10212A), 0);
+    lv_obj_set_style_bg_color(settings, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(settings, lv_color_hex(0x1C6B73), 0);
+    lv_obj_set_style_border_width(settings, 1, 0);
+    lv_obj_add_event_cb(settings, bi4umdShowSettingsPage, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *settings_label = makeLabel(settings, &lv_font_montserrat_16, kColorCallIdle);
+    lv_label_set_text(settings_label, LV_SYMBOL_SETTINGS);
+    lv_obj_center(settings_label);
+
+    lv_obj_t *ptt = lv_button_create(content);
+    lv_obj_remove_style_all(ptt);
+    lv_obj_set_pos(ptt, 60, kContentHeight - 55);
+    lv_obj_set_size(ptt, kWidth - 120, 44);
+    lv_obj_set_style_radius(ptt, 6, 0);
+    lv_obj_set_style_bg_color(ptt, lv_color_hex(0x142033), 0);
+    lv_obj_set_style_bg_color(ptt, lv_color_hex(0x8B1E2D), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(ptt, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(ptt, lv_color_hex(kColorTx), 0);
+    lv_obj_set_style_border_color(ptt, lv_color_hex(0xFF3030), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(ptt, 0, 0);
+    lv_obj_set_style_outline_width(ptt, 0, 0);
+    lv_obj_set_style_shadow_width(ptt, 0, 0);
+    lv_obj_add_event_cb(ptt, bi4umdPttEvent, LV_EVENT_ALL, nullptr);
+    lv_obj_t *label = makeLabel(ptt, &lv_font_montserrat_20, kColorCallIdle);
+    lv_label_set_text(label, "PTT");
+    lv_obj_center(label);
+#endif
 }
 
 void buildUi()
@@ -1843,6 +2518,7 @@ void refreshOtaNotice()
     if (s_bar_ota != nullptr) {
         if (progress_percent >= 0) {
             lv_bar_set_value(s_bar_ota, progress_percent, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(s_bar_ota, lv_color_hex(color), LV_PART_INDICATOR);
             lv_obj_remove_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(s_bar_ota, LV_OBJ_FLAG_HIDDEN);
@@ -2108,6 +2784,10 @@ void processMenuInput(uint32_t now)
 {
     if (s_menu_open_requested) {
         s_menu_open_requested = false;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+        STATUS_IO_SetSoftPtt(false);
+        s_bi4umd_page = Bi4umdPage::Radio;
+#endif
         s_menu_nav_pending = 0;
         s_menu_confirm_pending = 0u;
         s_menu_message[0] = '\0';
@@ -2175,10 +2855,10 @@ void processMenuInput(uint32_t now)
         int used = snprintf(state, sizeof(state), "%u|%u|%u|%u|%lu|%u|%s|%s",
                             ota->checking ? 1u : 0u, ota->updating ? 1u : 0u,
                             static_cast<unsigned>(ota->release_count),
-                            s_menu_ota_requested ? 1u : 0u,
-                            static_cast<unsigned long>(ota->update_size),
-                            static_cast<unsigned>(ota->update_percent),
-                            ota->latest_version, ota->last_error);
+                              s_menu_ota_requested ? 1u : 0u,
+                              static_cast<unsigned long>(ota->update_size),
+                              static_cast<unsigned>(ota->update_percent),
+                              ota->latest_version, ota->last_error);
         for (size_t i = 0; i < ota->release_count && used > 0 &&
                            static_cast<size_t>(used) < sizeof(state) - 2u; ++i) {
             used += snprintf(state + used, sizeof(state) - static_cast<size_t>(used),
@@ -2202,7 +2882,6 @@ void processMenuInput(uint32_t now)
             buildMenuUi();
         }
     }
-
     if (s_menu_page == MenuPage::AprsGps &&
         (s_menu_aprs_refresh_ms == 0u || now - s_menu_aprs_refresh_ms >= 1000u)) {
         s_menu_aprs_refresh_ms = now;
@@ -2255,8 +2934,14 @@ extern "C" void Display_Init(void)
     }
     s_font_aprs_16 = lv_font_montserrat_16;
     s_font_aprs_16.fallback = &lv_font_cjk_16;
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    s_font_music_20 = lv_font_montserrat_20;
+    s_font_music_20.fallback = &lv_font_cjk_16;
+#endif
 #if NRL_DISPLAY_BUS_RGB
     initTouch();
+#elif NRL_BOARD == NRL_BOARD_BI4UMD
+    initBi4umdTouch();
 #endif
 
     initBatteryAdc();
@@ -2265,7 +2950,9 @@ extern "C" void Display_Init(void)
     buildUi();
     lv_refr_now(nullptr);  // paint the first frame before the backlight is lit
 
-#if NRL_PIN_DISPLAY_BL >= 0
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    BI4UMD_Display_SetBacklight(true);
+#elif NRL_PIN_DISPLAY_BL >= 0
     gpio_set_level(static_cast<gpio_num_t>(NRL_PIN_DISPLAY_BL), 1);
 #endif
     s_ready = true;
@@ -2298,6 +2985,24 @@ extern "C" void Display_Poll(void)
         lv_timer_handler();
         return;
     }
+
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (s_bi4umd_page != Bi4umdPage::Radio) {
+        if (s_bi4umd_page == Bi4umdPage::Music) {
+            refreshBi4umdMusic();
+        }
+        refreshIp();
+        refreshVolume();
+        if (s_last_refresh_ms == 0u || (now - s_last_refresh_ms) >= kRefreshIntervalMs) {
+            s_last_refresh_ms = now;
+            refreshWifi();
+            refreshBattery();
+            refreshCpu();
+        }
+        lv_timer_handler();
+        return;
+    }
+#endif
 
     // The caller caption, IP bar and volume readout react to PTT / button
     // presses, so refresh them every poll for snappy feedback. setLabel()

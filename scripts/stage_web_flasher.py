@@ -1,9 +1,8 @@
 """Stage the USB web-flasher (esp-web-tools) from native ESP-IDF build output.
 
-Only the released ESP32-S3 boards (gezipai, bh4tdv) are web-flashable:
-esp-web-tools / esptool-js has no support for the ESP32-S31, so both S31
-boards are serial-only (for example, `python scripts/build.py
-s31_function_coreboard flash`).
+Only the ESP32-S3 boards (gezipai, gezipai_4g, bi4umd, bh4tdv) are web-flashable: esp-web-tools /
+esptool-js has no support for the ESP32-S31, so both S31 boards are serial-only
+(for example, `python scripts/build.py s31_function_coreboard flash`).
 
 For each board it reads build/<board>/flasher_args.json -- the authoritative
 offset->file map ESP-IDF emits -- copies every flash image into
@@ -12,6 +11,8 @@ offsets. The manifest part paths are relative, so the same layout is served both
 by the standalone web-flasher/ page and by the OTA server under /flasher/.
 
     python scripts/build.py gezipai build
+    python scripts/build.py gezipai_4g build
+    python scripts/build.py bi4umd build
     python scripts/build.py bh4tdv build
     # standalone page (default output = web-flasher/):
     python scripts/stage_web_flasher.py
@@ -34,6 +35,8 @@ VERSION_HEADER = PROJECT_DIR / "src" / "lib" / "nrl_version.h"
 # board -> display name shown in the esp-web-tools manifest. All are ESP32-S3.
 BOARDS = {
     "gezipai": "NRL ESP32 - Gezipai",
+    "gezipai_4g": "NRL ESP32 - Gezipai 4G",
+    "bi4umd": "NRL ESP32 - BI4UMD",
     "bh4tdv": "NRL ESP32 - BH4TDV 3188",
 }
 CHIP_FAMILY = "ESP32-S3"

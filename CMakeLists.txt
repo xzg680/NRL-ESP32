@@ -23,7 +23,7 @@ endif()
 #     fails with "undefined reference to app_main". WHOLE_ARCHIVE on the src
 #     component (src/CMakeLists.txt) then keeps app_main from being dropped.
 #   * [env:*] build_flags -> the board identity + feature macros. NRL_BOARD MUST
-#     be set (via -DNRL_BOARD_ID=NRL_BOARD_GEZIPAI|_BH4TDV|_S31_KORVO) or
+#     be set (via -DNRL_BOARD_ID=NRL_BOARD_GEZIPAI|_BI4UMD|_BH4TDV|_S31_KORVO) or
 #     board_pins.h defaults to gezipai. Firmware version via -DNRL_FW_VERSION=...
 #     (optional; falls back to the default in nrl_version.h).
 # Gated on NRL_NATIVE_BUILD (not IDF_TARGET) so any PlatformIO build, which
@@ -121,9 +121,8 @@ if(IDF_TARGET STREQUAL "esp32s31")
 
 endif()
 
-# libsmb2 is legacy C89-style code (old-style definitions, implicit
-# declarations) that fails under the default gnu23 + warnings-as-errors;
-# compile that component alone as gnu17 with non-fatal warnings on every board.
+# libsmb2 is used on every board in 0.7.8. Compile its legacy C sources with
+# non-fatal compatibility warnings regardless of the selected target.
 idf_component_get_property(smb2_lib sahlberg__libsmb2 COMPONENT_LIB)
 if(smb2_lib)
     target_compile_options(${smb2_lib} PRIVATE -std=gnu17 -Wno-error

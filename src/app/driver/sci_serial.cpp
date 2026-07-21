@@ -93,6 +93,11 @@ extern "C" bool SCI_SERIAL_Init(void)
                                   config->sci.stop_bits);
 }
 
+extern "C" void SCI_SERIAL_Stop(void)
+{
+    stopDriver();
+}
+
 extern "C" bool SCI_SERIAL_ApplyConfig(const uint32_t baud,
                                        const uint8_t data_bits,
                                        const char parity,

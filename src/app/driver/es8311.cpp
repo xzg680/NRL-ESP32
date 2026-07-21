@@ -20,6 +20,10 @@ namespace {
 constexpr uint8_t kEs8311Addr = 0x18; // 7-bit I2C address
 
 constexpr int kPinPaEn = NRL_PIN_PA_EN;
+#ifndef NRL_PIN_PA_EN_ACTIVE_LEVEL
+#define NRL_PIN_PA_EN_ACTIVE_LEVEL 1
+#endif
+constexpr int kPinPaEnActiveLevel = NRL_PIN_PA_EN_ACTIVE_LEVEL;
 
 // ES8311 registers (subset)
 enum : uint8_t {
@@ -725,8 +729,9 @@ extern "C" bool ES8311_Init(void) {
     if (kPinPaEn >= 0) {
         gpio_reset_pin((gpio_num_t)kPinPaEn);
         gpio_set_direction((gpio_num_t)kPinPaEn, GPIO_MODE_OUTPUT);
-        gpio_set_level((gpio_num_t)kPinPaEn, 1);
-        ESP_LOGI(TAG, "PA enable pin %d set HIGH", kPinPaEn);
+        gpio_set_level((gpio_num_t)kPinPaEn, kPinPaEnActiveLevel);
+        ESP_LOGI(TAG, "PA enable pin %d set %s", kPinPaEn,
+                 kPinPaEnActiveLevel ? "HIGH" : "LOW");
     }
 
     I2C_Init();

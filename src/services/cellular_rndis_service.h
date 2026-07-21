@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// USER CUSTOM BEGIN: optional USB RNDIS cellular service API.
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -15,3 +17,4 @@ uint32_t CELLULAR_RNDIS_Ip(void);
 #ifdef __cplusplus
 }
 #endif
+// USER CUSTOM END: optional USB RNDIS cellular service API.

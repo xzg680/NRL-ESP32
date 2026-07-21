@@ -1,9 +1,12 @@
 #include "services/storage_service.h"
+#include "services/music_playlist.h"
 
 #include "driver/board_pins.h"
 
 #include <esp_log.h>
 #include <stdio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 static const char *TAG = "STORAGE";
 
@@ -12,15 +15,46 @@ static const char *TAG = "STORAGE";
 // ---------------------------------------------------------------------------
 #if defined(NRL_HAS_SDCARD) && NRL_HAS_SDCARD
 
+#if defined(NRL_SDCARD_NATIVE_SDMMC) && NRL_SDCARD_NATIVE_SDMMC
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
+#include "driver/sdmmc_host.h"
+#else
 #include "bsp/sdcard.h"
+#endif
 
 namespace {
 static bool s_sd_mounted = false;
+static TaskHandle_t s_sd_retry_task = nullptr;
 
 static void storage_mount_sdcard(void)
 {
+#if defined(NRL_SDCARD_NATIVE_SDMMC) && NRL_SDCARD_NATIVE_SDMMC
+    // Allow the card's power rail and external pull-ups to settle after reset.
+    vTaskDelay(pdMS_TO_TICKS(100));
+#endif
     sdmmc_card_t *card = nullptr;
+#if defined(NRL_SDCARD_NATIVE_SDMMC) && NRL_SDCARD_NATIVE_SDMMC
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = 20000;
+    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot.width = 4;
+    slot.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+    slot.clk = (gpio_num_t)NRL_PIN_SDCARD_CLK; slot.cmd = (gpio_num_t)NRL_PIN_SDCARD_CMD;
+    slot.d0 = (gpio_num_t)NRL_PIN_SDCARD_D0; slot.d1 = (gpio_num_t)NRL_PIN_SDCARD_D1;
+    slot.d2 = (gpio_num_t)NRL_PIN_SDCARD_D2; slot.d3 = (gpio_num_t)NRL_PIN_SDCARD_D3;
+    esp_vfs_fat_mount_config_t cfg = {};
+    cfg.format_if_mount_failed = false;
+    cfg.max_files = 8;
+    cfg.allocation_unit_size = 16 * 1024;
+    ESP_LOGI(TAG, "mounting BI4UMD TF: CLK=%d CMD=%d D0=%d D1=%d D2=%d D3=%d",
+             NRL_PIN_SDCARD_CLK, NRL_PIN_SDCARD_CMD,
+             NRL_PIN_SDCARD_D0, NRL_PIN_SDCARD_D1,
+             NRL_PIN_SDCARD_D2, NRL_PIN_SDCARD_D3);
+    const esp_err_t err = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot, &cfg, &card);
+#else
     const esp_err_t err = bsp_sdcard_mount(nullptr, &card);
+#endif
     if (err == ESP_FAIL) {
         // The SDMMC probe answered but FatFs found no FAT volume (FatFs error
         // FR_NO_FILESYSTEM surfaces as ESP_FAIL): typically a >32 GB card
@@ -39,11 +73,25 @@ static void storage_mount_sdcard(void)
     }
     s_sd_mounted = true;
     ESP_LOGI(TAG, "TF card mounted at %s: %s %lluMB",
-             bsp_sdcard_get_mount_point(),
+             "/sdcard",
              (card != nullptr) ? card->cid.name : "?",
              (card != nullptr)
                  ? (static_cast<unsigned long long>(card->csd.capacity) * card->csd.sector_size) / (1024ULL * 1024ULL)
                  : 0ULL);
+}
+
+static void storage_sd_retry_task(void *)
+{
+    // A failed native SDMMC probe can leave the host GPIO matrix reserved even
+    // when no card is present. Repeating the probe immediately then reports a
+    // misleading GPIO conflict. Retry explicitly through AT+SDMOUNT after a
+    // card is inserted instead of probing thirty times at boot.
+    storage_mount_sdcard();
+    if (s_sd_mounted) {
+        (void)PLAYLIST_Scan();
+    }
+    s_sd_retry_task = nullptr;
+    vTaskDelete(nullptr);
 }
 } // namespace
 
@@ -57,6 +105,9 @@ extern "C" bool STORAGE_SdMountRetry(void)
 
 extern "C" bool STORAGE_SdFormat(void)
 {
+#if defined(NRL_SDCARD_NATIVE_SDMMC) && NRL_SDCARD_NATIVE_SDMMC
+    return false;
+#else
     if (s_sd_mounted) {
         // Card already works; refuse to erase it from here.
         return false;
@@ -72,6 +123,7 @@ extern "C" bool STORAGE_SdFormat(void)
     s_sd_mounted = true;
     ESP_LOGI(TAG, "TF card formatted and mounted at %s", bsp_sdcard_get_mount_point());
     return true;
+#endif
 }
 
 extern "C" bool STORAGE_SdMounted(void)
@@ -81,7 +133,7 @@ extern "C" bool STORAGE_SdMounted(void)
 
 extern "C" const char *STORAGE_SdMountPoint(void)
 {
-    return s_sd_mounted ? bsp_sdcard_get_mount_point() : nullptr;
+    return s_sd_mounted ? "/sdcard" : nullptr;
 }
 
 #else // !NRL_HAS_SDCARD
@@ -473,6 +525,12 @@ extern "C" bool STORAGE_Init(void)
 #if defined(NRL_HAS_SDCARD) && NRL_HAS_SDCARD
     if (!s_sd_mounted) {
         storage_mount_sdcard();
+#if defined(NRL_SDCARD_NATIVE_SDMMC) && NRL_SDCARD_NATIVE_SDMMC
+        if (!s_sd_mounted && s_sd_retry_task == nullptr) {
+            (void)xTaskCreate(storage_sd_retry_task, "sd_retry", 4096, nullptr, 2,
+                              &s_sd_retry_task);
+        }
+#endif
     }
 #endif
 #if defined(NRL_HAS_USB_HOST) && NRL_HAS_USB_HOST

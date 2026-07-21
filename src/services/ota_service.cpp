@@ -63,6 +63,8 @@ const char *boardType()
     return "gezipai_4g";
 #elif NRL_BOARD == NRL_BOARD_GEZIPAI
     return "gezipai";
+#elif NRL_BOARD == NRL_BOARD_BI4UMD
+    return "bi4umd";
 #elif NRL_BOARD == NRL_BOARD_BH4TDV
     return "bh4tdv";
 #elif NRL_BOARD == NRL_BOARD_S31_KORVO

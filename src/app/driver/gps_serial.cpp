@@ -85,6 +85,11 @@ extern "C" bool GPS_SERIAL_Init(void)
     return true;
 }
 
+extern "C" void GPS_SERIAL_Stop(void)
+{
+    stopDriver();
+}
+
 extern "C" bool GPS_SERIAL_ReloadConfig(void)
 {
     stopDriver();
