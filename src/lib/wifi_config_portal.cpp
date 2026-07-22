@@ -59,7 +59,7 @@ namespace {
 // time, so a single global PortalRequest is safe.
 // ----------------------------------------------------------------------------
 
-constexpr size_t kFormParamMax = 48u;
+constexpr size_t kFormParamMax = 16u;
 constexpr size_t kFormKeyMax = 48u;
 constexpr size_t kFormValueMax = 768u;
 
