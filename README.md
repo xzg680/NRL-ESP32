@@ -4,7 +4,7 @@
 
 HTML 阅读版：[中文](README.html) / [English](README.en.html)
 
-当前固件版本：`0.8.19`
+当前固件版本：`0.8.20`
 
 完整构建矩阵包含 `gezipai`、`gezipai_4g`、`bi4umd`、`bh4tdv`、`s31_korvo` 和 `s31_function_coreboard`。其中 `gezipai_4g` 在保留格子派音频与屏幕功能的基础上增加 ML307R 硬件映射；`bi4umd` 保留其触摸屏和 TF 卡扩展。
 
