@@ -73,6 +73,7 @@
 #include <esp_heap_caps.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
+#include <nvs.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -204,6 +205,7 @@ bool s_time_sync_started = false;
 
 enum class MenuPage : uint8_t {
     Main,
+    Language,
     Ota,
     About,
     Aprs,
@@ -223,6 +225,7 @@ volatile bool s_menu_open_requested = false;
 volatile int s_menu_nav_pending = 0;
 volatile unsigned s_menu_confirm_pending = 0u;
 MenuPage s_menu_page = MenuPage::Main;
+bool s_menu_chinese = true;
 size_t s_menu_index = 0u;
 bool s_menu_ota_requested = false;
 uint32_t s_menu_ota_check_baseline_ms = 0u;
@@ -236,6 +239,37 @@ uint32_t s_menu_message_until_ms = 0u;
 // processMenuInput() consumed most of nrl_main_loop's 6 KB stack even when the
 // main menu (not the OTA page) was being opened, corrupting its return address.
 NrlOtaStatus *s_ota_ui_status = nullptr;
+
+const char *menuText(const char *english, const char *chinese)
+{
+    return s_menu_chinese ? chinese : english;
+}
+
+const lv_font_t *menuFont(const lv_font_t *english_font)
+{
+    return s_menu_chinese ? &s_font_aprs_16 : english_font;
+}
+
+void loadMenuLanguage()
+{
+    nvs_handle_t nvs;
+    uint8_t language = 1u;
+    if (nvs_open("display", NVS_READONLY, &nvs) == ESP_OK) {
+        (void)nvs_get_u8(nvs, "language", &language);
+        nvs_close(nvs);
+    }
+    s_menu_chinese = language != 0u;
+}
+
+void saveMenuLanguage()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("display", NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "language", s_menu_chinese ? 1u : 0u);
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
 
 // Cached on-screen text, so labels are only rewritten when a value changes.
 char s_shown_callsign[16] = {};
@@ -1040,7 +1074,8 @@ lv_obj_t *prepareContent()
     return s_content;
 }
 
-void menuRow(lv_obj_t *scr, int y, const char *text, bool selected)
+void menuRow(lv_obj_t *scr, int y, const char *text, bool selected,
+             const lv_font_t *override_font = nullptr)
 {
     lv_obj_t *row = lv_obj_create(scr);
     lv_obj_remove_style_all(row);
@@ -1053,10 +1088,13 @@ void menuRow(lv_obj_t *scr, int y, const char *text, bool selected)
     lv_obj_set_style_radius(row, 4, 0);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *lbl = makeLabel(row, &lv_font_montserrat_14,
+    const lv_font_t *font = override_font != nullptr
+                                ? override_font
+                                : menuFont(&lv_font_montserrat_16);
+    lv_obj_t *lbl = makeLabel(row, font,
                               selected ? kColorCallIdle : kColorSub);
     lv_obj_set_size(lbl, kWidth - 24,
-                    lv_font_get_line_height(&lv_font_montserrat_14));
+                    lv_font_get_line_height(font));
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
     lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 7, 0);
     char line[64] = {};
@@ -1066,7 +1104,7 @@ void menuRow(lv_obj_t *scr, int y, const char *text, bool selected)
 
 void menuFooter(lv_obj_t *scr, const char *text, uint32_t color = kColorCaption)
 {
-    lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, color);
+    lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_16), color);
     lv_obj_set_width(lbl, kWidth - 8);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -3);
@@ -1098,42 +1136,92 @@ size_t menuWindowStart(const size_t item_count, const size_t visible_count)
     return start;
 }
 
+void menuScrollBar(lv_obj_t *scr, const size_t item_count,
+                   const size_t visible_count, const size_t start)
+{
+    if (item_count <= visible_count) return;
+
+    constexpr int kTrackHeight = 142;
+    lv_obj_t *track = lv_obj_create(scr);
+    lv_obj_remove_style_all(track);
+    lv_obj_set_pos(track, kWidth - 4, 2);
+    lv_obj_set_size(track, 3, kTrackHeight);
+    lv_obj_set_style_bg_color(track, lv_color_hex(0x21384A), 0);
+    lv_obj_set_style_bg_opa(track, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(track, 2, 0);
+    lv_obj_remove_flag(track, LV_OBJ_FLAG_SCROLLABLE);
+
+    const int thumb_height = static_cast<int>(kTrackHeight * visible_count / item_count);
+    const size_t max_start = item_count - visible_count;
+    const int thumb_y = static_cast<int>((kTrackHeight - thumb_height) * start / max_start);
+    lv_obj_t *thumb = lv_obj_create(track);
+    lv_obj_remove_style_all(thumb);
+    lv_obj_set_pos(thumb, 0, thumb_y);
+    lv_obj_set_size(thumb, 3, thumb_height);
+    lv_obj_set_style_bg_color(thumb, lv_color_hex(kColorAccent), 0);
+    lv_obj_set_style_bg_opa(thumb, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(thumb, 2, 0);
+}
+
 void buildMainMenu()
 {
     lv_obj_t *scr = prepareContent();
     char ptt[32] = {};
     char nrl_codec[32] = {};
     char now_codec[32] = {};
-    snprintf(ptt, sizeof(ptt), "PTT: %s",
+    snprintf(ptt, sizeof(ptt), menuText("PTT: %s", "PTT模式: %s"),
              ESPNOW_LINK_GetPttMode() == 1u ? "ESP-NOW" : "NRL");
-    snprintf(nrl_codec, sizeof(nrl_codec), "NRL CODEC: %s",
+    snprintf(nrl_codec, sizeof(nrl_codec), menuText("NRL CODEC: %s", "NRL编码: %s"),
              NRLAudioBridge_GetVoiceCodec() == 1u ? "OPUS" : "G711");
-    snprintf(now_codec, sizeof(now_codec), "NOW CODEC: %s",
+    snprintf(now_codec, sizeof(now_codec), menuText("NOW CODEC: %s", "NOW编码: %s"),
              ESPNOW_LINK_GetTxCodec() == 1u ? "OPUS" : "G711");
     const char *items[] = {
-        "< BACK",
+        menuText("< BACK", "< 返回"),
         ptt,
         nrl_codec,
         now_codec,
-        "SIGNALING",
-        "CHECK UPDATE",
+        menuText("SIGNALING", "信令设置"),
+        menuText("CHECK UPDATE", "检查更新"),
         "APRS",
-        "ABOUT",
+        menuText("LANGUAGE", "语言"),
+        menuText("ABOUT", "关于"),
     };
     constexpr size_t kItemCount = sizeof(items) / sizeof(items[0]);
+#if NRL_BOARD == NRL_BOARD_GEZIPAI
+    constexpr size_t kVisibleRows = 6u;
+#else
     constexpr size_t kVisibleRows = 7u;
+#endif
     const size_t start = menuWindowStart(kItemCount, kVisibleRows);
     const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
     for (size_t i = start; i < end; ++i) {
         menuRow(scr, 1 + static_cast<int>(i - start) * 24, items[i], s_menu_index == i);
     }
-    menuStatusFooter(scr, "VOL+/- SELECT   PTT OK");
+#if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_BI4UMD
+    menuScrollBar(scr, kItemCount, kVisibleRows, start);
+#endif
+    menuStatusFooter(scr, menuText("VOL+/- SELECT   PTT OK", "音量+/- 选择  PTT确认"));
+}
+
+void buildLanguageMenu()
+{
+    lv_obj_t *scr = prepareContent();
+    const char *items[] = {
+        menuText("< BACK / LANGUAGE", "< 返回 / 语言"),
+        s_menu_chinese ? "> 中文" : "  中文",
+        !s_menu_chinese ? "> English" : "  English",
+    };
+    for (size_t i = 0; i < 3u; ++i) {
+        menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i,
+                i == 1u ? &s_font_aprs_16 : nullptr);
+    }
+    menuStatusFooter(scr, menuText("PTT SELECT", "PTT选择"));
 }
 
 void buildAboutMenu()
 {
     lv_obj_t *scr = prepareContent();
-    menuRow(scr, 1, "< BACK", true);
+    menuRow(scr, 1, menuText("< BACK", "< 返回"), true);
 
     lv_obj_t *name = makeLabel(scr, &lv_font_montserrat_20, kColorAccent);
     lv_obj_set_width(name, kWidth);
@@ -1142,8 +1230,8 @@ void buildAboutMenu()
     lv_label_set_text(name, NRL_FIRMWARE_NAME);
 
     char version_text[48] = {};
-    snprintf(version_text, sizeof(version_text), "VERSION %s", NRL_FIRMWARE_VERSION);
-    lv_obj_t *version = makeLabel(scr, &lv_font_montserrat_20, kColorCallIdle);
+    snprintf(version_text, sizeof(version_text), menuText("VERSION %s", "版本 %s"), NRL_FIRMWARE_VERSION);
+    lv_obj_t *version = makeLabel(scr, menuFont(&lv_font_montserrat_20), kColorCallIdle);
     lv_obj_set_width(version, kWidth);
     lv_obj_set_style_text_align(version, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(version, LV_ALIGN_TOP_MID, 0, 72);
@@ -1154,7 +1242,7 @@ void buildAboutMenu()
     lv_obj_set_style_text_align(board, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(board, LV_ALIGN_TOP_MID, 0, 108);
     lv_label_set_text(board, "GEZIPAI");
-    menuFooter(scr, "PTT BACK");
+    menuFooter(scr, menuText("PTT BACK", "PTT返回"));
 }
 
 void buildOtaMenu()
@@ -1163,35 +1251,37 @@ void buildOtaMenu()
     const NrlOtaStatus *ota = otaUiSnapshot();
     if (ota == nullptr) {
         s_menu_index = 0u;
-        menuRow(scr, 1, "< BACK / OTA", true);
-        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_16, kColorWeak);
+        menuRow(scr, 1, menuText("< BACK / OTA", "< 返回 / OTA"), true);
+        lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_16), kColorWeak);
         lv_obj_set_width(lbl, kWidth - 20);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 64);
-        lv_label_set_text(lbl, "OTA STATUS UNAVAILABLE");
-        menuFooter(scr, "PTT BACK");
+        lv_label_set_text(lbl, menuText("OTA STATUS UNAVAILABLE", "OTA状态不可用"));
+        menuFooter(scr, menuText("PTT BACK", "PTT返回"));
         return;
     }
     if (s_menu_index > ota->release_count) s_menu_index = 0u;
-    menuRow(scr, 1, "< BACK / OTA", s_menu_index == 0u);
+    menuRow(scr, 1, menuText("< BACK / OTA", "< 返回 / OTA"), s_menu_index == 0u);
 
     if (ota->checking || s_menu_ota_requested) {
-        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_20, kColorApWarn);
+        lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_20), kColorApWarn);
         lv_obj_set_width(lbl, kWidth);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 64);
-        lv_label_set_text(lbl, ota->checking ? "CHECKING..." : "CHECK REQUESTED...");
+        lv_label_set_text(lbl, ota->checking
+            ? menuText("CHECKING...", "正在检查...")
+            : menuText("CHECK REQUESTED...", "已请求检查..."));
     } else if (ota->updating) {
-        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_20, kColorTx);
+        lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_20), kColorTx);
         lv_obj_set_width(lbl, kWidth);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 54);
         char progress[32] = {};
         if (ota->update_size > 0u) {
-            snprintf(progress, sizeof(progress), "INSTALLING %u%%",
+            snprintf(progress, sizeof(progress), menuText("INSTALLING %u%%", "正在安装 %u%%"),
                      static_cast<unsigned>(ota->update_percent));
         } else {
-            snprintf(progress, sizeof(progress), "INSTALLING...");
+            snprintf(progress, sizeof(progress), "%s", menuText("INSTALLING...", "正在安装..."));
         }
         lv_label_set_text(lbl, progress);
         if (ota->update_size > 0u) {
@@ -1203,11 +1293,12 @@ void buildOtaMenu()
             lv_obj_set_style_bg_color(bar, lv_color_hex(kColorTx), LV_PART_INDICATOR);
         }
     } else if (ota->release_count == 0u) {
-        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_16, kColorSub);
+        lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_16), kColorSub);
         lv_obj_set_width(lbl, kWidth - 20);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 58);
-        lv_label_set_text(lbl, ota->last_error[0] ? ota->last_error : "NO VERSIONS FOUND");
+        lv_label_set_text(lbl, ota->last_error[0] ? ota->last_error
+                                                  : menuText("NO VERSIONS FOUND", "未找到版本"));
     } else {
         constexpr size_t kVisibleVersions = 4u;
         size_t selected_release = s_menu_index > 0u ? s_menu_index - 1u : 0u;
@@ -1224,7 +1315,7 @@ void buildOtaMenu()
             snprintf(version, sizeof(version), "%.36s%s",
                      ota->releases[i].version,
                      strcmp(ota->releases[i].version, NRL_FIRMWARE_VERSION) == 0
-                         ? "  CURRENT"
+                         ? menuText("  CURRENT", "  当前")
                          : "");
             menuRow(scr, 29 + static_cast<int>(i - start) * 27, version,
                     s_menu_index == i + 1u);
@@ -1236,9 +1327,9 @@ void buildOtaMenu()
     } else if (s_menu_message[0] != '\0') {
         menuFooter(scr, s_menu_message, kColorApWarn);
     } else if (ota->release_count > 0u) {
-        menuFooter(scr, "SELECT VERSION   PTT INSTALL");
+        menuFooter(scr, menuText("SELECT VERSION   PTT INSTALL", "选择版本  PTT安装"));
     } else {
-        menuFooter(scr, "PTT BACK");
+        menuFooter(scr, menuText("PTT BACK", "PTT返回"));
     }
 }
 
@@ -1246,11 +1337,11 @@ void buildAprsMenu()
 {
     lv_obj_t *scr = prepareContent();
     const char *items[] = {
-        "< BACK / APRS",
-        "APRS SETTINGS",
-        "STATION LIST",
-        "GPS LIVE INFO",
-        "SEND BEACON NOW",
+        menuText("< BACK / APRS", "< 返回 / APRS"),
+        menuText("APRS SETTINGS", "APRS设置"),
+        menuText("STATION LIST", "电台列表"),
+        menuText("GPS LIVE INFO", "GPS实时信息"),
+        menuText("SEND BEACON NOW", "立即发送信标"),
     };
     for (size_t i = 0; i < 5u; ++i) {
         menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
@@ -1276,19 +1367,22 @@ void buildAprsSettingsMenu()
     constexpr size_t kVisibleRows = 5u;
     const size_t start = menuWindowStart(kItemCount, kVisibleRows);
     const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
-    const char *names[] = {"MASTER", "APRS-IS", "RF TX", "RF RX", "AUTO PERIOD", "FIXED POS"};
+    const char *names[] = {
+        menuText("MASTER", "总开关"), "APRS-IS", menuText("RF TX", "射频发送"),
+        menuText("RF RX", "射频接收"), menuText("AUTO PERIOD", "自动周期"),
+        menuText("FIXED POS", "固定位置")};
     const bool values[] = {cfg.enabled, cfg.net_enabled, cfg.rf_tx_enabled,
                            cfg.rf_rx_enabled, cfg.auto_interval,
                            cfg.fixed_beacon_without_gps};
     for (size_t item = start; item < end; ++item) {
         char line[40];
         if (item == 0u) {
-            snprintf(line, sizeof(line), "< BACK / APRS SET");
+            snprintf(line, sizeof(line), "%s", menuText("< BACK / APRS SET", "< 返回 / APRS设置"));
         } else if (item <= 6u) {
             snprintf(line, sizeof(line), "%s: %s", names[item - 1u],
-                     values[item - 1u] ? "ON" : "OFF");
+                     values[item - 1u] ? menuText("ON", "开") : menuText("OFF", "关"));
         } else if (item == 7u) {
-            snprintf(line, sizeof(line), "PERIOD: %us",
+            snprintf(line, sizeof(line), menuText("PERIOD: %us", "周期: %u秒"),
                      static_cast<unsigned>(cfg.beacon_interval_s));
         } else {
             snprintf(line, sizeof(line), "SSID: %u", static_cast<unsigned>(cfg.ssid));
@@ -1297,7 +1391,8 @@ void buildAprsSettingsMenu()
                 s_menu_index == item);
     }
     char footer[40];
-    snprintf(footer, sizeof(footer), "ITEM %u/%u  PTT TOGGLE/NEXT",
+    snprintf(footer, sizeof(footer), menuText("ITEM %u/%u  PTT TOGGLE/NEXT",
+                                              "项目 %u/%u  PTT切换"),
              static_cast<unsigned>(s_menu_index + 1u),
              static_cast<unsigned>(kItemCount));
     menuStatusFooter(scr, footer);
@@ -1308,18 +1403,18 @@ void buildAprsSettingsMenu()
 void buildAprsListMenu()
 {
     lv_obj_t *scr = prepareContent();
-    menuRow(scr, 1, "< BACK / STATIONS", true);
+    menuRow(scr, 1, menuText("< BACK / STATIONS", "< 返回 / 电台列表"), true);
 
     AprsStationInfo stations[8];
     const size_t count = APRS_SERVICE_GetStations(stations, 8);
     if (!APRS_SERVICE_IsEnabled()) {
-        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, kColorSub);
+        lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_14), kColorSub);
         lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 60);
-        lv_label_set_text(lbl, "APRS OFF (web/AT+APRS=ON)");
+        lv_label_set_text(lbl, menuText("APRS OFF (web/AT+APRS=ON)", "APRS未开启"));
     } else if (count == 0u) {
-        lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, kColorSub);
+        lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_14), kColorSub);
         lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 60);
-        lv_label_set_text(lbl, "NO STATIONS HEARD YET");
+        lv_label_set_text(lbl, menuText("NO STATIONS HEARD YET", "尚未收到电台"));
     }
     for (size_t i = 0; i < count; ++i) {
         const AprsStationInfo &s = stations[i];
@@ -1335,7 +1430,7 @@ void buildAprsListMenu()
                  s.name, dist, s.via_rf ? "RF" : "IS", age);
         menuRow(scr, 25 + static_cast<int>(i) * 22, line, false);
     }
-    menuFooter(scr, "PTT BACK");
+    menuFooter(scr, menuText("PTT BACK", "PTT返回"));
 }
 
 void gpsInfoLine(lv_obj_t *scr, const int y, const char *text, const uint32_t color)
@@ -1351,7 +1446,7 @@ void gpsInfoLine(lv_obj_t *scr, const int y, const char *text, const uint32_t co
 void buildGpsInfoMenu()
 {
     lv_obj_t *scr = prepareContent();
-    menuRow(scr, 1, "< BACK / GPS", true);
+    menuRow(scr, 1, menuText("< BACK / GPS", "< 返回 / GPS"), true);
 
     AprsGpsInfo gps{};
     APRS_SERVICE_GetGpsInfo(&gps);
@@ -1421,7 +1516,7 @@ void buildGpsInfoMenu()
                  static_cast<unsigned>(gps.satellite_detail_count));
     }
     gpsInfoLine(scr, 133, line, kColorSub);
-    menuFooter(scr, "PTT BACK");
+    menuFooter(scr, menuText("PTT BACK", "PTT返回"));
 }
 
 bool signalingRouteEnabled(const SignalingConfig &cfg, bool mdc, size_t index)
@@ -1441,10 +1536,13 @@ bool signalingRouteEnabled(const SignalingConfig &cfg, bool mdc, size_t index)
 void buildSignalingMenu()
 {
     lv_obj_t *scr = prepareContent();
-    const char *items[] = {"< BACK / SIGNAL", "MDC1200 SETTINGS", "DTMF SETTINGS",
-                           "CTCSS RX SETTINGS"};
+    const char *items[] = {
+        menuText("< BACK / SIGNAL", "< 返回 / 信令"),
+        menuText("MDC1200 SETTINGS", "MDC1200设置"),
+        menuText("DTMF SETTINGS", "DTMF设置"),
+        menuText("CTCSS RX SETTINGS", "CTCSS接收设置")};
     for (size_t i = 0; i < 4u; ++i) menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
-    menuStatusFooter(scr, "VOL+/- SELECT   PTT OK");
+    menuStatusFooter(scr, menuText("VOL+/- SELECT   PTT OK", "音量+/- 选择  PTT确认"));
 }
 
 void buildCtcssMenu()
@@ -1452,13 +1550,15 @@ void buildCtcssMenu()
     lv_obj_t *scr = prepareContent();
     SignalingConfig cfg{};
     SIGNALING_GetConfig(&cfg);
-    menuRow(scr, 1, "< BACK / CTCSS", s_menu_index == 0u);
+    menuRow(scr, 1, menuText("< BACK / CTCSS", "< 返回 / CTCSS"), s_menu_index == 0u);
     char line[40];
-    snprintf(line, sizeof(line), "MIC RX: %s", cfg.ctcss_rx_mic ? "ON" : "OFF");
+    snprintf(line, sizeof(line), menuText("MIC RX: %s", "麦克风接收: %s"),
+             cfg.ctcss_rx_mic ? menuText("ON", "开") : menuText("OFF", "关"));
     menuRow(scr, 35, line, s_menu_index == 1u);
-    snprintf(line, sizeof(line), "NRL RX: %s", cfg.ctcss_rx_nrl ? "ON" : "OFF");
+    snprintf(line, sizeof(line), menuText("NRL RX: %s", "NRL接收: %s"),
+             cfg.ctcss_rx_nrl ? menuText("ON", "开") : menuText("OFF", "关"));
     menuRow(scr, 69, line, s_menu_index == 2u);
-    menuStatusFooter(scr, "PTT TOGGLE");
+    menuStatusFooter(scr, menuText("PTT TOGGLE", "PTT切换"));
 }
 
 void buildProtocolMenu(bool mdc)
@@ -1466,26 +1566,32 @@ void buildProtocolMenu(bool mdc)
     lv_obj_t *scr = prepareContent();
     SignalingConfig cfg{};
     SIGNALING_GetConfig(&cfg);
-    menuRow(scr, 1, mdc ? "< BACK / MDC1200" : "< BACK / DTMF", s_menu_index == 0u);
-    static const char *names[] = {"MIC RX", "NRL RX", "NRL TX", "SPEAKER TX"};
+    menuRow(scr, 1, mdc
+        ? menuText("< BACK / MDC1200", "< 返回 / MDC1200")
+        : menuText("< BACK / DTMF", "< 返回 / DTMF"), s_menu_index == 0u);
+    const char *names[] = {
+        menuText("MIC RX", "麦克风接收"), menuText("NRL RX", "NRL接收"),
+        menuText("NRL TX", "NRL发送"), menuText("SPEAKER TX", "扬声器发送")};
     for (size_t i = 0; i < 4u; ++i) {
         char line[40];
-        snprintf(line, sizeof(line), "%s: %s", names[i], signalingRouteEnabled(cfg, mdc, i) ? "ON" : "OFF");
+        snprintf(line, sizeof(line), "%s: %s", names[i], signalingRouteEnabled(cfg, mdc, i)
+            ? menuText("ON", "开") : menuText("OFF", "关"));
         menuRow(scr, 29 + static_cast<int>(i) * 28, line, s_menu_index == i + 1u);
     }
     char footer[48];
     if (mdc) {
-        snprintf(footer, sizeof(footer), "ID:%04X  PTT TOGGLE",
+        snprintf(footer, sizeof(footer), menuText("ID:%04X  PTT TOGGLE", "ID:%04X  PTT切换"),
                  static_cast<unsigned>(cfg.mdc_unit_id));
     } else {
-        snprintf(footer, sizeof(footer), "ID:%.16s  PTT TOGGLE", cfg.dtmf_digits);
+        snprintf(footer, sizeof(footer), menuText("ID:%.16s  PTT TOGGLE", "ID:%.16s  PTT切换"), cfg.dtmf_digits);
     }
     menuStatusFooter(scr, footer);
 }
 
 void buildMenuUi()
 {
-    if (s_menu_page == MenuPage::About) buildAboutMenu();
+    if (s_menu_page == MenuPage::Language) buildLanguageMenu();
+    else if (s_menu_page == MenuPage::About) buildAboutMenu();
     else if (s_menu_page == MenuPage::Ota) buildOtaMenu();
     else if (s_menu_page == MenuPage::Aprs) buildAprsMenu();
     else if (s_menu_page == MenuPage::AprsSettings) buildAprsSettingsMenu();
@@ -2711,7 +2817,8 @@ void refreshOtaNotice()
 
 size_t menuItemCount()
 {
-    if (s_menu_page == MenuPage::Main) return 8u;
+    if (s_menu_page == MenuPage::Main) return 9u;
+    if (s_menu_page == MenuPage::Language) return 3u;
     if (s_menu_page == MenuPage::About) return 1u;
     if (s_menu_page == MenuPage::Aprs) return 5u;
     if (s_menu_page == MenuPage::AprsSettings) return 8u;
@@ -2795,6 +2902,11 @@ void confirmMainMenu()
             buildMenuUi();
             break;
         case 7:
+            s_menu_page = MenuPage::Language;
+            s_menu_index = 0u;
+            buildMenuUi();
+            break;
+        case 8:
             s_menu_page = MenuPage::About;
             s_menu_index = 0u;
             buildMenuUi();
@@ -2802,6 +2914,18 @@ void confirmMainMenu()
         default:
             break;
     }
+}
+
+void confirmLanguageMenu()
+{
+    if (s_menu_index == 0u) {
+        activateMainMenu();
+        return;
+    }
+    s_menu_chinese = s_menu_index == 1u;
+    saveMenuLanguage();
+    s_menu_index = 0u;
+    activateMainMenu();
 }
 
 void confirmSignalingMenu()
@@ -3001,6 +3125,7 @@ void processMenuInput(uint32_t now)
     if (s_menu_confirm_pending != 0u) {
         s_menu_confirm_pending = 0u;
         if (s_menu_page == MenuPage::Main) confirmMainMenu();
+        else if (s_menu_page == MenuPage::Language) confirmLanguageMenu();
         else if (s_menu_page == MenuPage::About) activateMainMenu();
         else if (s_menu_page == MenuPage::Aprs) confirmAprsMenu();
         else if (s_menu_page == MenuPage::AprsSettings) confirmAprsSettingsMenu();
@@ -3122,6 +3247,7 @@ extern "C" void Display_Init(void)
     }
     s_font_aprs_16 = lv_font_montserrat_16;
     s_font_aprs_16.fallback = &lv_font_cjk_16;
+    loadMenuLanguage();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     s_font_music_20 = lv_font_montserrat_20;
     s_font_music_20.fallback = &lv_font_cjk_16;
