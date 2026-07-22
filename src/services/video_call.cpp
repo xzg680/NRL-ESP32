@@ -5,10 +5,10 @@
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
 
 #include "lib/nrl_audio_bridge.h"
+#include "lib/nrl_psram.h"
 
 #include "bsp/camera.h"
 
-#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -38,7 +38,8 @@ static uint16_t s_tx_seq = 0;
 // can render the local camera without a second sensor stream. Copy-out under
 // the lock keeps the decode task tear-free at the cost of one ~10-30 KB
 // PSRAM memcpy per frame (negligible against the 200 ms frame interval).
-static uint8_t *s_local = nullptr;
+NRL_PSRAM_BSS static uint8_t s_local_storage[kMaxJpegBytes];
+static uint8_t *s_local = s_local_storage;
 static SemaphoreHandle_t s_local_lock = nullptr;
 static size_t s_local_bytes = 0;
 static volatile uint32_t s_local_seq = 0;
@@ -46,8 +47,10 @@ static volatile uint32_t s_local_seq = 0;
 // ---- RX ---------------------------------------------------------------------
 // Double buffer: fragments assemble into s_assm; a completed frame is copied
 // under the mutex into s_ready for the UI to decode at its own pace.
-static uint8_t *s_assm = nullptr;
-static uint8_t *s_ready = nullptr;
+NRL_PSRAM_BSS static uint8_t s_assm_storage[kMaxJpegBytes];
+NRL_PSRAM_BSS static uint8_t s_ready_storage[kMaxJpegBytes];
+static uint8_t *s_assm = s_assm_storage;
+static uint8_t *s_ready = s_ready_storage;
 static SemaphoreHandle_t s_ready_lock = nullptr;
 static uint16_t s_assm_seq = 0;
 static uint8_t s_assm_cnt = 0;
@@ -177,17 +180,7 @@ extern "C" void VIDEO_Init(void)
     if (s_local_lock == nullptr) {
         s_local_lock = xSemaphoreCreateMutex();
     }
-    if (s_assm == nullptr) {
-        s_assm = static_cast<uint8_t *>(heap_caps_malloc(kMaxJpegBytes, MALLOC_CAP_SPIRAM));
-    }
-    if (s_ready == nullptr) {
-        s_ready = static_cast<uint8_t *>(heap_caps_malloc(kMaxJpegBytes, MALLOC_CAP_SPIRAM));
-    }
-    if (s_local == nullptr) {
-        s_local = static_cast<uint8_t *>(heap_caps_malloc(kMaxJpegBytes, MALLOC_CAP_SPIRAM));
-    }
-    if (s_assm == nullptr || s_ready == nullptr || s_local == nullptr ||
-        s_ready_lock == nullptr || s_local_lock == nullptr) {
+    if (s_ready_lock == nullptr || s_local_lock == nullptr) {
         ESP_LOGE(TAG, "rx buffer alloc failed");
         return;
     }

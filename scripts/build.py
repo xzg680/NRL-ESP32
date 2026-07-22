@@ -170,7 +170,9 @@ def main():
     python = idf_python()
     build_env = idf_environment(idf_root, python)
 
-    build_dir = f"build/{board}"
+    # Optional isolated build directory for clean verification while a serial
+    # monitor still holds build/<board>/log or ELF files open on Windows.
+    build_dir = os.environ.get("NRL_BUILD_DIR", f"build/{board}")
     # Invoke idf.py through the current Python with shell=False: this resolves
     # idf.py cross-platform without relying on a PATH wrapper, and keeps the
     # semicolon-separated SDKCONFIG_DEFAULTS list intact (a Windows shell would

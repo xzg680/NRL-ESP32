@@ -8,10 +8,11 @@
 #include "driver/es8389.h"
 #include "lib/nrl_audio_bridge.h"
 #include "lib/nrl_bt_hfp.h"
+#include "lib/nrl_psram.h"
 #include "media/media_decoder.h"
+#include "services/smb_vfs.h"
 #include "services/storage_service.h"
 
-#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -28,6 +29,9 @@ namespace {
 
 constexpr size_t kMaxPathLen = 256; // long enough for net-radio URLs
 constexpr uint32_t kVoiceResumeDelayMs = 30000u;
+constexpr size_t kStereoScratchSamples = 64u * 1024u; // 128 KB
+constexpr size_t kNetScratchSamples = 32u * 1024u;    // 64 KB
+constexpr size_t kBtScratchSamples = 128u * 1024u;    // 256 KB
 
 static bool speaker_hifi_acquire(const uint32_t sample_rate_hz,
                                  const uint8_t bits_per_sample,
@@ -80,20 +84,23 @@ static MediaTrackInfo s_track_info = {};
 
 // Mono tracks are expanded to stereo before the codec: always opening the
 // I2S/codec 2-channel avoids per-format bring-up risk on the slot config.
-static int16_t *s_stereo_buffer = nullptr;
-static size_t s_stereo_capacity = 0;
+NRL_PSRAM_BSS static int16_t s_stereo_storage[kStereoScratchSamples];
+static int16_t *s_stereo_buffer = s_stereo_storage;
+static size_t s_stereo_capacity = sizeof(s_stereo_storage);
 static volatile int s_target = MUSIC_TARGET_LOCAL;
 
 // 8 kHz mono scratch for the network branch of the fan-out.
-static int16_t *s_net_buffer = nullptr;
-static size_t s_net_capacity = 0;
+NRL_PSRAM_BSS static int16_t s_net_storage[kNetScratchSamples];
+static int16_t *s_net_buffer = s_net_storage;
+static size_t s_net_capacity = kNetScratchSamples;
 
 // Local output device (speaker hi-fi path vs BT headset A2DP).
 static volatile int s_output = MUSIC_OUTPUT_SPEAKER;
 
 // 44.1 kHz stereo scratch + linear resampler state for the A2DP branch.
-static int16_t *s_bt_buffer = nullptr;
-static size_t s_bt_capacity = 0; // in interleaved samples
+NRL_PSRAM_BSS static int16_t s_bt_storage[kBtScratchSamples];
+static int16_t *s_bt_buffer = s_bt_storage;
+static size_t s_bt_capacity = kBtScratchSamples; // in interleaved samples
 
 struct BtResampler {
     float pos;
@@ -153,21 +160,6 @@ static size_t bt_resampler_process(BtResampler *rs, const int16_t *in, const siz
     return produced;
 }
 
-static bool ensure_bt_capacity(const size_t samples)
-{
-    if (s_bt_capacity >= samples) {
-        return true;
-    }
-    int16_t *grown = static_cast<int16_t *>(
-        heap_caps_realloc(s_bt_buffer, samples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-    if (grown == nullptr) {
-        return false;
-    }
-    s_bt_buffer = grown;
-    s_bt_capacity = samples;
-    return true;
-}
-
 // Playback target + net-radio station persist in NVS so the web portal and
 // LCD UI survive a reboot (the AT path shares the same setters).
 constexpr const char *kMediaNvsNamespace = "media";
@@ -211,20 +203,6 @@ static void media_config_save(void)
     CONFIG_NOTIFY_Bump();
 }
 
-static bool ensure_stereo_capacity(const size_t bytes)
-{
-    if (s_stereo_capacity >= bytes) {
-        return true;
-    }
-    int16_t *grown = static_cast<int16_t *>(heap_caps_realloc(s_stereo_buffer, bytes, MALLOC_CAP_SPIRAM));
-    if (grown == nullptr) {
-        return false;
-    }
-    s_stereo_buffer = grown;
-    s_stereo_capacity = bytes;
-    return true;
-}
-
 static size_t pcm24le_to_pcm32le_stereo(const uint8_t *src, const size_t bytes, int32_t *dst)
 {
     if (src == nullptr || dst == nullptr) {
@@ -244,22 +222,15 @@ static size_t pcm24le_to_pcm32le_stereo(const uint8_t *src, const size_t bytes, 
     return samples * sizeof(int32_t);
 }
 
-static bool ensure_net_capacity(const size_t samples)
-{
-    if (s_net_capacity >= samples) {
-        return true;
-    }
-    int16_t *grown = static_cast<int16_t *>(
-        heap_caps_realloc(s_net_buffer, samples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-    if (grown == nullptr) {
-        return false;
-    }
-    s_net_buffer = grown;
-    s_net_capacity = samples;
-    return true;
-}
-
 static volatile MusicTrackEndCb_t s_track_end_cb = nullptr;
+
+static bool is_smb_path(const char *path)
+{
+    constexpr size_t kMountLen = sizeof(SMB_VFS_MOUNT_POINT) - 1u;
+    return path != nullptr &&
+           strncmp(path, SMB_VFS_MOUNT_POINT, kMountLen) == 0 &&
+           (path[kMountLen] == '/' || path[kMountLen] == '\0');
+}
 
 // Stream format of the current track for the UI's format line; written by
 // the player task when the first frame decodes, cleared when it exits.
@@ -286,8 +257,14 @@ static bool media_focus_blocks_playback()
 static void player_task(void *)
 {
     // Tags first (cheap header/tail reads), so the UI has title/cover as
-    // soon as -- or before -- the first PCM reaches the speaker.
-    (void)MEDIA_META_Read(s_current_path, &s_track_info, true);
+    // soon as -- or before -- the first PCM reaches the speaker. SMB is the
+    // exception: its many small seeks are expensive on the embedded client
+    // and delayed first sound by several seconds. Start network playback
+    // immediately; the UI already falls back to the filename for its title.
+    const bool smb_track = is_smb_path(s_current_path);
+    if (!smb_track) {
+        (void)MEDIA_META_Read(s_current_path, &s_track_info, true);
+    }
 
     // Playback target is latched per track (docs/architecture.md nanny
     // 三档切换): local hi-fi, NRL network uplink, or a fan-out of both --
@@ -306,7 +283,7 @@ static void player_task(void *)
     // decode loop would free-run; throttle to real time by the 8 kHz clock.
     int64_t net_start_us = 0;
     uint64_t net_sent_samples = 0;
-    MediaDecoder *decoder = MEDIA_DECODER_Open(s_current_path);
+    MediaDecoder *decoder = MEDIA_DECODER_Open(s_current_path, &s_stop_requested);
     const bool live_stream = strncmp(s_current_path, "http://", 7) == 0 ||
                              strncmp(s_current_path, "https://", 8) == 0;
     bool media_uplink_active = false;
@@ -381,7 +358,7 @@ static void player_task(void *)
 
         if (s_focus_suspended) {
             if (live_stream) {
-                decoder = MEDIA_DECODER_Open(s_current_path);
+                decoder = MEDIA_DECODER_Open(s_current_path, &s_stop_requested);
                 if (decoder == nullptr) {
                     ESP_LOGE(TAG, "voice focus: stream reconnect failed: %s", s_current_path);
                     break;
@@ -466,17 +443,19 @@ static void player_task(void *)
 
         if (to_net) {
             const size_t in_frames = bytes / (sizeof(int16_t) * info.channels);
-            const size_t out_max = (in_frames * 8000u) / info.sample_rate_hz + 8u;
-            if (!ensure_net_capacity(out_max)) {
-                ESP_LOGE(TAG, "net buffer alloc failed");
-                break;
-            }
-            const size_t out_n = VOICE_RESAMPLER_Process(
-                &resampler, reinterpret_cast<const int16_t *>(pcm), in_frames,
-                s_net_buffer, s_net_capacity);
-            if (out_n > 0u) {
-                NRLAudioBridge_SendMediaUplink(s_net_buffer, out_n);
-                net_sent_samples += out_n;
+            const int16_t *input = reinterpret_cast<const int16_t *>(pcm);
+            constexpr size_t kInputChunkFrames = 8192u;
+            for (size_t offset = 0u; offset < in_frames;) {
+                const size_t take = (in_frames - offset < kInputChunkFrames)
+                                        ? in_frames - offset : kInputChunkFrames;
+                const size_t out_n = VOICE_RESAMPLER_Process(
+                    &resampler, input + offset * info.channels, take,
+                    s_net_buffer, s_net_capacity);
+                if (out_n > 0u) {
+                    NRLAudioBridge_SendMediaUplink(s_net_buffer, out_n);
+                    net_sent_samples += out_n;
+                }
+                offset += take;
             }
             if (!to_local) {
                 // Throttle to real time: stay ~100 ms ahead of the 8 kHz clock.
@@ -491,31 +470,41 @@ static void player_task(void *)
 
         if (to_local && bt_active) {
             const size_t in_frames = bytes / (sizeof(int16_t) * info.channels);
-            const size_t out_max = static_cast<size_t>(in_frames * 44100ull / info.sample_rate_hz) + 8u;
-            if (!ensure_bt_capacity(out_max * 2u)) {
-                ESP_LOGE(TAG, "bt buffer alloc failed");
-                break;
+            const int16_t *input = reinterpret_cast<const int16_t *>(pcm);
+            constexpr size_t kInputChunkFrames = 4096u;
+            bool bt_failed = false;
+            for (size_t offset = 0u; offset < in_frames;) {
+                const size_t take = (in_frames - offset < kInputChunkFrames)
+                                        ? in_frames - offset : kInputChunkFrames;
+                const size_t out_frames = bt_resampler_process(
+                    &bt_resampler, input + offset * info.channels, take,
+                    s_bt_buffer, s_bt_capacity / 2u);
+                if (out_frames > 0u &&
+                    NRL_BtA2dp_Write(s_bt_buffer, out_frames) == 0u && !NRL_BtA2dp_IsStreaming()) {
+                    ESP_LOGW(TAG, "A2DP stream lost, stopping track");
+                    bt_failed = true;
+                    break;
+                }
+                offset += take;
             }
-            const size_t out_frames = bt_resampler_process(
-                &bt_resampler, reinterpret_cast<const int16_t *>(pcm), in_frames,
-                s_bt_buffer, out_max);
-            if (out_frames > 0u &&
-                NRL_BtA2dp_Write(s_bt_buffer, out_frames) == 0u && !NRL_BtA2dp_IsStreaming()) {
-                ESP_LOGW(TAG, "A2DP stream lost, stopping track");
-                break;
-            }
+            if (bt_failed) break;
         } else if (to_local) {
             if (info.bits_per_sample == 24u && info.channels == 2u) {
-                const size_t out_bytes = (bytes / 3u) * sizeof(int32_t);
-                if (!ensure_stereo_capacity(out_bytes)) {
-                    ESP_LOGE(TAG, "pcm32 buffer alloc failed");
-                    break;
+                const size_t frames = bytes / 6u;
+                const size_t chunk_frames = s_stereo_capacity / (2u * sizeof(int32_t));
+                bool write_failed = false;
+                for (size_t offset = 0u; offset < frames;) {
+                    const size_t take = (frames - offset < chunk_frames) ? frames - offset : chunk_frames;
+                    const size_t converted = pcm24le_to_pcm32le_stereo(
+                        pcm + offset * 6u, take * 6u,
+                        reinterpret_cast<int32_t *>(s_stereo_buffer));
+                    if (converted == 0u || !speaker_hifi_write(s_stereo_buffer, converted)) {
+                        write_failed = true;
+                        break;
+                    }
+                    offset += take;
                 }
-                const size_t converted = pcm24le_to_pcm32le_stereo(
-                    pcm, bytes, reinterpret_cast<int32_t *>(s_stereo_buffer));
-                if (converted == 0u || !speaker_hifi_write(s_stereo_buffer, converted)) {
-                    break;
-                }
+                if (write_failed) break;
                 continue;
             }
             if (info.channels == 2u) {
@@ -524,18 +513,22 @@ static void player_task(void *)
                 }
             } else {
                 const size_t samples = bytes / sizeof(int16_t);
-                if (!ensure_stereo_capacity(samples * 2u * sizeof(int16_t))) {
-                    ESP_LOGE(TAG, "stereo buffer alloc failed");
-                    break;
-                }
                 const int16_t *mono = reinterpret_cast<const int16_t *>(pcm);
-                for (size_t i = 0; i < samples; ++i) {
-                    s_stereo_buffer[i * 2u] = mono[i];
-                    s_stereo_buffer[i * 2u + 1u] = mono[i];
+                const size_t chunk_samples = s_stereo_capacity / (2u * sizeof(int16_t));
+                bool write_failed = false;
+                for (size_t offset = 0u; offset < samples;) {
+                    const size_t take = (samples - offset < chunk_samples) ? samples - offset : chunk_samples;
+                    for (size_t i = 0u; i < take; ++i) {
+                        s_stereo_buffer[i * 2u] = mono[offset + i];
+                        s_stereo_buffer[i * 2u + 1u] = mono[offset + i];
+                    }
+                    if (!speaker_hifi_write(s_stereo_buffer, take * 2u * sizeof(int16_t))) {
+                        write_failed = true;
+                        break;
+                    }
+                    offset += take;
                 }
-                if (!speaker_hifi_write(s_stereo_buffer, samples * 2u * sizeof(int16_t))) {
-                    break;
-                }
+                if (write_failed) break;
             }
         }
     }
@@ -601,9 +594,7 @@ extern "C" bool MUSIC_PlayFile(const char *path)
     // the single shared radio (SMB2 I/O timeouts). Refuse network tracks while BT
     // is on -- covers auto-advance / prev-next / AT, not just the UI. Local
     // SD/USB playback is unaffected. (The UI also hides SMB tracks while BT is on.)
-    const char *smb_mp = STORAGE_SmbMountPoint();
-    if (smb_mp != nullptr && smb_mp[0] != '\0' &&
-        strncmp(path, smb_mp, strlen(smb_mp)) == 0 && NRL_BtHfp_IsEnabled()) {
+    if (is_smb_path(path) && NRL_BtHfp_IsEnabled()) {
         ESP_LOGW(TAG, "refusing SMB track while Bluetooth is on (radio contention): %s", path);
         return false;
     }

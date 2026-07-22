@@ -12,11 +12,12 @@
 #include "lib/aprs/parse_aprs.h"
 #include "lib/aprs/pbuf.h"
 #include "lib/nrl_version.h"
+#include "lib/nrl_psram.h"
 #include "lib/nrl_wifi.h"
 #include "services/config_notify.h"
 
-#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
@@ -117,7 +118,8 @@ AprsConfig s_cfg = {};
 SemaphoreHandle_t s_cfg_mutex = nullptr;
 SemaphoreHandle_t s_station_mutex = nullptr;
 
-StationRec *s_stations = nullptr; // PSRAM, kStationCount entries
+NRL_PSRAM_BSS StationRec s_station_storage[kStationCount];
+StationRec *s_stations = s_station_storage;
 uint32_t s_station_revision = 0;
 
 TaskHandle_t s_task = nullptr;
@@ -154,7 +156,8 @@ char s_nmea_line[128];
 size_t s_nmea_line_len = 0;
 
 // RF RX PCM ring (producer: audio task via router sink, consumer: aprs task)
-int16_t *s_rx_ring = nullptr; // PSRAM
+NRL_PSRAM_BSS int16_t s_rx_ring_storage[kRxRingSamples];
+int16_t *s_rx_ring = s_rx_ring_storage;
 volatile size_t s_rx_head = 0;
 volatile size_t s_rx_tail = 0;
 // 16000 -> 9600 linear-interpolation resampler state (Q16 phase)
@@ -1594,14 +1597,7 @@ extern "C" void APRS_SERVICE_Init(void)
         ESP_LOGW(TAG, "GPS UART2 initialization failed; using default position");
     }
 
-    s_stations = static_cast<StationRec *>(
-        heap_caps_calloc(kStationCount, sizeof(StationRec), MALLOC_CAP_SPIRAM));
-    s_rx_ring = static_cast<int16_t *>(
-        heap_caps_malloc(kRxRingSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-    if (s_stations == nullptr || s_rx_ring == nullptr) {
-        ESP_LOGE(TAG, "PSRAM allocation failed, APRS disabled");
-        return;
-    }
+    memset(s_stations, 0, sizeof(s_station_storage));
 
     ModemConfig.modem = MODEM_1200;
     ModemConfig.flatAudioIn = 0;

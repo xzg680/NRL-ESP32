@@ -30,6 +30,10 @@ bool SMB_VFS_Mounted(void);
 // entering another folder does not wait for the previous large folder.
 void SMB_VFS_CancelDirectoryScan(void);
 
+// Interrupt an in-progress SMB file read. The current connection is retired
+// safely and reconnects on the next open; used to stop media immediately.
+void SMB_VFS_CancelFileRead(void);
+
 #ifdef __cplusplus
 }
 #endif

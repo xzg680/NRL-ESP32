@@ -24,8 +24,11 @@ typedef struct {
     uint8_t channels;
 } MediaDecoderInfo;
 
-// Open `path` and detect its format. Returns NULL on unsupported/missing.
-MediaDecoder *MEDIA_DECODER_Open(const char *path);
+// Open `path` and detect its format. `stop_requested` may be NULL; when
+// supplied, blocking prebuffer/read loops return promptly after it becomes
+// true. Returns NULL on unsupported/missing.
+MediaDecoder *MEDIA_DECODER_Open(const char *path,
+                                 const volatile bool *stop_requested);
 
 // Decode the next chunk. On success *pcm_out/*bytes_out reference an
 // internal buffer valid until the next call. Returns:

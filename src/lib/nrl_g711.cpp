@@ -1,12 +1,8 @@
 #include "nrl_g711.h"
-
-#include <esp_heap_caps.h>
-#include <esp_log.h>
+#include "nrl_psram.h"
 
 #include <stddef.h>
 #include <stdint.h>
-
-static const char *TAG = "G711";
 
 namespace {
 
@@ -26,7 +22,7 @@ int16_t s_decode_table[256];
 // PSRAM access goes through the cache (~2 cycle hit, ~30 cycle miss). At
 // 8 kHz audio, the per-sample cost is well under 0.01 % CPU even with a
 // pessimistic miss rate.
-uint8_t *s_encode_table = nullptr;
+NRL_PSRAM_BSS uint8_t s_encode_table[65536];
 
 static uint8_t linearToALawSlow(const int16_t pcm)
 {
@@ -87,24 +83,11 @@ extern "C" void NRL_G711_Init(void)
         s_decode_table[i] = aLawToLinearSlow(static_cast<uint8_t>(i));
     }
 
-    if (s_encode_table == nullptr) {
-        s_encode_table = static_cast<uint8_t *>(
-            heap_caps_malloc(65536, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        if (s_encode_table == nullptr) {
-            // No PSRAM available -- fall back to algorithmic path at encode
-            // time. We deliberately don't try an internal-SRAM fallback: a
-            // 64 KB BSS slab there crashes NimBLE init on the gezipai build.
-            ESP_LOGW(TAG, "PSRAM encode table alloc failed; using algorithm fallback");
-        }
-    }
-
-    if (s_encode_table != nullptr) {
-        // ~65 K calls to the algorithmic encoder, ~10-15 ops each = ~1 M ops,
-        // ~4 ms at 240 MHz. Runs once at boot.
-        for (uint32_t i = 0; i < 65536u; ++i) {
-            const int16_t pcm = static_cast<int16_t>(i);
-            s_encode_table[i] = linearToALawSlow(pcm);
-        }
+    // ~65 K calls to the algorithmic encoder, ~10-15 ops each = ~1 M ops,
+    // ~4 ms at 240 MHz. Runs once at boot into link-time PSRAM BSS.
+    for (uint32_t i = 0; i < 65536u; ++i) {
+        const int16_t pcm = static_cast<int16_t>(i);
+        s_encode_table[i] = linearToALawSlow(pcm);
     }
 
     s_tables_ready = true;
@@ -115,10 +98,7 @@ extern "C" uint8_t NRL_G711_EncodeALaw(const int16_t pcm)
     if (!s_tables_ready) {
         NRL_G711_Init();
     }
-    if (s_encode_table != nullptr) {
-        return s_encode_table[static_cast<uint16_t>(pcm)];
-    }
-    return linearToALawSlow(pcm);
+    return s_encode_table[static_cast<uint16_t>(pcm)];
 }
 
 extern "C" int16_t NRL_G711_DecodeALaw(const uint8_t alaw)

@@ -5,6 +5,7 @@
 #if defined(CONFIG_BT_HFP_AG_ENABLE)
 
 #include "nrl_audio_bridge.h"
+#include "nrl_psram.h"
 #include "../app/driver/external_radio.h"
 #include "../app/driver/status_io.h"
 
@@ -191,9 +192,9 @@ uint32_t s_volume_restore_until_ms = 0;
 // of int16 PCM samples. (A FreeRTOS byte-ring mangled the audio into static on
 // this path.) PushPlayback (network task) writes; the SCO outgoing callback
 // reads one frame per request, padding silence on underrun.
-constexpr size_t kPcmCap = 4096;       // 512 ms @ 8 kHz (headroom for the prime
+constexpr size_t kPcmCap = 8192;       // ~1 s @ 8 kHz (headroom for the prime
                                        // depth plus a bursty MAX_MODEM RX gap)
-int16_t s_pcm[kPcmCap];
+NRL_PSRAM_BSS int16_t s_pcm[kPcmCap];
 volatile size_t s_pcm_head = 0;        // write index (PushPlayback)
 volatile size_t s_pcm_tail = 0;        // read index (SCO callback)
 // SCO TX (HFP-AG-over-HCI) only sends when the app calls
@@ -732,7 +733,8 @@ NrlSbcEncParams *s_sbc_params = nullptr;  // encoder state (INTERNAL RAM)
 uint8_t *s_sbc_packet = nullptr;          // encoder output packet (INTERNAL RAM)
 int s_sbc_in_bytes = 0;   // PCM bytes per SBC frame (128 samples * 2ch * 2B = 512)
 int s_sbc_out_bytes = 0;  // encoded bytes per SBC frame
-int16_t *s_a2d_ring = nullptr;
+NRL_PSRAM_BSS int16_t s_a2d_ring_storage[kA2dPcmRingSamples];
+int16_t *s_a2d_ring = s_a2d_ring_storage;
 volatile size_t s_a2d_head = 0; // producer (NRL_BtA2dp_Write)
 volatile size_t s_a2d_tail = 0; // consumer (TX task)
 TaskHandle_t s_a2d_tx_task = nullptr;
@@ -934,14 +936,6 @@ void a2dStartTxIfReady()
 {
     if (!s_a2d_want_stream || s_a2d_tx_task != nullptr) {
         return;
-    }
-    if (s_a2d_ring == nullptr) {
-        s_a2d_ring = static_cast<int16_t *>(
-            heap_caps_malloc(kA2dPcmRingSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-        if (s_a2d_ring == nullptr) {
-            ESP_LOGE(TAG, "A2DP ring alloc failed");
-            return;
-        }
     }
     if (!a2dOpenEncoder()) {
         return;

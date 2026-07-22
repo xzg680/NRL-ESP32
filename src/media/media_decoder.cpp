@@ -12,9 +12,14 @@
 #include <freertos/idf_additions.h>
 #include <freertos/task.h>
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+
+#include "lib/nrl_psram.h"
+#include "services/smb_stream.h"
+#include "services/smb_vfs.h"
 
 static const char *TAG = "MDEC";
 
@@ -30,33 +35,50 @@ constexpr size_t kRawBufferBytes = 32 * 1024;
 constexpr size_t kFlacRawChunkBytes = 512;
 // FLAC blocks can decode to ~64 KB of PCM at hi-res; start smaller and grow
 // on ESP_AUDIO_ERR_BUFF_NOT_ENOUGH as the decoder reports its needed size.
-constexpr size_t kInitialOutBufferBytes = 32 * 1024;
+constexpr size_t kOutputBufferBytes = 128 * 1024;
 
 // Read-ahead ring for file sources (PSRAM). SMB reads are synchronous
 // round-trips (~1.2 KB per request, see smb_vfs.cpp), so network jitter fed
 // straight into the decode loop is audible as stutter. A filler task keeps
 // this ring topped up; the decoder then reads from memory and rides out
-// latency spikes. This chip has 16 MB PSRAM, so the ring is generous:
+// latency spikes. Reserve it at link time so display/cover/codec allocations
+// cannot fragment the large contiguous block before playback starts:
 // 2 MB ~= 50 s of 320 kbps MP3, or ~2-3 s of lossless FLAC -- enough to ride
 // out SMB throughput dips (worsened here by the trimmed Wi-Fi buffers that free
 // internal RAM for Bluetooth). read_source() decodes as soon as the first bytes
 // land, so a larger ring adds no start-up delay -- the filler just keeps more
-// ahead. 1 MB (~6 s of CD-rate audio) is generous while still allocating as one
-// contiguous PSRAM block even when the framebuffers/cover art have fragmented
-// PSRAM. The refill chunk is large so a drained ring recovers in fewer filler
+// ahead. The refill chunk is large so a drained ring recovers in fewer filler
 // iterations (each source read is still split to ~1.2 KB inside smb_vfs).
-constexpr size_t kRingBytes = 1 * 1024 * 1024;
+constexpr size_t kRingBytes = 2 * 1024 * 1024;
+// The dedicated SMB stream fills this request with a pipeline of single-frame
+// reads; local USB/TF files perform one normal sequential VFS read. Both paths
+// commit into the same PSRAM ring without changing their decoders.
 constexpr size_t kRingFillChunk = 32 * 1024;
 // Direct HTTP radio is paced by the remote server. Accumulate one compressed
 // input chunk before decoding so short Wi-Fi/TCP stalls do not immediately
 // drain the tiny high-rate I2S DMA queue into audible gaps/noise. At 64 kbps
 // this is about four seconds; at 320 kbps it is under one second.
-constexpr size_t kHttpPrebufferBytes = 32 * 1024;
+constexpr size_t kHttpPrebufferBytes = 64 * 1024;
+// Build enough SMB reserve before enabling I2S so a two-second reconnect can
+// be hidden even for lossless audio. The filler continues toward the full
+// 2 MB ring after playback begins.
+constexpr size_t kSmbPrebufferBytes = 256 * 1024;
+constexpr size_t kMinimumPrebufferBytes = 16 * 1024;
+constexpr int64_t kHttpPrebufferMaxWaitUs = 3000000LL;
+constexpr int64_t kSmbPrebufferMaxWaitUs = 8000000LL;
+constexpr size_t kSmbRawChunkBytes = 32 * 1024;
 
 constexpr size_t kHlsMaxSegments = 8;
 constexpr size_t kHlsPlaylistBytes = 16 * 1024;
 
 static bool s_default_registered = false;
+NRL_PSRAM_BSS uint8_t s_media_ring[kRingBytes];
+NRL_PSRAM_BSS uint8_t s_raw_buffer[kRawBufferBytes];
+NRL_PSRAM_BSS uint8_t s_out_buffer[kOutputBufferBytes];
+NRL_PSRAM_BSS char s_hls_playlist_buffer[kHlsPlaylistBytes];
+MediaDecoder *s_ring_owner = nullptr;
+TaskHandle_t s_ring_worker = nullptr;
+bool s_media_buffers_in_use = false;
 
 } // namespace
 
@@ -79,8 +101,12 @@ struct HlsStream {
     volatile bool *stop;                // owner's teardown flag
 };
 
+NRL_PSRAM_BSS static char s_hls_segment_urls[kHlsMaxSegments][512];
+static bool s_hls_urls_in_use = false;
+
 struct MediaDecoder {
     FILE *file;                      // local file source, or...
+    SmbStream *smb;                  // dedicated SMB media connection, or...
     esp_http_client_handle_t http;   // ...HTTP(S) stream source (net radio)...
     HlsStream *hls;                  // ...or HLS (m3u8) segment stream
     esp_audio_simple_dec_handle_t handle;
@@ -111,13 +137,23 @@ struct MediaDecoder {
     volatile bool ring_eof;
     volatile bool ring_stop;
     volatile bool ring_running;
+    TaskHandle_t ring_task;
+    bool source_is_smb;
+    volatile bool source_error;
+    const volatile bool *external_stop;
     bool ring_wait_full;         // block for a full read (file semantics)
-    size_t ring_prebuffer_bytes; // initial compressed bytes required for HTTP radio
+    size_t ring_prebuffer_bytes; // compressed bytes required before playback starts
 };
 
 namespace {
 
 static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, size_t size);
+
+static bool decoder_stop_requested(const MediaDecoder *d)
+{
+    return d->ring_stop ||
+           (d->external_stop != nullptr && *d->external_stop);
+}
 
 // Read for the decode loop: from the read-ahead ring when one is running,
 // otherwise straight from the source (sniffed bytes replay first either way).
@@ -127,16 +163,27 @@ static size_t read_source(MediaDecoder *d, uint8_t *dst, const size_t size)
         return source_read_direct(d, dst, size);
     }
     if (d->ring_prebuffer_bytes > 0u) {
-        // Only direct HTTP radio uses this initial gate. The filler owns all
-        // socket reads while the decoder waits, allowing a useful jitter
-        // reserve to form in PSRAM before I2S playback begins.
-        while (!d->ring_eof && d->ring_running) {
+        // The filler owns all source reads while the decoder waits, allowing
+        // a useful reserve to form before I2S playback begins. NAS FLAC needs
+        // a deeper gate than compressed radio because SMB is request/response
+        // and short Wi-Fi stalls otherwise drain the I2S path immediately.
+        const int64_t wait_started_us = esp_timer_get_time();
+        while (!d->ring_eof && d->ring_running && !decoder_stop_requested(d)) {
             const size_t head = d->ring_head;
             const size_t tail = d->ring_tail;
             const size_t used = (head + kRingBytes - tail) % kRingBytes;
-            if (used >= d->ring_prebuffer_bytes) {
-                ESP_LOGI(TAG, "readahead: HTTP radio buffered %u bytes",
-                         static_cast<unsigned>(used));
+            const bool target_reached = used >= d->ring_prebuffer_bytes;
+            const int64_t max_wait_us = d->source_is_smb
+                                            ? kSmbPrebufferMaxWaitUs
+                                            : kHttpPrebufferMaxWaitUs;
+            const bool wait_expired = used >= kMinimumPrebufferBytes &&
+                                      esp_timer_get_time() - wait_started_us >=
+                                          max_wait_us;
+            if (target_reached || wait_expired) {
+                ESP_LOGI(TAG, "readahead: %s buffered %u bytes%s",
+                         d->source_is_smb ? "SMB" : "HTTP radio",
+                         static_cast<unsigned>(used),
+                         target_reached ? "" : " (startup timeout)");
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -145,6 +192,9 @@ static size_t read_source(MediaDecoder *d, uint8_t *dst, const size_t size)
     }
     size_t got = 0;
     while (got < size) {
+        if (decoder_stop_requested(d)) {
+            break;
+        }
         const size_t head = d->ring_head;
         const size_t tail = d->ring_tail;
         const size_t used = (head + kRingBytes - tail) % kRingBytes;
@@ -310,17 +360,7 @@ static void flac_install_compact_prefix(MediaDecoder *d, const FlacStreamInfo *i
 
 static bool grow_out_buffer(MediaDecoder *d, const size_t needed)
 {
-    size_t new_capacity = d->out_capacity;
-    while (new_capacity < needed) {
-        new_capacity *= 2u;
-    }
-    uint8_t *grown = static_cast<uint8_t *>(heap_caps_realloc(d->out_buffer, new_capacity, MALLOC_CAP_SPIRAM));
-    if (grown == nullptr) {
-        return false;
-    }
-    d->out_buffer = grown;
-    d->out_capacity = new_capacity;
-    return true;
+    return d != nullptr && needed <= d->out_capacity;
 }
 
 // Open an HTTP(S) stream, verifying TLS against the cert bundle first; on
@@ -433,10 +473,7 @@ static size_t hls_fetch_text(const char *url, char *out, const size_t cap, bool 
 // variant). Queues segments with sequence >= next_media_seq.
 static bool hls_load_playlist(HlsStream *h)
 {
-    char *text = static_cast<char *>(heap_caps_malloc(kHlsPlaylistBytes, MALLOC_CAP_SPIRAM));
-    if (text == nullptr) {
-        return false;
-    }
+    char *text = s_hls_playlist_buffer;
     bool ok = false;
     for (int depth = 0; depth < 3; ++depth) {
         if (hls_fetch_text(h->playlist_url, text, kHlsPlaylistBytes, &h->insecure) == 0u) {
@@ -507,7 +544,6 @@ static bool hls_load_playlist(HlsStream *h)
         ok = true;
         break;
     }
-    heap_caps_free(text);
     return ok;
 }
 
@@ -585,9 +621,7 @@ static void hls_close(HlsStream *h)
         (void)esp_http_client_close(h->seg_http);
         esp_http_client_cleanup(h->seg_http);
     }
-    if (h->seg_urls != nullptr) {
-        heap_caps_free(h->seg_urls);
-    }
+    if (h->seg_urls == s_hls_segment_urls) s_hls_urls_in_use = false;
     heap_caps_free(h);
 }
 
@@ -595,16 +629,13 @@ static void hls_close(HlsStream *h)
 // container type. Returns nullptr on any failure.
 static HlsStream *hls_open(const char *url, volatile bool *stop)
 {
+    if (s_hls_urls_in_use) return nullptr;
     HlsStream *h = static_cast<HlsStream *>(heap_caps_calloc(1, sizeof(HlsStream), MALLOC_CAP_SPIRAM));
     if (h == nullptr) {
         return nullptr;
     }
-    h->seg_urls = static_cast<char(*)[512]>(
-        heap_caps_calloc(kHlsMaxSegments, sizeof(h->seg_urls[0]), MALLOC_CAP_SPIRAM));
-    if (h->seg_urls == nullptr) {
-        heap_caps_free(h);
-        return nullptr;
-    }
+    s_hls_urls_in_use = true;
+    h->seg_urls = s_hls_segment_urls;
     snprintf(h->playlist_url, sizeof(h->playlist_url), "%s", url);
     h->target_duration_s = 6;
     h->stop = stop;
@@ -626,6 +657,9 @@ static HlsStream *hls_open(const char *url, volatile bool *stop)
 // sniffed bytes first. Runs in the filler task for ring-backed sources.
 static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, const size_t size)
 {
+    if (decoder_stop_requested(d)) {
+        return 0u;
+    }
     size_t total = 0;
     while (total < size && d->prefix_off < d->prefix_len) {
         dst[total++] = d->prefix[d->prefix_off++];
@@ -639,6 +673,14 @@ static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, const size_t siz
     if (total == size) {
         return total;
     }
+    if (d->smb != nullptr) {
+        const int got = SMB_STREAM_Read(d->smb, dst + total, size - total);
+        if (got < 0) {
+            d->source_error = true;
+            return total;
+        }
+        return total + static_cast<size_t>(got);
+    }
     if (d->file != nullptr) {
         const int64_t t0 = esp_timer_get_time();
         const size_t got = fread(dst + total, 1, size - total, d->file);
@@ -646,6 +688,10 @@ static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, const size_t siz
         if (dt_ms > 2000) {
             ESP_LOGW(TAG, "slow source read: %u bytes in %lld ms",
                      static_cast<unsigned>(got), static_cast<long long>(dt_ms));
+        }
+        if (got == 0u && ferror(d->file)) {
+            ESP_LOGW(TAG, "source read failed: errno=%d", errno);
+            d->source_error = true;
         }
         return total + got;
     }
@@ -662,70 +708,82 @@ static size_t source_read_direct(MediaDecoder *d, uint8_t *dst, const size_t siz
 
 static void ring_filler_task(void *arg)
 {
-    MediaDecoder *d = static_cast<MediaDecoder *>(arg);
-    while (!d->ring_stop) {
-        const size_t head = d->ring_head;
-        const size_t tail = d->ring_tail;
-        const size_t used = (head + kRingBytes - tail) % kRingBytes;
-        const size_t free_space = kRingBytes - 1u - used;
-        if (free_space < kRingFillChunk) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        size_t want = kRingBytes - head; // contiguous run up to the wrap
-        if (want > free_space) {
-            want = free_space;
-        }
-        if (want > kRingFillChunk) {
-            want = kRingFillChunk;
-        }
-        const size_t got = source_read_direct(d, d->ring + head, want);
-        if (got == 0u) {
-            if (!d->ring_stop) {
-                ESP_LOGI(TAG, "readahead: source end of stream");
+    (void)arg;
+    while (true) {
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        MediaDecoder *d = s_ring_owner;
+        if (d == nullptr) continue;
+
+        while (!decoder_stop_requested(d)) {
+            const size_t head = d->ring_head;
+            const size_t tail = d->ring_tail;
+            const size_t used = (head + kRingBytes - tail) % kRingBytes;
+            const size_t free_space = kRingBytes - 1u - used;
+            if (free_space < kRingFillChunk) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
             }
-            d->ring_eof = true;
-            break;
+            size_t want = kRingBytes - head;
+            if (want > free_space) want = free_space;
+            if (want > kRingFillChunk) want = kRingFillChunk;
+            const size_t got = source_read_direct(d, d->ring + head, want);
+            if (got == 0u) {
+                if (!decoder_stop_requested(d)) {
+                    ESP_LOGI(TAG, "readahead: source end of stream");
+                }
+                d->ring_eof = true;
+                break;
+            }
+            d->ring_head = (head + got) % kRingBytes;
+            vTaskDelay(1);
         }
-        d->ring_head = (head + got) % kRingBytes;
+        d->ring_running = false;
     }
-    d->ring_running = false;
-    // Created with a PSRAM stack (xTaskCreatePinnedToCoreWithCaps), so it must be
-    // torn down with the caps-aware delete; vTaskDeleteWithCaps(NULL) self-deletes
-    // safely (IDF spawns a tiny cleanup task to free the external stack).
-    vTaskDeleteWithCaps(nullptr);
 }
 
 // Start the read-ahead ring; on failure the decoder falls back to direct
 // reads (correct, just stutter-prone again).
 static void ring_start(MediaDecoder *d)
 {
-    d->ring = static_cast<uint8_t *>(heap_caps_malloc(kRingBytes, MALLOC_CAP_SPIRAM));
-    if (d->ring == nullptr) {
+    if (s_ring_owner != nullptr) {
+        ESP_LOGW(TAG, "read-ahead ring already in use; using direct reads");
         return;
     }
+    s_ring_owner = d;
+    d->ring = s_media_ring;
     d->ring_head = 0;
     d->ring_tail = 0;
     d->ring_eof = false;
     d->ring_stop = false;
     d->ring_running = true;
-    d->ring_wait_full = (d->file != nullptr || d->http != nullptr);
-    d->ring_prebuffer_bytes = (d->http != nullptr) ? kHttpPrebufferBytes : 0u;
+    d->ring_wait_full = (d->file != nullptr || d->smb != nullptr ||
+                         d->http != nullptr);
+    d->ring_prebuffer_bytes = (d->http != nullptr)
+                                  ? kHttpPrebufferBytes
+                                  : (d->source_is_smb ? kSmbPrebufferBytes : 0u);
     // PSRAM stack: this task only does source reads (SMB over the network / SD via
     // SDMMC / HTTP) -- none of which touch the internal SPI flash, and flash
     // auto-suspend keeps the cache alive anyway -- so its stack is safe in PSRAM.
     // Keeping it out of internal RAM lets it create even while Bluetooth holds its
     // 40 KB internal reserve; the old 8 KB internal stack failed to allocate with
     // BT on, dropping SMB playback back to unbuffered direct reads (stutter). Only
-    // a ~700 B TCB stays internal. If even the PSRAM stack can't be had, fall back
-    // to direct reads (correct, just stutter-prone).
-    if (xTaskCreatePinnedToCoreWithCaps(ring_filler_task, "mdec_fill", 8192, d, 5,
-                                        nullptr, 0, MALLOC_CAP_SPIRAM) != pdPASS) {
-        ESP_LOGW(TAG, "read-ahead task create failed; using direct reads");
-        d->ring_running = false;
-        heap_caps_free(d->ring);
-        d->ring = nullptr;
+    // a ~700 B TCB stays internal. Core 0 owns lwIP/Wi-Fi and was saturated by
+    // their work plus SMB protocol processing; Core 1 still had >80% idle while
+    // decoding FLAC. Run the filler on Core 1 so socket callbacks stay on Core 0
+    // but libsmb2 polling/parsing and PSRAM writes use the spare core.
+    if (s_ring_worker == nullptr) {
+        if (xTaskCreatePinnedToCoreWithCaps(ring_filler_task, "mdec_fill", 8192,
+                                            nullptr, 5, &s_ring_worker, 1,
+                                            MALLOC_CAP_SPIRAM) != pdPASS) {
+            ESP_LOGW(TAG, "read-ahead task create failed; using direct reads");
+            d->ring_running = false;
+            d->ring = nullptr;
+            s_ring_owner = nullptr;
+            return;
+        }
     }
+    d->ring_task = s_ring_worker;
+    xTaskNotifyGive(s_ring_worker);
 }
 
 static void ring_stop_and_free(MediaDecoder *d)
@@ -743,15 +801,20 @@ static void ring_stop_and_free(MediaDecoder *d)
         ESP_LOGE(TAG, "read-ahead task stuck; leaking decoder resources");
         return;
     }
-    heap_caps_free(d->ring);
+    // Keep this PSRAM-backed worker and its TCB alive between tracks. Deleting
+    // it from the other core while it entered vTaskSuspend() could corrupt the
+    // SMP ready list during rapid stop/track changes.
+    d->ring_task = nullptr;
     d->ring = nullptr;
+    if (s_ring_owner == d) s_ring_owner = nullptr;
 }
 
 } // namespace
 
-extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
+extern "C" MediaDecoder *MEDIA_DECODER_Open(
+    const char *path, const volatile bool *stop_requested)
 {
-    if (path == nullptr) {
+    if (path == nullptr || (stop_requested != nullptr && *stop_requested)) {
         return nullptr;
     }
 
@@ -779,11 +842,21 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
 
     const bool is_http = strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0;
     const bool is_hls = is_http && strstr(path, ".m3u8") != nullptr;
+    constexpr size_t kSmbMountLen = sizeof(SMB_VFS_MOUNT_POINT) - 1u;
+    const bool is_smb = strncmp(path, SMB_VFS_MOUNT_POINT, kSmbMountLen) == 0 &&
+                        (path[kSmbMountLen] == '/' || path[kSmbMountLen] == '\0');
+
+    if (s_media_buffers_in_use) {
+        ESP_LOGE(TAG, "only one media decoder can be active");
+        return nullptr;
+    }
 
     MediaDecoder *d = static_cast<MediaDecoder *>(heap_caps_calloc(1, sizeof(MediaDecoder), MALLOC_CAP_SPIRAM));
     if (d == nullptr) {
         return nullptr;
     }
+    s_media_buffers_in_use = true;
+    d->external_stop = stop_requested;
 
     if (is_hls) {
         // m3u8 playlist: resolve to a segment stream, then sniff the first
@@ -830,6 +903,22 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
             sniffed += got;
         }
         d->sniff_len = static_cast<size_t>(sniffed);
+    } else if (is_smb) {
+        d->source_is_smb = true;
+        d->smb = SMB_STREAM_Open(path, stop_requested);
+        if (d->smb == nullptr) {
+            ESP_LOGE(TAG, "SMB stream open failed: %s", path);
+            MEDIA_DECODER_Close(d);
+            return nullptr;
+        }
+        const int sniffed = SMB_STREAM_Read(d->smb, d->sniff, sizeof(d->sniff));
+        if (sniffed <= 0 || !SMB_STREAM_Seek(d->smb, 0, SEEK_SET)) {
+            ESP_LOGE(TAG, "SMB stream sniff failed: %s", path);
+            MEDIA_DECODER_Close(d);
+            return nullptr;
+        }
+        d->sniff_len = static_cast<size_t>(sniffed);
+        d->sniff_off = d->sniff_len; // stream rewound: nothing to replay
     } else {
         d->file = fopen(path, "rb");
         if (d->file == nullptr) {
@@ -871,9 +960,9 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
         }
     }
 
-    d->raw_buffer = static_cast<uint8_t *>(heap_caps_malloc(kRawBufferBytes, MALLOC_CAP_SPIRAM));
-    d->out_buffer = static_cast<uint8_t *>(heap_caps_malloc(kInitialOutBufferBytes, MALLOC_CAP_SPIRAM));
-    d->out_capacity = kInitialOutBufferBytes;
+    d->raw_buffer = s_raw_buffer;
+    d->out_buffer = s_out_buffer;
+    d->out_capacity = kOutputBufferBytes;
 
     esp_audio_simple_dec_cfg_t cfg = {};
     cfg.dec_type = type;
@@ -886,7 +975,8 @@ extern "C" MediaDecoder *MEDIA_DECODER_Open(const char *path)
 
     // File, HLS and direct HTTP sources read through the PSRAM ring so storage
     // or network latency does not reach the I2S writer as audio stutter.
-    if (d->file != nullptr || d->hls != nullptr || d->http != nullptr) {
+    if (d->file != nullptr || d->smb != nullptr || d->hls != nullptr ||
+        d->http != nullptr) {
         ring_start(d);
     }
 
@@ -911,6 +1001,9 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
     unsigned stalled_calls = 0;
 
     while (true) {
+        if (decoder_stop_requested(d)) {
+            return 0;
+        }
         ++iterations;
         const int64_t now_us = esp_timer_get_time();
         if (now_us - last_report_us > 5000000LL) {
@@ -930,17 +1023,22 @@ extern "C" int MEDIA_DECODER_Decode(MediaDecoder *d, const uint8_t **pcm_out, si
             }
             const size_t raw_want = (d->type == ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC)
                                         ? kFlacRawChunkBytes
-                                        : kRawBufferBytes;
+                                        : (d->source_is_smb ? kSmbRawChunkBytes
+                                                            : kRawBufferBytes);
             d->raw_fill = read_source(d, d->raw_buffer, raw_want);
             d->raw_offset = 0;
             if (d->raw_fill == 0u) {
+                if (d->source_error) {
+                    return -1;
+                }
                 d->eof = true;
                 return 0;
             }
             // Live HTTP streams legitimately return short reads; only local
             // files treat one as end-of-stream (FLAC needs the eos flag to
             // flush its tail).
-            if (d->file != nullptr && d->raw_fill < raw_want) {
+            if ((d->file != nullptr || d->smb != nullptr) &&
+                d->raw_fill < raw_want) {
                 d->eof = true;
             }
         }
@@ -1041,6 +1139,9 @@ extern "C" void MEDIA_DECODER_Close(MediaDecoder *d)
     if (d->file != nullptr) {
         fclose(d->file);
     }
+    if (d->smb != nullptr) {
+        SMB_STREAM_Close(d->smb);
+    }
     if (d->http != nullptr) {
         (void)esp_http_client_close(d->http);
         (void)esp_http_client_cleanup(d->http);
@@ -1048,11 +1149,6 @@ extern "C" void MEDIA_DECODER_Close(MediaDecoder *d)
     if (d->hls != nullptr) {
         hls_close(d->hls);
     }
-    if (d->raw_buffer != nullptr) {
-        heap_caps_free(d->raw_buffer);
-    }
-    if (d->out_buffer != nullptr) {
-        heap_caps_free(d->out_buffer);
-    }
     heap_caps_free(d);
+    s_media_buffers_in_use = false;
 }

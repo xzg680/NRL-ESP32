@@ -487,7 +487,11 @@ extern "C" bool STORAGE_SmbMounted(void)
 
 extern "C" const char *STORAGE_SmbMountPoint(void)
 {
-    return SMB_VFS_Mounted() ? SMB_VFS_MOUNT_POINT : nullptr;
+    // Keep the logical source visible while a stale socket reconnects. The
+    // VFS path is determined by saved configuration, not by the health of the
+    // current SMB session; opendir/open will reconnect on demand.
+    return (s_smb_server[0] != '\0' && s_smb_share[0] != '\0')
+               ? SMB_VFS_MOUNT_POINT : nullptr;
 }
 
 extern "C" void STORAGE_SmbDescribe(char *out, const size_t out_size)

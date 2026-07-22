@@ -139,6 +139,14 @@ if(smb2_lib)
                            -Wno-missing-field-initializers
                            -Wno-unused-variable
                            -Wno-implicit-fallthrough)
+    # Keep the managed dependency pristine. Only libsmb2's readv references
+    # are redirected to our ESP-lwIP compatibility shim; every other component
+    # continues to use the normal system readv implementation.
+    idf_component_get_property(smb2_dir sahlberg__libsmb2 COMPONENT_DIR)
+    set_source_files_properties(
+        "${smb2_dir}/lib/socket.c"
+        TARGET_DIRECTORY ${smb2_lib}
+        PROPERTIES COMPILE_DEFINITIONS "readv=NRL_SMB_Readv")
 endif()
 
 if(TARGET ${CMAKE_PROJECT_NAME}.elf)

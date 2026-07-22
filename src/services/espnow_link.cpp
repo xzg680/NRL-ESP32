@@ -6,6 +6,7 @@
 #include "driver/status_io.h"
 #include "lib/nrl_audio_bridge.h"
 #include "lib/nrl_g711.h"
+#include "lib/nrl_psram.h"
 #include "media/opus_voice.h"
 #include "services/config_notify.h"
 
@@ -313,6 +314,10 @@ struct OpusRxPacket {
     uint16_t len;
     uint8_t payload[ESP_NOW_MAX_DATA_LEN];
 };
+constexpr size_t kOpusRxQueueLength = 16u; // 320 ms of 20 ms frames
+NRL_PSRAM_BSS static uint8_t
+    s_opus_rx_queue_storage[kOpusRxQueueLength * sizeof(OpusRxPacket)];
+static StaticQueue_t s_opus_rx_queue_control;
 static QueueHandle_t s_opus_rx_queue = nullptr;
 static TaskHandle_t s_opus_rx_task = nullptr;
 
@@ -439,7 +444,10 @@ static bool espnow_bring_up(void)
     // Opus RX decode task + hand-off queue (see espnow_opus_rx_task). Created
     // once; without it Opus packets are dropped (G.711 keeps working inline).
     if (s_opus_rx_queue == nullptr) {
-        s_opus_rx_queue = xQueueCreate(8, sizeof(OpusRxPacket));
+        s_opus_rx_queue = xQueueCreateStatic(kOpusRxQueueLength,
+                                             sizeof(OpusRxPacket),
+                                             s_opus_rx_queue_storage,
+                                             &s_opus_rx_queue_control);
     }
     if (s_opus_rx_task == nullptr && s_opus_rx_queue != nullptr &&
         xTaskCreatePinnedToCoreWithCaps(espnow_opus_rx_task, "espnow_opus", 32768,

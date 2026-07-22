@@ -3,8 +3,8 @@
 #include "services/music_player.h"
 #include "services/smb_vfs.h"
 #include "services/storage_service.h"
+#include "lib/nrl_psram.h"
 
-#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -35,14 +35,17 @@ struct PlaylistDir {
     char name[kMaxNameLen];
 };
 
-static char (*s_paths)[kMaxPathLen] = nullptr; // PSRAM array of current-dir tracks
-static PlaylistDir *s_dirs = nullptr;          // PSRAM array of current-dir subdirs
+NRL_PSRAM_BSS static char s_path_storage[kMaxTracks][kMaxPathLen];
+NRL_PSRAM_BSS static PlaylistDir s_dir_storage[kMaxDirs];
+NRL_PSRAM_BSS static char s_fav_storage[PLAYLIST_FAV_MAX][kMaxPathLen];
+static char (*s_paths)[kMaxPathLen] = s_path_storage;
+static PlaylistDir *s_dirs = s_dir_storage;
 static std::atomic_size_t s_count{0};
 static std::atomic_size_t s_dir_count{0};
 static volatile int s_current = -1;
 static volatile bool s_auto_advance = true;
 static char s_current_dir[kMaxPathLen] = {};   // empty string means virtual source root
-static char (*s_favs)[kMaxPathLen] = nullptr;
+static char (*s_favs)[kMaxPathLen] = s_fav_storage;
 static size_t s_fav_count = 0;
 static PlaylistRepeatMode s_repeat_mode = PLAYLIST_REPEAT_LIST;
 static volatile bool s_scanning = false;
@@ -80,30 +83,6 @@ static const char *basename_of(const char *path)
 
 static bool ensure_tables()
 {
-    if (s_paths == nullptr) {
-        s_paths = static_cast<char(*)[kMaxPathLen]>(
-            heap_caps_malloc(kMaxTracks * kMaxPathLen, MALLOC_CAP_SPIRAM));
-        if (s_paths == nullptr) {
-            ESP_LOGE(TAG, "path table alloc failed");
-            return false;
-        }
-    }
-    if (s_dirs == nullptr) {
-        s_dirs = static_cast<PlaylistDir *>(
-            heap_caps_malloc(kMaxDirs * sizeof(PlaylistDir), MALLOC_CAP_SPIRAM));
-        if (s_dirs == nullptr) {
-            ESP_LOGE(TAG, "dir table alloc failed");
-            return false;
-        }
-    }
-    if (s_favs == nullptr) {
-        s_favs = static_cast<char(*)[kMaxPathLen]>(
-            heap_caps_malloc(PLAYLIST_FAV_MAX * kMaxPathLen, MALLOC_CAP_SPIRAM));
-        if (s_favs == nullptr) {
-            ESP_LOGE(TAG, "favorite table alloc failed");
-            return false;
-        }
-    }
     return true;
 }
 
@@ -211,7 +190,8 @@ static void scan_favorites()
         return;
     }
     for (size_t i = 0; i < s_fav_count && s_count < kMaxTracks; ++i) {
-        snprintf(s_paths[s_count], kMaxPathLen, "%s", s_favs[i]);
+        memcpy(s_paths[s_count], s_favs[i], kMaxPathLen);
+        s_paths[s_count][kMaxPathLen - 1u] = '\0';
         ++s_count;
     }
     if (!s_async_scan_active && s_count > 1u) {

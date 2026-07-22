@@ -8,11 +8,11 @@
 
 #include "audio/audio_router.h"
 #include "media/opus_voice.h"
+#include "lib/nrl_psram.h"
 #include "services/config_notify.h"
 
 #include <cJSON.h>
 #include <esp_crt_bundle.h>
-#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_websocket_client.h>
@@ -46,7 +46,8 @@ static esp_websocket_client_handle_t s_ws = nullptr;
 static OpusVoiceEnc *s_enc = nullptr;
 static OpusVoiceDec *s_dec = nullptr;
 
-static int16_t *s_mic_ring = nullptr;
+NRL_PSRAM_BSS static int16_t s_mic_ring_storage[kMicRingSamples];
+static int16_t *s_mic_ring = s_mic_ring_storage;
 static volatile size_t s_mic_head = 0;
 static volatile size_t s_mic_tail = 0;
 
@@ -299,10 +300,6 @@ static bool ws_start(void)
         return false;
     }
 
-    if (s_mic_ring == nullptr) {
-        s_mic_ring = static_cast<int16_t *>(
-            heap_caps_malloc(kMicRingSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-    }
     AudioRouter_RegisterSink(AUDIO_SINK_AI, OPUS_VOICE_SAMPLE_RATE, ai_sink_write, nullptr);
     AudioRouter_SetRoute(AUDIO_SRC_MIC, AUDIO_SINK_AI, true);
     AudioRouter_SetRoute(AUDIO_SRC_AI, AUDIO_SINK_SPEAKER, true);

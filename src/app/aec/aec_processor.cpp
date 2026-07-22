@@ -100,6 +100,7 @@ AEC_OutputCallback s_out_cb = nullptr;
 void *s_out_user = nullptr;
 
 TaskHandle_t s_fetch_task = nullptr;
+volatile bool s_fetch_task_exited = false;
 volatile bool s_running = false;
 bool s_ready = false;
 bool s_has_reference = false;
@@ -139,8 +140,10 @@ void aec_fetch_task(void *) {
         }
         taskYIELD();
     }
-    s_fetch_task = nullptr;
-    vTaskDeleteWithCaps(nullptr); // frees the PSRAM stack allocated at create
+    s_fetch_task_exited = true;
+    // Do not self-delete a WithCaps task. The owner deletes this suspended
+    // task from afe_destroy_pipeline(), avoiding the SMP cleanup-task race.
+    vTaskSuspend(nullptr);
 }
 
 } // namespace
@@ -228,6 +231,7 @@ static bool afe_create_pipeline(bool enable_aec, bool enable_ai_noise) {
     // disabled), so a PSRAM stack is safe. 32 KB because this task delivers
     // processed mic frames through the router sinks inline, which includes the
     // Opus TX encode (libopus, deep stack) when the Opus codec is enabled.
+    s_fetch_task_exited = false;
     if (xTaskCreatePinnedToCoreWithCaps(aec_fetch_task, "aec_fetch", 32768, nullptr, 9,
                                         &s_fetch_task, 1, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "fetch task create failed");
@@ -259,7 +263,7 @@ static void afe_destroy_pipeline(void) {
     s_running = false;
 
     // Feed a few silent frames straight into esp-sr so fetch() returns,
-    // the loop sees s_running=false, and the task self-deletes. Without
+    // the loop sees s_running=false, and the task parks for owner deletion. Without
     // this the task could block forever waiting for AFE output.
     if (s_iface != nullptr && s_afe != nullptr && s_feed_buf != nullptr) {
         memset(s_feed_buf, 0, s_feed_cap * s_feed_channels * sizeof(int16_t));
@@ -270,14 +274,17 @@ static void afe_destroy_pipeline(void) {
     }
 
     // Up to ~500 ms for graceful exit, then last-resort force delete.
-    for (int waited = 0; waited < 50 && s_fetch_task != nullptr; ++waited) {
+    for (int waited = 0; waited < 50 && !s_fetch_task_exited; ++waited) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     if (s_fetch_task != nullptr) {
-        ESP_LOGW(TAG, "fetch task didn't exit cleanly, forcing delete");
+        if (!s_fetch_task_exited) {
+            ESP_LOGW(TAG, "fetch task didn't exit cleanly, forcing delete");
+        }
         vTaskDeleteWithCaps(s_fetch_task);
         s_fetch_task = nullptr;
     }
+    s_fetch_task_exited = false;
 
     if (s_iface != nullptr && s_afe != nullptr) {
         s_iface->destroy(s_afe);

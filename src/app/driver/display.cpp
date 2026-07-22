@@ -41,6 +41,7 @@
 
 #include "../../lib/nrl_audio_bridge.h"
 #include "../../lib/ble_config.h"
+#include "../../lib/nrl_psram.h"
 #include "../../lib/wifi_config_portal.h"
 #include "../../services/aprs_service.h"
 #include "../../services/espnow_link.h"
@@ -155,6 +156,7 @@ esp_lcd_panel_handle_t s_panel = nullptr;
 lv_display_t *s_disp = nullptr;
 uint8_t *s_draw_buf = nullptr;
 #if NRL_DISPLAY_BUS_RGB
+NRL_PSRAM_BSS uint8_t s_rgb_draw_buffer[kWidth * kBufLines * 2u];
 esp_lcd_touch_handle_t s_touch = nullptr;
 esp_lcd_panel_io_handle_t s_touch_io = nullptr;
 lv_indev_t *s_touch_indev = nullptr;
@@ -498,7 +500,7 @@ bool initLvgl()
 
     const size_t buf_bytes = static_cast<size_t>(kWidth) * kBufLines * 2u;
 #if NRL_DISPLAY_BUS_RGB
-    s_draw_buf = static_cast<uint8_t *>(heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    s_draw_buf = s_rgb_draw_buffer;
 #else
     s_draw_buf = static_cast<uint8_t *>(heap_caps_malloc(buf_bytes, MALLOC_CAP_DMA));
 #endif
@@ -2605,7 +2607,7 @@ void buildProvisioningUi()
     lv_obj_set_width(s_lbl_provision_ssid, kWidth - 16);
     lv_obj_set_style_text_align(s_lbl_provision_ssid, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(s_lbl_provision_ssid, 8, 96);
-    lv_label_set_text(s_lbl_provision_ssid, "NRL3188-ESP32-XXXXXX");
+    lv_label_set_text(s_lbl_provision_ssid, "NRL-ESP32-XXXXXX");
 
     s_lbl_provision_ip = makeLabel(scr, &lv_font_montserrat_16, kColorIp);
     lv_obj_set_width(s_lbl_provision_ip, kWidth - 24);

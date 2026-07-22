@@ -7,6 +7,7 @@
 #include "../../lib/nrl_audio_bridge.h"
 #include "../../lib/nrl_bt_hfp.h"
 #include "../../lib/nrl_net_compat.h"
+#include "../../lib/nrl_psram.h"
 #include "../../lib/nrl_version.h"
 #include "../../lib/nrl_wifi.h"
 #include "../../lib/wifi_config_portal.h"
@@ -85,6 +86,7 @@ constexpr const char *kCallsignPlaceholder = "----------";
 constexpr size_t kStationFieldChars = 10u;
 constexpr size_t kWifiOptionCount = 12u;  // max scanned SSIDs listed in the dropdown
 constexpr size_t kMusicListMaxRows = 48u; // keep LVGL list layout bounded on large libraries
+NRL_PSRAM_BSS uint8_t s_video_local_jpeg[VIDEO_MAX_JPEG_BYTES];
 
 enum class Page : uint8_t {
     Provisioning,
@@ -1456,7 +1458,7 @@ void buildProvisioning()
     lv_obj_set_width(s_lbl_provision_ssid, 688);
     lv_obj_set_style_text_align(s_lbl_provision_ssid, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(s_lbl_provision_ssid, 0, 98);
-    lv_label_set_text(s_lbl_provision_ssid, "NRL3188-ESP32-XXXXXX");
+    lv_label_set_text(s_lbl_provision_ssid, "NRL-ESP32-XXXXXX");
 
     lv_obj_t *wechat = label(box, &s_font_ui_20, kColorText);
     lv_obj_set_pos(wechat, 18, 142);
@@ -2943,9 +2945,7 @@ void musicModeToggle()
 
 void videoViewTask(void *)
 {
-    // Copy-out buffer for the local frame (PSRAM; freed on task exit).
-    uint8_t *local_jpeg = static_cast<uint8_t *>(
-        heap_caps_malloc(VIDEO_MAX_JPEG_BYTES, MALLOC_CAP_SPIRAM));
+    uint8_t *local_jpeg = s_video_local_jpeg;
     uint32_t remote_seq = 0;
     uint32_t local_seq = 0;
 
@@ -2983,9 +2983,6 @@ void videoViewTask(void *)
         vTaskDelay(pdMS_TO_TICKS(worked ? 10 : 40));
     }
 
-    if (local_jpeg != nullptr) {
-        heap_caps_free(local_jpeg);
-    }
     s_video_view_task = nullptr;
     vTaskDelete(nullptr);
 }

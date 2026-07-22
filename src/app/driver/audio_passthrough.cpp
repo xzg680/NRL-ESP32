@@ -2,6 +2,7 @@
 
 #include "audio/audio_router.h"
 #include "driver/board_pins.h"
+#include "lib/nrl_psram.h"
 #include "services/signaling_service.h"
 
 #include <driver/i2s_common.h>
@@ -68,18 +69,22 @@ static bool s_i2s_rx_enabled = false;
 static uint32_t s_i2s_output_rate_hz = kSampleRate;
 static uint8_t s_i2s_output_bits = 16u;
 static TaskHandle_t s_passthrough_task = nullptr;
+static volatile bool s_passthrough_task_exited = false;
 static volatile bool s_passthrough_running = false;
 static AUDIO_Mode_t s_audio_mode = AUDIO_MODE_RECEIVE;
 static bool s_speaker_sink_registered = false;
 
-// The playback queue holds 16 kHz voice-domain samples (~640 ms). It moved
+// The playback queue holds 16 kHz voice-domain samples (~1.28 s). It moved
 // from 8 kHz when NRL packet type 8 (Opus wideband) arrived: narrowband
 // sources are upsampled by the audio router at delivery instead of here.
-constexpr size_t kOutputQueueSamples = kFrameSamples * 64u;
-static int16_t s_output_queue[kOutputQueueSamples];
+constexpr size_t kOutputQueueSamples = kFrameSamples * 128u;
+constexpr size_t kNetworkVoicePrimeSamples = kFrameSamples * 6u; // 60 ms
+NRL_PSRAM_BSS static int16_t s_output_queue[kOutputQueueSamples];
 static size_t s_output_queue_head = 0;
 static size_t s_output_queue_tail = 0;
 static size_t s_output_queue_count = 0;
+static size_t s_output_queue_prime_samples = 0;
+static bool s_output_queue_playing = false;
 static SemaphoreHandle_t s_output_queue_mutex = nullptr;
 static uint32_t s_last_output_queue_log_ms = 0;
 static volatile uint8_t s_aec_reference_source = 0; // 0=network playback, 1=second mic
@@ -419,6 +424,16 @@ static void output_queue_clear_locked(void) {
     s_output_queue_head = 0;
     s_output_queue_tail = 0;
     s_output_queue_count = 0;
+    s_output_queue_prime_samples = 0;
+    s_output_queue_playing = false;
+}
+
+static void output_queue_set_prime(const size_t samples) {
+    output_queue_init();
+    if (s_output_queue_mutex == nullptr) return;
+    if (xSemaphoreTake(s_output_queue_mutex, pdMS_TO_TICKS(5)) != pdTRUE) return;
+    s_output_queue_prime_samples = samples;
+    xSemaphoreGive(s_output_queue_mutex);
 }
 
 static void aec_network_ref_clear(void) {
@@ -495,12 +510,24 @@ static size_t output_queue_pop_frame(int16_t *dst, const size_t sample_count) {
         return 0;
     }
 
+    if (!s_output_queue_playing) {
+        size_t required = s_output_queue_prime_samples;
+        if (required < sample_count) required = sample_count;
+        if (s_output_queue_count < required) {
+            xSemaphoreGive(s_output_queue_mutex);
+            memset(dst, 0, sample_count * sizeof(int16_t));
+            return 0;
+        }
+        s_output_queue_playing = true;
+    }
+
     size_t read = 0;
     while (read < sample_count && s_output_queue_count > 0) {
         dst[read++] = s_output_queue[s_output_queue_head];
         s_output_queue_head = (s_output_queue_head + 1u) % kOutputQueueSamples;
         --s_output_queue_count;
     }
+    if (read < sample_count) s_output_queue_playing = false;
 
     xSemaphoreGive(s_output_queue_mutex);
 
@@ -587,10 +614,14 @@ static void audio_log_mic_frame_stats(const int16_t *frame) {
 // The playback queue doubles as the router's speaker sink; whichever source
 // is routed here (NRL downlink today, media/beacon later) lands in the same
 // 8 kHz queue the passthrough task drains to the DAC.
-static void speaker_sink_write(uint8_t /*source_id*/,
+static void speaker_sink_write(uint8_t source_id,
                                const int16_t *samples,
                                size_t sample_count,
                                void *) {
+    const bool network_voice = source_id == AUDIO_SRC_NRL_DOWNLINK ||
+                               source_id == AUDIO_SRC_ESPNOW ||
+                               source_id == AUDIO_SRC_AI;
+    output_queue_set_prime(network_voice ? kNetworkVoicePrimeSamples : 0u);
     (void)AUDIO_QueueOutputSamples(samples, sample_count);
 }
 
@@ -690,8 +721,10 @@ static void audio_passthrough_task(void *) {
     }
 
     i2s_clear_dma();
-    s_passthrough_task = nullptr;
-    vTaskDelete(nullptr);
+    s_passthrough_task_exited = true;
+    // This task has a WithCaps PSRAM stack. Park it and let
+    // AUDIO_StopPassthrough() perform the recommended external deletion.
+    vTaskSuspend(nullptr);
 }
 
 } // namespace
@@ -880,6 +913,7 @@ extern "C" bool AUDIO_StartPassthrough(void) {
     // inline on this task, and the Opus TX encode (espnow/uplink sink ->
     // OPUS_VOICE_EncProcess, libopus complexity 10) overflows an 8 KB stack
     // the moment the first frame is encoded.
+    s_passthrough_task_exited = false;
     if (xTaskCreatePinnedToCoreWithCaps(audio_passthrough_task,
                                         "audio_passthrough",
                                         32768,
@@ -902,9 +936,17 @@ extern "C" void AUDIO_StopPassthrough(void) {
     }
 
     s_passthrough_running = false;
-    for (int wait = 0; wait < 50 && s_passthrough_task != nullptr; ++wait) {
+    for (int wait = 0; wait < 50 && !s_passthrough_task_exited; ++wait) {
         vTaskDelay(pdMS_TO_TICKS(2));
     }
+    if (s_passthrough_task != nullptr) {
+        if (!s_passthrough_task_exited) {
+            ESP_LOGW(TAG, "passthrough task did not stop cleanly; forcing delete");
+        }
+        vTaskDeleteWithCaps(s_passthrough_task);
+        s_passthrough_task = nullptr;
+    }
+    s_passthrough_task_exited = false;
 }
 
 extern "C" void AUDIO_SetMode(const AUDIO_Mode_t mode) {

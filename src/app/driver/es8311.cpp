@@ -1,4 +1,5 @@
 #include "driver/es8311.h"
+#include "lib/nrl_psram.h"
 
 #include "driver/audio_passthrough.h"
 #include "driver/board_pins.h"
@@ -6,7 +7,6 @@
 #include "driver/i2c1.h"
 
 #include <driver/gpio.h>
-#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -118,8 +118,10 @@ static bool s_es8311_ready = false;
 // requests arriving from NRL voice during this interval must not restart the
 // 16 kHz passthrough underneath the media task.
 static volatile bool s_hifi_active = false;
-static int16_t *s_hifi_mix_buffer = nullptr;
-static size_t s_hifi_mix_capacity = 0u;
+constexpr size_t kHifiMixSamples = 64u * 1024u;
+NRL_PSRAM_BSS static int16_t s_hifi_mix_storage[kHifiMixSamples];
+static int16_t *s_hifi_mix_buffer = s_hifi_mix_storage;
+static size_t s_hifi_mix_capacity = sizeof(s_hifi_mix_storage);
 static uint8_t s_mic_volume = kEs8311AdcVolumeDefault;
 static uint8_t s_line_out_volume = kEs8311DacVolumeDefault;
 static bool s_hp_drive_enabled = false;
@@ -349,24 +351,6 @@ static bool es8311_set_dac_mute(const bool muted) {
     reg31 = muted ? static_cast<uint8_t>(reg31 | kEs8311DacMuteMask)
                   : static_cast<uint8_t>(reg31 & ~kEs8311DacMuteMask);
     return es8311_write_reg(ES8311_REG31_DAC, reg31);
-}
-
-static bool ensure_hifi_mix_capacity(const size_t bytes) {
-    if (s_hifi_mix_capacity >= bytes) {
-        return true;
-    }
-
-    void *grown = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (grown == nullptr) {
-        grown = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-    if (grown == nullptr) {
-        return false;
-    }
-    heap_caps_free(s_hifi_mix_buffer);
-    s_hifi_mix_buffer = static_cast<int16_t *>(grown);
-    s_hifi_mix_capacity = bytes;
-    return true;
 }
 
 static uint8_t es8311_output_drive_reg(void) {
@@ -801,21 +785,28 @@ extern "C" bool ES8311_HifiAcquire(const uint32_t sample_rate_hz,
 
 extern "C" bool ES8311_HifiWrite(const void *pcm, const size_t bytes) {
     if (!s_hifi_active || pcm == nullptr || bytes == 0u ||
-        (bytes % (2u * sizeof(int16_t))) != 0u ||
-        !ensure_hifi_mix_capacity(bytes)) {
+        (bytes % (2u * sizeof(int16_t))) != 0u) {
         return false;
     }
 
     const int16_t *stereo = static_cast<const int16_t *>(pcm);
     const size_t frames = bytes / (2u * sizeof(int16_t));
-    for (size_t i = 0u; i < frames; ++i) {
-        const int32_t mixed =
-            (static_cast<int32_t>(stereo[i * 2u]) +
-             static_cast<int32_t>(stereo[i * 2u + 1u])) / 2;
-        s_hifi_mix_buffer[i * 2u] = static_cast<int16_t>(mixed);
-        s_hifi_mix_buffer[i * 2u + 1u] = static_cast<int16_t>(mixed);
+    const size_t chunk_frames = s_hifi_mix_capacity / (2u * sizeof(int16_t));
+    for (size_t offset = 0u; offset < frames;) {
+        const size_t take = (frames - offset < chunk_frames) ? frames - offset : chunk_frames;
+        for (size_t i = 0u; i < take; ++i) {
+            const size_t source = (offset + i) * 2u;
+            const int32_t mixed =
+                (static_cast<int32_t>(stereo[source]) +
+                 static_cast<int32_t>(stereo[source + 1u])) / 2;
+            s_hifi_mix_buffer[i * 2u] = static_cast<int16_t>(mixed);
+            s_hifi_mix_buffer[i * 2u + 1u] = static_cast<int16_t>(mixed);
+        }
+        const size_t chunk_bytes = take * 2u * sizeof(int16_t);
+        if (!AUDIO_WriteOutput(s_hifi_mix_buffer, chunk_bytes)) return false;
+        offset += take;
     }
-    return AUDIO_WriteOutput(s_hifi_mix_buffer, bytes);
+    return true;
 }
 
 extern "C" bool ES8311_HifiRelease(void) {

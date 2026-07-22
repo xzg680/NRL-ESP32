@@ -1,6 +1,6 @@
 #include "services/smb_vfs.h"
+#include "lib/nrl_psram.h"
 
-#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_vfs.h>
@@ -38,6 +38,7 @@ constexpr int kMaxOpenFiles = 8;
 // abort QUERY_DIRECTORY and made the browser drop the selected folder.
 constexpr int kSmbTimeoutSeconds = 30;
 constexpr size_t kMaxCachedDirEntries = 640;
+constexpr size_t kDirectoryCacheSlots = 2;
 // A 4 KB reply is accepted reliably by slower NAS implementations and still
 // avoids libsmb2's very chatty 512-byte ESP default.
 constexpr uint32_t kDirectoryReplyBytes = 4096;
@@ -57,6 +58,7 @@ static struct smb2fh *s_files[kMaxOpenFiles] = {};
 static int s_open_dirs = 0;
 static bool s_smb_bad = false;
 static std::atomic_bool s_cancel_directory_scan{false};
+static std::atomic_bool s_cancel_file_read{false};
 static char s_server[kMaxSmbText] = {};
 static char s_share[kMaxSmbText] = {};
 static char s_user[kMaxSmbText] = {};
@@ -72,6 +74,7 @@ struct CachedDirEntry {
 struct SmbVfsDir {
     DIR dir;
     CachedDirEntry *entries;
+    int cache_slot;
     size_t count;
     size_t index;
     bool truncated;
@@ -86,6 +89,28 @@ struct SmbVfsDir {
     char path[256];
     struct dirent entry;
 };
+
+NRL_PSRAM_BSS static CachedDirEntry
+    s_directory_cache[kDirectoryCacheSlots][kMaxCachedDirEntries];
+static bool s_directory_cache_used[kDirectoryCacheSlots] = {};
+
+static int acquire_directory_cache()
+{
+    for (size_t i = 0; i < kDirectoryCacheSlots; ++i) {
+        if (!s_directory_cache_used[i]) {
+            s_directory_cache_used[i] = true;
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+static void release_directory_cache(const int slot)
+{
+    if (slot >= 0 && static_cast<size_t>(slot) < kDirectoryCacheSlots) {
+        s_directory_cache_used[slot] = false;
+    }
+}
 
 static inline const char *smb_path(const char *vfs_path)
 {
@@ -184,6 +209,74 @@ static bool smb_ensure_connected_locked(void)
     return true;
 }
 
+// Service one async libsmb2 command while holding s_lock. On every abnormal
+// exit the context is destroyed before the caller's stack-owned callback
+// state goes out of scope. smb2_destroy_context() synchronously cancels the
+// queued PDU and invokes its callback, preventing a later use-after-return.
+static bool smb_wait_async_locked(volatile size_t *completed,
+                                  const size_t expected,
+                                  const std::atomic_bool *cancel,
+                                  const int timeout_ms)
+{
+    const int64_t deadline_us = esp_timer_get_time() +
+                                static_cast<int64_t>(timeout_ms) * 1000LL;
+    bool aborted = false;
+    while (*completed < expected) {
+        if (cancel != nullptr && cancel->load()) {
+            aborted = true;
+            break;
+        }
+        const int64_t remaining_us = deadline_us - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            aborted = true;
+            break;
+        }
+        struct pollfd pfd = {};
+        pfd.fd = smb2_get_fd(s_smb);
+        pfd.events = smb2_which_events(s_smb);
+        const int remaining_ms = static_cast<int>(remaining_us / 1000LL);
+        const int poll_ms = remaining_ms < 100 ? remaining_ms : 100;
+        const int polled = poll(&pfd, 1, poll_ms > 0 ? poll_ms : 1);
+        if (polled < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            aborted = true;
+            break;
+        }
+        smb2_timeout_pdus(s_smb);
+        if (pfd.revents != 0 && smb2_service(s_smb, pfd.revents) < 0) {
+            aborted = true;
+            break;
+        }
+    }
+    if (!aborted) {
+        return true;
+    }
+    s_smb_bad = true;
+    smb_destroy_context_locked();
+    return false;
+}
+
+struct AsyncReadBatch {
+    volatile size_t completed;
+};
+
+struct AsyncReadResult {
+    AsyncReadBatch *batch;
+    int status;
+    size_t requested;
+};
+
+static void file_read_cb(struct smb2_context *, const int status,
+                         void *, void *private_data)
+{
+    AsyncReadResult *result = static_cast<AsyncReadResult *>(private_data);
+    result->status = status;
+    const size_t completed = result->batch->completed;
+    result->batch->completed = completed + 1u;
+}
+
 static int vfs_open(void *, const char *path, const int flags, int)
 {
     if ((flags & (O_WRONLY | O_RDWR | O_CREAT)) != 0) {
@@ -223,6 +316,7 @@ static int vfs_open(void *, const char *path, const int flags, int)
         return -1;
     }
     s_files[fd] = fh;
+    s_cancel_file_read.store(false);
     return fd;
 }
 
@@ -233,21 +327,95 @@ static ssize_t vfs_read(void *, const int fd, void *dst, const size_t size)
         errno = EBADF;
         return -1;
     }
-    // libsmb2's sync smb2_read never returns on this port once a single
-    // request spans multiple TCP segments (the media player's 8 KB reads
-    // hang forever while metadata-sized reads always complete). Issue
-    // MTU-sized requests instead so every SMB2 READ response fits in one
-    // segment, and reassemble here.
+    // Keep each response inside one TCP segment, but pipeline several explicit
+    // preads so a PSRAM refill costs roughly one network round trip rather
+    // than one round trip per 1200 bytes.
     constexpr size_t kChunk = 1200;
+    constexpr size_t kPipelineDepth = 8;
     uint8_t *out = static_cast<uint8_t *>(dst);
     size_t done = 0;
+    uint64_t file_offset = 0;
+    if (smb2_lseek(s_smb, s_files[fd], 0, SEEK_CUR, &file_offset) < 0) {
+        errno = EIO;
+        return -1;
+    }
     while (done < size) {
-        const size_t want = ((size - done) < kChunk) ? (size - done) : kChunk;
-        const int got = smb2_read(s_smb, s_files[fd], out + done,
-                                  static_cast<uint32_t>(want));
-        if (got < 0) {
-            const char *error = smb2_get_error(s_smb);
-            if (smb_error_is_connection_loss(error)) {
+        if (s_cancel_file_read.load()) {
+            errno = ECANCELED;
+            break;
+        }
+        AsyncReadBatch batch = {};
+        AsyncReadResult results[kPipelineDepth] = {};
+        size_t queued = 0;
+        size_t batch_requested = 0;
+        bool queue_failed = false;
+        while (queued < kPipelineDepth && done + batch_requested < size) {
+            const size_t remaining = size - done - batch_requested;
+            const size_t want = remaining < kChunk ? remaining : kChunk;
+            results[queued].batch = &batch;
+            results[queued].requested = want;
+            const int rc = smb2_pread_async(
+                s_smb, s_files[fd], out + done + batch_requested,
+                static_cast<uint32_t>(want), file_offset + done + batch_requested,
+                file_read_cb, &results[queued]);
+            if (rc < 0) {
+                queue_failed = true;
+                break;
+            }
+            batch_requested += want;
+            ++queued;
+        }
+
+        const bool wait_ok = queued > 0u &&
+            smb_wait_async_locked(&batch.completed, queued,
+                                  &s_cancel_file_read,
+                                  kSmbTimeoutSeconds * 1000);
+        if (!wait_ok) {
+            queue_failed = true;
+        }
+
+        size_t batch_done = 0;
+        bool short_read = false;
+        for (size_t i = 0; i < queued; ++i) {
+            if (results[i].status < 0) {
+                queue_failed = true;
+                break;
+            }
+            const size_t got = static_cast<size_t>(results[i].status);
+            batch_done += got;
+            if (got < results[i].requested) {
+                short_read = true;
+                break;
+            }
+        }
+        done += batch_done;
+
+        // pread callbacks may complete out of order and each updates fh->offset;
+        // restore the one authoritative sequential position after the batch.
+        if (s_smb != nullptr && !s_smb_bad) {
+            uint64_t current = 0;
+            (void)smb2_lseek(s_smb, s_files[fd],
+                             static_cast<int64_t>(file_offset + done),
+                             SEEK_SET, &current);
+        }
+
+        if (queue_failed) {
+            const char *error = s_smb != nullptr ? smb2_get_error(s_smb)
+                                                 : "connection aborted";
+            int first_status = 0;
+            for (size_t i = 0; i < queued; ++i) {
+                if (results[i].status < 0) {
+                    first_status = results[i].status;
+                    break;
+                }
+            }
+            ESP_LOGW(TAG,
+                     "read batch failed at %llu: queued=%u completed=%u status=%d error=%s",
+                     static_cast<unsigned long long>(file_offset + done),
+                     static_cast<unsigned>(queued),
+                     static_cast<unsigned>(batch.completed), first_status,
+                     error);
+            if (s_cancel_file_read.load() || smb_error_is_connection_loss(error)) {
                 s_smb_bad = true;
             }
             if (done > 0) {
@@ -256,8 +424,7 @@ static ssize_t vfs_read(void *, const int fd, void *dst, const size_t size)
             errno = EIO;
             return -1;
         }
-        done += static_cast<size_t>(got);
-        if (got == 0 || static_cast<size_t>(got) < want) {
+        if (short_read || batch_done < batch_requested) {
             break; // EOF or short read
         }
     }
@@ -337,7 +504,7 @@ static int vfs_stat(void *, const char *path, struct stat *st)
 }
 
 struct RawCommandResult {
-    volatile bool done;
+    volatile size_t completed;
     int status;
     smb2_file_id file_id;
     SmbVfsDir *dir;
@@ -345,35 +512,9 @@ struct RawCommandResult {
 
 static bool raw_wait_for_reply(RawCommandResult *result, const int timeout_ms)
 {
-    const int64_t deadline_us = esp_timer_get_time() +
-                                static_cast<int64_t>(timeout_ms) * 1000LL;
-    while (!result->done) {
-        if (s_cancel_directory_scan.load()) {
-            return false;
-        }
-        const int64_t remaining_us = deadline_us - esp_timer_get_time();
-        if (remaining_us <= 0) {
-            return false;
-        }
-        struct pollfd pfd = {};
-        pfd.fd = smb2_get_fd(s_smb);
-        pfd.events = smb2_which_events(s_smb);
-        const int poll_ms = static_cast<int>(remaining_us / 1000LL) < 1000
-                                ? static_cast<int>(remaining_us / 1000LL)
-                                : 1000;
-        const int polled = poll(&pfd, 1, poll_ms > 0 ? poll_ms : 1);
-        if (polled < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return false;
-        }
-        smb2_timeout_pdus(s_smb);
-        if (pfd.revents != 0 && smb2_service(s_smb, pfd.revents) < 0) {
-            return false;
-        }
-    }
-    return true;
+    return smb_wait_async_locked(&result->completed, 1u,
+                                 &s_cancel_directory_scan,
+                                 timeout_ms);
 }
 
 static void raw_create_cb(struct smb2_context *, const int status,
@@ -385,7 +526,7 @@ static void raw_create_cb(struct smb2_context *, const int status,
         const auto *reply = static_cast<const smb2_create_reply *>(command_data);
         memcpy(result->file_id, reply->file_id, SMB2_FD_SIZE);
     }
-    result->done = true;
+    result->completed = 1u;
 }
 
 static void raw_close_cb(struct smb2_context *, const int status,
@@ -393,7 +534,7 @@ static void raw_close_cb(struct smb2_context *, const int status,
 {
     RawCommandResult *result = static_cast<RawCommandResult *>(private_data);
     result->status = status;
-    result->done = true;
+    result->completed = 1u;
 }
 
 static void raw_query_dir_cb(struct smb2_context *smb2, const int status,
@@ -440,7 +581,7 @@ static void raw_query_dir_cb(struct smb2_context *smb2, const int status,
             result->dir->truncated = true;
         }
     }
-    result->done = true;
+    result->completed = 1u;
 }
 
 static bool raw_open_directory(const char *path, smb2_file_id file_id)
@@ -525,9 +666,14 @@ static bool raw_read_directory_batch(SmbVfsDir *dir)
     const int command_timeout = remaining_ms < kDirectoryCommandTimeoutMs
                                     ? remaining_ms : kDirectoryCommandTimeoutMs;
     if (!raw_wait_for_reply(&result, command_timeout > 0 ? command_timeout : 1)) {
-        ESP_LOGW(TAG, "directory query %u timed out with %u entries cached",
-                 static_cast<unsigned>(dir->query_count + 1u),
-                 static_cast<unsigned>(dir->count));
+        if (s_cancel_directory_scan.load()) {
+            ESP_LOGI(TAG, "directory query canceled with %u entries cached",
+                     static_cast<unsigned>(dir->count));
+        } else {
+            ESP_LOGW(TAG, "directory query %u timed out with %u entries cached",
+                     static_cast<unsigned>(dir->query_count + 1u),
+                     static_cast<unsigned>(dir->count));
+        }
         dir->context_stale = true;
         dir->truncated = true;
         dir->finished = true;
@@ -578,23 +724,23 @@ static DIR *vfs_opendir(void *, const char *path)
         errno = ENOMEM;
         return nullptr;
     }
-    dir->entries = static_cast<CachedDirEntry *>(heap_caps_calloc(
-        kMaxCachedDirEntries, sizeof(CachedDirEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (dir->entries == nullptr) {
+    dir->cache_slot = acquire_directory_cache();
+    if (dir->cache_slot < 0) {
         free(dir);
-        ESP_LOGE(TAG, "directory cache allocation failed");
-        errno = ENOMEM;
+        ESP_LOGW(TAG, "all directory cache slots are busy");
+        errno = EBUSY;
         return nullptr;
     }
+    dir->entries = s_directory_cache[dir->cache_slot];
 
     ESP_LOGI(TAG, "directory scan started: %s", path);
 
     if (!raw_open_directory(path, dir->file_id)) {
-        ESP_LOGW(TAG, "open directory %s failed: %s", path, smb2_get_error(s_smb));
-        // A low-level command may still own its callback data when the socket
-        // service fails. Retire this context instead of issuing another PDU.
+        const char *error = s_smb != nullptr ? smb2_get_error(s_smb)
+                                             : "connection aborted";
+        ESP_LOGW(TAG, "open directory %s failed: %s", path, error);
         s_smb_bad = true;
-        heap_caps_free(dir->entries);
+        release_directory_cache(dir->cache_slot);
         free(dir);
         errno = EIO;
         return nullptr;
@@ -615,7 +761,9 @@ static void finish_remote_dir_locked(SmbVfsDir *dir)
     if (dir->context_stale || s_smb == nullptr || s_smb_bad) {
         s_smb_bad = true;
     } else if (!raw_close_directory(dir->file_id)) {
-        ESP_LOGW(TAG, "close directory %s failed: %s", dir->path, smb2_get_error(s_smb));
+        const char *error = s_smb != nullptr ? smb2_get_error(s_smb)
+                                             : "connection aborted";
+        ESP_LOGW(TAG, "close directory %s failed: %s", dir->path, error);
         s_smb_bad = true;
     }
     dir->remote_open = false;
@@ -668,8 +816,8 @@ static int vfs_closedir(void *, DIR *pdir)
     {
         LockGuard lock;
         finish_remote_dir_locked(dir);
+        release_directory_cache(dir->cache_slot);
     }
-    heap_caps_free(dir->entries);
     free(dir);
     return 0;
 }
@@ -766,4 +914,9 @@ extern "C" bool SMB_VFS_Mounted(void)
 extern "C" void SMB_VFS_CancelDirectoryScan(void)
 {
     s_cancel_directory_scan.store(true);
+}
+
+extern "C" void SMB_VFS_CancelFileRead(void)
+{
+    s_cancel_file_read.store(true);
 }

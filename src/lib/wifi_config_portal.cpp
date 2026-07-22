@@ -384,7 +384,7 @@ static std::string buildApSsid()
                           (static_cast<uint32_t>(mac[4]) << 8) |
                           mac[5];
     char buffer[32];
-    snprintf(buffer, sizeof(buffer), "NRL3188-ESP32-%06lX",
+    snprintf(buffer, sizeof(buffer), "NRL-ESP32-%06lX",
              static_cast<unsigned long>(tail));
     return std::string(buffer);
 }
@@ -2891,6 +2891,12 @@ static void ensureServerRunning()
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
     cfg.max_uri_handlers = 32;
+    // The IDF default allows seven HTTP clients and uses another three
+    // sockets internally. With the default LWIP socket pool that can consume
+    // every descriptor before APRS, NRL, SMB playback or OTA opens one.
+    // Three browser sessions are enough for the embedded portal; LRU purge
+    // below replaces stale keep-alive sessions when another client arrives.
+    cfg.max_open_sockets = 3;
     // Templated audio config page builds via std::string concatenation can
     // exceed the default 4 KB worker stack.
     cfg.stack_size = 8192;

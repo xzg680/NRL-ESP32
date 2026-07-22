@@ -2267,7 +2267,12 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             uint32_t before = 0;
             bool found = s_previous_n == 0u;
             for (UBaseType_t j = 0; j < s_previous_n; ++j) {
-                if (s_previous[j].xHandle == s_current[i].xHandle) {
+                // Heap reuse can give a newly-created task the same TCB
+                // address as a deleted task. Match FreeRTOS' unique task
+                // number as well as the handle, otherwise the subtraction
+                // underflows and TOP reports impossible values (e.g. 3777%).
+                if (s_previous[j].xHandle == s_current[i].xHandle &&
+                    s_previous[j].xTaskNumber == s_current[i].xTaskNumber) {
                     before = s_previous[j].ulRunTimeCounter;
                     found = true;
                     break;
@@ -2276,7 +2281,12 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
             // A task created after the previous sample has no valid interval
             // baseline; start reporting it on the next request.
             s_rows[rows_n].task = &s_current[i];
-            s_rows[rows_n].delta = found ? s_current[i].ulRunTimeCounter - before : 0u;
+            uint32_t delta = found ? s_current[i].ulRunTimeCounter - before : 0u;
+            // A single task cannot consume more than one core over the sample
+            // window. This also contains any counter/identity anomaly without
+            // hiding legitimate aggregate dual-core load in the other rows.
+            if (delta > window_us) delta = window_us;
+            s_rows[rows_n].delta = delta;
             ++rows_n;
         }
         for (UBaseType_t i = 1; i < rows_n; ++i) { // insertion sort, desc
