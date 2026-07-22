@@ -88,9 +88,9 @@ HTML 阅读版：[中文](README.html) / [English](README.en.html)
 ```powershell
 $env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
 $env:OTA_ADMIN_TOKEN = '<管理员令牌>'
-python scripts/publish_ota_mcp.py --version 0.8.19 --notes 'release notes'
+python scripts/publish_ota_mcp.py --version 0.8.20 --notes 'release notes'
 # 仅核验服务器上的四板发布包：
-python scripts/publish_ota_mcp.py --version 0.8.19 --verify-only
+python scripts/publish_ota_mcp.py --version 0.8.20 --verify-only
 ```
 
 ## 支持功能

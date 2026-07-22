@@ -86,9 +86,9 @@ The following capabilities are implemented in the current codebase. Features mar
 ```powershell
 $env:OTA_SERVER_URL = 'https://ota.nrlptt.com/nrlota/api'
 $env:OTA_ADMIN_TOKEN = '<admin token>'
-python scripts/publish_ota_mcp.py --version 0.8.19 --notes 'release notes'
+python scripts/publish_ota_mcp.py --version 0.8.20 --notes 'release notes'
 # Verify all six published board packages without writing:
-python scripts/publish_ota_mcp.py --version 0.8.19 --verify-only
+python scripts/publish_ota_mcp.py --version 0.8.20 --verify-only
 ```
 
 ## Features
