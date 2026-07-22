@@ -1169,21 +1169,21 @@ bool sendBeacon()
     char path[17];
     strncpy(path, s_cfg.path, sizeof(path));
     path[sizeof(path) - 1] = '\0';
-    char rf_info[240];
+    char rf_info[257];
 
     const ExternalRadioConfig *radio = EXTERNAL_RADIO_GetConfig();
     const char *nrl_host = (radio != nullptr && radio->server_host[0] != '\0')
                                ? radio->server_host
                                : "unknown";
     const uint16_t nrl_port = (radio != nullptr) ? radio->server_port : 0u;
-    char net_comment[288];
+    char net_comment[300];
     // Speed/course/altitude already use APRS-standard ccc/sss and /A= fields
     // in buildPositionInfo(). Do not repeat them in the free-text comment:
     // map clients render those standard fields themselves.
     snprintf(net_comment, sizeof(net_comment), "@udp://%s:%u%s%s",
              nrl_host, (unsigned)nrl_port,
              s_cfg.comment[0] != '\0' ? " " : "", s_cfg.comment);
-    char net_info[320];
+    char net_info[336];
     const bool have_rf_info = can_beacon &&
         buildPositionInfo(rf_info, sizeof(rf_info), s_cfg.comment);
     const bool have_net_info = can_beacon &&

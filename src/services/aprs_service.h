@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define APRS_COMMENT_MAX_BYTES 160u
+#define APRS_COMMENT_MAX_BYTES 219u
 
 typedef struct {
     bool enabled;         // master switch

@@ -61,7 +61,7 @@ namespace {
 
 constexpr size_t kFormParamMax = 48u;
 constexpr size_t kFormKeyMax = 48u;
-constexpr size_t kFormValueMax = 192u;
+constexpr size_t kFormValueMax = 768u;
 
 struct FormParam {
     char key[kFormKeyMax];

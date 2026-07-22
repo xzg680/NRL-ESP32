@@ -9,8 +9,8 @@ Object.assign(translations.zh,{mediaConfig:'媒体/保姆',aprsConfig:'APRS'});
 Object.assign(translations.en,{signalingConfig:'Signaling / CTCSS'});
 Object.assign(translations.zh,{signalingConfig:'信令 / CTCSS'});
 Object.assign(translations.en,{remoteUpdating:'Installing firmware... {percent}%'});
-Object.assign(translations.en,{releaseTitle:'0.8.15 feature updates',releaseProvisioning:'Keeps the display available during first-time setup while deferring memory-heavy services until WiFi provisioning completes.',releaseS31Setup:'Adds dedicated WiFi/BLE setup guidance on display boards and direct touchscreen WiFi setup on S31 Korvo.'});
-Object.assign(translations.zh,{releaseTitle:'0.8.15 功能更新',releaseProvisioning:'首次配网期间保留屏幕显示，并将大内存服务延迟到 WiFi 配网完成后启动。',releaseS31Setup:'带屏幕板卡增加 WiFi/蓝牙配网引导，S31 Korvo 支持直接通过触屏设置 WiFi。'});
+Object.assign(translations.en,{releaseTitle:'0.8.19 feature updates',releaseAprsComment:'APRS beacon comment extended to 219 UTF-8 bytes (APRS spec maximum).',releaseAprsFix:'Fixed an issue where non-ASCII beacon comments longer than ~64 bytes could not be saved from the web portal.'});
+Object.assign(translations.zh,{releaseTitle:'0.8.19 功能更新',releaseAprsComment:'APRS 信标注释扩展至 219 个 UTF-8 字节（APRS 规范上限）。',releaseAprsFix:'修复 Web 页面中超过 64 字节的非 ASCII 信标注释无法保存的问题。'});
 Object.assign(translations.zh,{remoteUpdating:'正在升级固件... {percent}%'});
 function lang(){const s=localStorage.getItem('nrl_lang');if(s==='zh'||s==='en')return s;return navigator.language&&navigator.language.toLowerCase().startsWith('zh')?'zh':'en';}
 function t(k,values={}){const l=lang();let text=(translations[l]&&translations[l][k])||translations.en[k]||k;Object.entries(values).forEach(([name,value])=>{text=text.replace('{'+name+'}',String(value));});return text;}
