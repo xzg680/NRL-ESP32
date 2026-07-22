@@ -145,6 +145,8 @@ const translations = {
         audioExpertMode: 'Expert Mode',
         saved: 'Saved',
         saveFailed: 'Save failed',
+        sent: 'Sent',
+        sendFailed: 'Send failed',
         mediaConfig: 'Media / Nanny',
         aprsConfig: 'APRS',
         signalingConfig: 'Signaling / CTCSS',
@@ -448,6 +450,8 @@ const translations = {
         saveItem: '保存',
         saved: '已保存',
         saveFailed: '保存失败',
+        sent: '已发送',
+        sendFailed: '发送失败',
         battery: '电池',
         batteryHint: '使用万用表校准板载电池电压采样。',
         batteryRaw: '原始读数 (mV)',
@@ -1010,12 +1014,12 @@ const translations = {
       musicLibraryPost('snapshot', null, false);
     }
 
-    function flashButtonFeedback(button, ok) {
+    function flashButtonFeedback(button, ok, okKey, failKey) {
       if (!button) return;
       const orig = button.textContent;
       const origI18n = button.getAttribute('data-i18n');
       button.removeAttribute('data-i18n');
-      button.textContent = ok ? t('saved') : t('saveFailed');
+      button.textContent = ok ? t(okKey || 'saved') : t(failKey || 'saveFailed');
       button.disabled = true;
       setTimeout(() => {
         button.textContent = orig;
@@ -1070,7 +1074,7 @@ const translations = {
     // Post a form plus one extra action flag (e.g. radio_play=1). Needed
     // because postForm serialises FormData without the clicked submit
     // button, so action buttons are type="button" with an onclick instead.
-    function submitFormAction(button, name) {
+    function submitFormAction(button, name, okKey, failKey) {
       const form = button ? button.form : null;
       if (!form) return;
       const flag = document.createElement('input');
@@ -1082,7 +1086,7 @@ const translations = {
       postAndApply(form).then((reply) => {
         flag.remove();
         button.disabled = false;
-        flashButtonFeedback(button, reply && reply.ok);
+        flashButtonFeedback(button, reply && reply.ok, okKey, failKey);
         if (reply && reply.ok && form.dataset.reloadOnSave === '1') {
           setTimeout(() => window.location.reload(), 300);
         }
