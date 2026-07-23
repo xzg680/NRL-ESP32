@@ -1076,8 +1076,18 @@ lv_obj_t *prepareContent()
     return s_content;
 }
 
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+void menuRowTap(lv_event_t *event)
+{
+    const size_t index = static_cast<size_t>(
+        reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
+    s_menu_index = index;
+    Display_MenuConfirm();
+}
+#endif
+
 void menuRow(lv_obj_t *scr, int y, const char *text, bool selected,
-             const lv_font_t *override_font = nullptr)
+             const lv_font_t *override_font = nullptr, int item_index = -1)
 {
     lv_obj_t *row = lv_obj_create(scr);
     lv_obj_remove_style_all(row);
@@ -1089,6 +1099,14 @@ void menuRow(lv_obj_t *scr, int y, const char *text, bool selected,
     lv_obj_set_style_border_width(row, selected ? 1 : 0, 0);
     lv_obj_set_style_radius(row, 4, 0);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    if (item_index >= 0) {
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x087A82), LV_STATE_PRESSED);
+        lv_obj_add_event_cb(row, menuRowTap, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<uintptr_t>(item_index)));
+    }
+#endif
 
     const lv_font_t *font = override_font != nullptr
                                 ? override_font
@@ -1197,7 +1215,8 @@ void buildMainMenu()
     const size_t start = menuWindowStart(kItemCount, kVisibleRows);
     const size_t end = (start + kVisibleRows < kItemCount) ? start + kVisibleRows : kItemCount;
     for (size_t i = start; i < end; ++i) {
-        menuRow(scr, 1 + static_cast<int>(i - start) * 24, items[i], s_menu_index == i);
+        menuRow(scr, 1 + static_cast<int>(i - start) * 24, items[i], s_menu_index == i,
+                nullptr, static_cast<int>(i));
     }
 #if NRL_BOARD == NRL_BOARD_GEZIPAI || NRL_BOARD == NRL_BOARD_BI4UMD
     menuScrollBar(scr, kItemCount, kVisibleRows, start);
@@ -1215,7 +1234,7 @@ void buildLanguageMenu()
     };
     for (size_t i = 0; i < 3u; ++i) {
         menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i,
-                i == 1u ? &s_font_aprs_16 : nullptr);
+                i == 1u ? &s_font_aprs_16 : nullptr, static_cast<int>(i));
     }
     menuStatusFooter(scr, menuText("PTT SELECT", "PTT选择"));
 }
@@ -1223,7 +1242,7 @@ void buildLanguageMenu()
 void buildAboutMenu()
 {
     lv_obj_t *scr = prepareContent();
-    menuRow(scr, 1, menuText("< BACK", "< 返回"), true);
+    menuRow(scr, 1, menuText("< BACK", "< 返回"), true, nullptr, 0);
 
     lv_obj_t *name = makeLabel(scr, &lv_font_montserrat_20, kColorAccent);
     lv_obj_set_width(name, kWidth);
@@ -1253,7 +1272,7 @@ void buildOtaMenu()
     const NrlOtaStatus *ota = otaUiSnapshot();
     if (ota == nullptr) {
         s_menu_index = 0u;
-        menuRow(scr, 1, menuText("< BACK / OTA", "< 返回 / OTA"), true);
+        menuRow(scr, 1, menuText("< BACK / OTA", "< 返回 / OTA"), true, nullptr, 0);
         lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_16), kColorWeak);
         lv_obj_set_width(lbl, kWidth - 20);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
@@ -1263,7 +1282,7 @@ void buildOtaMenu()
         return;
     }
     if (s_menu_index > ota->release_count) s_menu_index = 0u;
-    menuRow(scr, 1, menuText("< BACK / OTA", "< 返回 / OTA"), s_menu_index == 0u);
+    menuRow(scr, 1, menuText("< BACK / OTA", "< 返回 / OTA"), s_menu_index == 0u, nullptr, 0);
 
     if (ota->checking || s_menu_ota_requested) {
         lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_20), kColorApWarn);
@@ -1320,7 +1339,7 @@ void buildOtaMenu()
                          ? menuText("  CURRENT", "  当前")
                          : "");
             menuRow(scr, 29 + static_cast<int>(i - start) * 27, version,
-                    s_menu_index == i + 1u);
+                    s_menu_index == i + 1u, nullptr, static_cast<int>(i + 1u));
         }
     }
 
@@ -1346,7 +1365,8 @@ void buildAprsMenu()
         menuText("SEND BEACON NOW", "立即发送信标"),
     };
     for (size_t i = 0; i < 5u; ++i) {
-        menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
+        menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i,
+                nullptr, static_cast<int>(i));
     }
 
     AprsConfig cfg{};
@@ -1390,7 +1410,7 @@ void buildAprsSettingsMenu()
             snprintf(line, sizeof(line), "SSID: %u", static_cast<unsigned>(cfg.ssid));
         }
         menuRow(scr, 1 + static_cast<int>(item - start) * 28, line,
-                s_menu_index == item);
+                s_menu_index == item, nullptr, static_cast<int>(item));
     }
     char footer[40];
     snprintf(footer, sizeof(footer), menuText("ITEM %u/%u  PTT TOGGLE/NEXT",
@@ -1405,7 +1425,7 @@ void buildAprsSettingsMenu()
 void buildAprsListMenu()
 {
     lv_obj_t *scr = prepareContent();
-    menuRow(scr, 1, menuText("< BACK / STATIONS", "< 返回 / 电台列表"), true);
+    menuRow(scr, 1, menuText("< BACK / STATIONS", "< 返回 / 电台列表"), true, nullptr, 0);
 
     AprsStationInfo stations[8];
     const size_t count = APRS_SERVICE_GetStations(stations, 8);
@@ -1448,7 +1468,7 @@ void gpsInfoLine(lv_obj_t *scr, const int y, const char *text, const uint32_t co
 void buildGpsInfoMenu()
 {
     lv_obj_t *scr = prepareContent();
-    menuRow(scr, 1, menuText("< BACK / GPS", "< 返回 / GPS"), true);
+    menuRow(scr, 1, menuText("< BACK / GPS", "< 返回 / GPS"), true, nullptr, 0);
 
     AprsGpsInfo gps{};
     APRS_SERVICE_GetGpsInfo(&gps);
@@ -1543,7 +1563,7 @@ void buildSignalingMenu()
         menuText("MDC1200 SETTINGS", "MDC1200设置"),
         menuText("DTMF SETTINGS", "DTMF设置"),
         menuText("CTCSS RX SETTINGS", "CTCSS接收设置")};
-    for (size_t i = 0; i < 4u; ++i) menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i);
+    for (size_t i = 0; i < 4u; ++i) menuRow(scr, 1 + static_cast<int>(i) * 28, items[i], s_menu_index == i, nullptr, static_cast<int>(i));
     menuStatusFooter(scr, menuText("VOL+/- SELECT   PTT OK", "音量+/- 选择  PTT确认"));
 }
 
@@ -1552,14 +1572,14 @@ void buildCtcssMenu()
     lv_obj_t *scr = prepareContent();
     SignalingConfig cfg{};
     SIGNALING_GetConfig(&cfg);
-    menuRow(scr, 1, menuText("< BACK / CTCSS", "< 返回 / CTCSS"), s_menu_index == 0u);
+    menuRow(scr, 1, menuText("< BACK / CTCSS", "< 返回 / CTCSS"), s_menu_index == 0u, nullptr, 0);
     char line[40];
     snprintf(line, sizeof(line), menuText("MIC RX: %s", "麦克风接收: %s"),
              cfg.ctcss_rx_mic ? menuText("ON", "开") : menuText("OFF", "关"));
-    menuRow(scr, 35, line, s_menu_index == 1u);
+    menuRow(scr, 35, line, s_menu_index == 1u, nullptr, 1);
     snprintf(line, sizeof(line), menuText("NRL RX: %s", "NRL接收: %s"),
              cfg.ctcss_rx_nrl ? menuText("ON", "开") : menuText("OFF", "关"));
-    menuRow(scr, 69, line, s_menu_index == 2u);
+    menuRow(scr, 69, line, s_menu_index == 2u, nullptr, 2);
     menuStatusFooter(scr, menuText("PTT TOGGLE", "PTT切换"));
 }
 
@@ -1570,7 +1590,7 @@ void buildProtocolMenu(bool mdc)
     SIGNALING_GetConfig(&cfg);
     menuRow(scr, 1, mdc
         ? menuText("< BACK / MDC1200", "< 返回 / MDC1200")
-        : menuText("< BACK / DTMF", "< 返回 / DTMF"), s_menu_index == 0u);
+        : menuText("< BACK / DTMF", "< 返回 / DTMF"), s_menu_index == 0u, nullptr, 0);
     const char *names[] = {
         menuText("MIC RX", "麦克风接收"), menuText("NRL RX", "NRL接收"),
         menuText("NRL TX", "NRL发送"), menuText("SPEAKER TX", "扬声器发送")};
@@ -1578,7 +1598,8 @@ void buildProtocolMenu(bool mdc)
         char line[40];
         snprintf(line, sizeof(line), "%s: %s", names[i], signalingRouteEnabled(cfg, mdc, i)
             ? menuText("ON", "开") : menuText("OFF", "关"));
-        menuRow(scr, 29 + static_cast<int>(i) * 28, line, s_menu_index == i + 1u);
+        menuRow(scr, 29 + static_cast<int>(i) * 28, line, s_menu_index == i + 1u,
+                nullptr, static_cast<int>(i + 1u));
     }
     char footer[48];
     if (mdc) {
@@ -1589,6 +1610,17 @@ void buildProtocolMenu(bool mdc)
     }
     menuStatusFooter(scr, footer);
 }
+
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+void menuGesture(lv_event_t *event)
+{
+    lv_indev_t *indev = lv_indev_active();
+    if (indev == nullptr) return;
+    const lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_TOP) Display_MenuNavigate(-1);
+    else if (dir == LV_DIR_BOTTOM) Display_MenuNavigate(1);
+}
+#endif
 
 void buildMenuUi()
 {
@@ -1606,6 +1638,9 @@ void buildMenuUi()
     else buildMainMenu();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     addBi4umdMenuButtons();
+    if (s_content != nullptr) {
+        lv_obj_add_event_cb(s_content, menuGesture, LV_EVENT_GESTURE, nullptr);
+    }
 #endif
 }
 
