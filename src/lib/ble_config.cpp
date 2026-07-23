@@ -69,6 +69,13 @@ uint32_t s_reboot_at_ms = 0;
 // and crashed. A blocking SCAN would also risk a BLE supervision timeout.
 bool s_scan_pending = false;   // fresh scan requested
 bool s_list_pending = false;   // cached-list dump requested
+bool s_wifi_transaction = false;
+bool s_wifi_transaction_has_ssid = false;
+char s_staged_wifi_ssid[33] = {};
+char s_staged_wifi_password[65] = {};
+volatile bool s_restart_wifi_pending = false;
+volatile bool s_restart_udp_pending = false;
+volatile bool s_wifi_result_pending = false;
 
 // BT/WiFi coexistence management. The single radio is shared; while the BT
 // controller is up, coexist time-slices airtime and bunches voice packets.
@@ -260,10 +267,82 @@ static void sendHelp(void)
     sendLine("SET CALL_SSID=<0..255>");
     sendLine("LIST");
     sendLine("SCAN");
+    sendLine("BEGIN");
     sendLine("SAVE");
     sendLine("APPLY");
     sendLine("RESET_NET");
     sendLine("REBOOT");
+}
+
+static void beginWifiTransaction(void)
+{
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    snprintf(s_staged_wifi_ssid, sizeof(s_staged_wifi_ssid), "%s",
+             config != nullptr ? config->wifi_ssid : "");
+    snprintf(s_staged_wifi_password, sizeof(s_staged_wifi_password), "%s",
+             config != nullptr ? config->wifi_password : "");
+    s_wifi_transaction_has_ssid = false;
+    s_wifi_transaction = true;
+}
+
+static bool stageWifiField(const char *key, const char *value)
+{
+    if (strcmp(key, "WIFI_SSID") == 0 || strcmp(key, "SSID") == 0) {
+        if (value[0] == '\0' || strlen(value) > 32u) return false;
+        if (strcmp(s_staged_wifi_ssid, value) != 0) {
+            // Never carry the previous hotspot's password into a new SSID.
+            s_staged_wifi_password[0] = '\0';
+        }
+        snprintf(s_staged_wifi_ssid, sizeof(s_staged_wifi_ssid), "%s", value);
+        s_wifi_transaction_has_ssid = true;
+        return true;
+    }
+    if (strcmp(key, "WIFI_PASS") == 0 || strcmp(key, "WIFI_PASSWORD") == 0 ||
+        strcmp(key, "PASS") == 0) {
+        if (strlen(value) > 64u) return false;
+        snprintf(s_staged_wifi_password, sizeof(s_staged_wifi_password), "%s", value);
+        return true;
+    }
+    return false;
+}
+
+static bool commitWifiTransaction(void)
+{
+    if (!s_wifi_transaction || !s_wifi_transaction_has_ssid ||
+        s_staged_wifi_ssid[0] == '\0') {
+        return false;
+    }
+    if (!EXTERNAL_RADIO_AddWifiProfile(s_staged_wifi_ssid,
+                                       s_staged_wifi_password, false)) {
+        return false;
+    }
+
+    // Keep all saved hotspots, but make the one selected during provisioning
+    // the first connection priority.
+    const ExternalRadioConfig *config = EXTERNAL_RADIO_GetConfig();
+    size_t selected = EXTERNAL_RADIO_MAX_WIFI_PROFILES;
+    if (config != nullptr) {
+        for (size_t i = 0; i < EXTERNAL_RADIO_MAX_WIFI_PROFILES; ++i) {
+            if (strcmp(config->wifi_profiles[i].ssid, s_staged_wifi_ssid) == 0) {
+                selected = i;
+                break;
+            }
+        }
+    }
+    while (selected > 0u && selected < EXTERNAL_RADIO_MAX_WIFI_PROFILES) {
+        if (!EXTERNAL_RADIO_MoveWifiProfile(selected, -1, false)) return false;
+        --selected;
+    }
+    if (!EXTERNAL_RADIO_SetWifiEnabled(true, false) ||
+        !EXTERNAL_RADIO_SaveConfig()) {
+        return false;
+    }
+    s_wifi_transaction = false;
+    s_wifi_transaction_has_ssid = false;
+    s_restart_wifi_pending = true;
+    s_restart_udp_pending = true;
+    s_wifi_result_pending = true;
+    return true;
 }
 
 // Stream the unique SSIDs currently in `results[0..got)` back over BLE as
@@ -356,20 +435,37 @@ static void handleCommand(char *command)
         return;
     }
 
+    if (strcasecmp(command, "BEGIN") == 0) {
+        beginWifiTransaction();
+        sendLine("OK BEGIN");
+        return;
+    }
+
     if (strcasecmp(command, "SAVE") == 0) {
         sendLine(EXTERNAL_RADIO_SaveConfig() ? "OK SAVE" : "ERR SAVE");
         return;
     }
 
     if (strcasecmp(command, "APPLY") == 0) {
-        NRLAudioBridge_ApplyConfig(true, true);
-        sendLine("OK APPLY");
+        if (s_wifi_transaction) {
+            if (!commitWifiTransaction()) {
+                sendLine("ERR APPLY");
+                return;
+            }
+            sendLine("OK APPLY");
+            sendLine("WIFI_STATE=CONNECTING");
+        } else {
+            s_restart_wifi_pending = true;
+            s_restart_udp_pending = true;
+            sendLine("OK APPLY");
+        }
         return;
     }
 
     if (strcasecmp(command, "RESET_NET") == 0) {
         if (EXTERNAL_RADIO_ResetNetworkConfig()) {
-            NRLAudioBridge_ApplyConfig(true, true);
+            s_restart_wifi_pending = true;
+            s_restart_udp_pending = true;
             sendLine("OK RESET_NET");
         } else {
             sendLine("ERR RESET_NET");
@@ -404,13 +500,21 @@ static void handleCommand(char *command)
 
         bool restart_wifi = false;
         bool restart_udp = false;
+        if (s_wifi_transaction &&
+            (strcmp(key, "WIFI_SSID") == 0 || strcmp(key, "SSID") == 0 ||
+             strcmp(key, "WIFI_PASS") == 0 || strcmp(key, "WIFI_PASSWORD") == 0 ||
+             strcmp(key, "PASS") == 0)) {
+            sendLine(stageWifiField(key, value) ? "OK SET" : "ERR SET");
+            return;
+        }
         if (!setField(key, value, &restart_wifi, &restart_udp) || !EXTERNAL_RADIO_SaveConfig()) {
             sendLine("ERR SET");
             return;
         }
 
         if (restart_wifi || restart_udp) {
-            NRLAudioBridge_ApplyConfig(restart_wifi, restart_udp);
+            s_restart_wifi_pending = s_restart_wifi_pending || restart_wifi;
+            s_restart_udp_pending = s_restart_udp_pending || restart_udp;
         }
         sendLine("OK SET");
         return;
@@ -459,6 +563,10 @@ class ConfigServerCallbacks final : public NimBLEServerCallbacks {
     {
         s_client_connected = false;
         s_advertising = false;
+        if (s_wifi_transaction) {
+            s_wifi_transaction = false;
+            s_wifi_transaction_has_ssid = false;
+        }
         ESP_LOGI(TAG, "client disconnected reason=%d", reason);
         // NimBLE doesn't auto-restart advertising; kick it off explicitly via
         // the BLEConfig_Poll() path (s_advertising = false triggers restart).
@@ -563,6 +671,21 @@ bool BLEConfig_IsReady(void)
     return s_initialized;
 }
 
+void BLEConfig_ReportWifiResult(bool connected)
+{
+    if (!s_wifi_result_pending) return;
+    if (connected) {
+        char ip[16] = {};
+        nrlIpToString(nrlWifiStaIp(), ip, sizeof(ip));
+        char line[48] = {};
+        snprintf(line, sizeof(line), "WIFI_STATE=GOT_IP,%s", ip);
+        sendLine(line);
+    } else {
+        sendLine("WIFI_STATE=FAILED");
+    }
+    s_wifi_result_pending = false;
+}
+
 void BLEConfig_Stop(void)
 {
     if (!s_initialized) {
@@ -580,6 +703,8 @@ void BLEConfig_Stop(void)
     s_initialized = false;
     s_advertising = false;
     s_client_connected = false;
+    s_wifi_transaction = false;
+    s_wifi_transaction_has_ssid = false;
     ESP_LOGI(TAG, "BLE stopped (radio freed for WiFi)");
 }
 
@@ -632,6 +757,18 @@ void BLEConfig_Poll(void)
         return;
     }
 
+    if (s_restart_wifi_pending || s_restart_udp_pending) {
+        const bool restart_wifi = s_restart_wifi_pending;
+        const bool restart_udp = s_restart_udp_pending;
+        s_restart_wifi_pending = false;
+        s_restart_udp_pending = false;
+        NRLAudioBridge_ApplyConfig(restart_wifi, restart_udp);
+    }
+
+    if (s_wifi_result_pending && nrlWifiStaConnected()) {
+        BLEConfig_ReportWifiResult(true);
+    }
+
     if (!s_client_connected && !s_advertising) {
         NimBLEDevice::startAdvertising();
         s_advertising = true;
@@ -663,6 +800,7 @@ void BLEConfig_Poll(void)
 bool BLEConfig_Init(void) { return false; }
 void BLEConfig_Poll(void) {}
 bool BLEConfig_IsReady(void) { return false; }
+void BLEConfig_ReportWifiResult(bool) {}
 void BLEConfig_Stop(void) {}
 
 #endif // CONFIG_BT_NIMBLE_ENABLED

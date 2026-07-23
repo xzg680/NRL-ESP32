@@ -16,6 +16,7 @@
 #include "../services/cellular_rndis_service.h"
 #include "../services/signaling_service.h"
 #include "../services/espnow_link.h"
+#include "../services/lan_discovery.h"
 #include "../services/video_call.h"
 #include "../services/music_player.h"
 #include "../services/music_playlist.h"
@@ -107,13 +108,26 @@ static WifiConnResult connectSavedWifiLight()
         return WIFI_CONN_FAILED;
     }
 
+    // Provisioning always promotes the newly selected network to slot 0.
+    // Try it directly before an active scan: scanning while the phone still
+    // holds the BLE link can monopolize the shared 2.4 GHz radio and make the
+    // mini program look disconnected before it receives the result.
+    ESP_LOGI(TAG, "provisioning: trying primary WiFi 1/%u: \"%s\"",
+             static_cast<unsigned>(count), config->wifi_profiles[0].ssid);
+    WifiConnResult last = wifiEnsureConnected(config->wifi_profiles[0].ssid,
+                                              config->wifi_profiles[0].password, 10000u);
+    if (last == WIFI_CONN_OK || last == WIFI_ALREADY_ON_SSID) {
+        return last;
+    }
+    if (count == 1u) return last;
+
     NrlWifiScanResult scanned[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
     const bool scan_ok = nrlWifiScanStartBlocking(5000u);
     const size_t scanned_count = scan_ok ? nrlWifiScanGetCache(scanned, EXTERNAL_RADIO_MAX_WIFI_PROFILES) : 0u;
     bool attempted[EXTERNAL_RADIO_MAX_WIFI_PROFILES] = {};
-    WifiConnResult last = WIFI_CONN_FAILED;
+    attempted[0] = true;
 
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 1; i < count; ++i) {
         bool visible = !scan_ok;
         for (size_t j = 0; j < scanned_count; ++j) {
             if (strcmp(config->wifi_profiles[i].ssid, scanned[j].ssid) == 0) {
@@ -416,6 +430,7 @@ static void initApp()
     }
 
     WifiConfigPortal_Init();
+    LAN_DISCOVERY_Init();
     OtaService_Init();
     logDramMark("portal+ota");
 
@@ -473,11 +488,16 @@ static void pollProvisioningStart()
     const WifiConnResult result = connectSavedWifiLight();
     if (result == WIFI_CONN_OK || result == WIFI_ALREADY_ON_SSID || nrlWifiStaConnected()) {
         ESP_LOGI(TAG, "provisioning: WiFi connected, stopping BLE before full app start");
+        BLEConfig_ReportWifiResult(true);
+        // Give the final GOT_IP notification one connection interval to leave
+        // the controller before deinitializing BLE for the full application.
+        vTaskDelay(pdMS_TO_TICKS(300));
         BLEConfig_Stop();
         initFullApp();
         return;
     }
 
+    BLEConfig_ReportWifiResult(false);
     s_next_provision_wifi_attempt_ms = nowMsApp() + 30000u;
     ESP_LOGW(TAG, "provisioning: WiFi connect failed (%u), retrying later",
              static_cast<unsigned>(result));
@@ -503,6 +523,7 @@ static void mainLoopTask(void *)
         if (!s_loop_profile_enabled) {
             STATUS_IO_Poll();
             WifiConfigPortal_Poll();
+            LAN_DISCOVERY_Poll();
             BLEConfig_Poll();
             pollProvisioningStart();
             if (s_full_app_started) {
@@ -523,6 +544,7 @@ static void mainLoopTask(void *)
 
             started_us = esp_timer_get_time();
             WifiConfigPortal_Poll();
+            LAN_DISCOVERY_Poll();
             elapsed_us[MAIN_LOOP_STAGE_WIFI_PORTAL] =
                 static_cast<uint32_t>(esp_timer_get_time() - started_us);
 

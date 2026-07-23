@@ -1437,7 +1437,7 @@ void buildAprsListMenu()
 
 void gpsInfoLine(lv_obj_t *scr, const int y, const char *text, const uint32_t color)
 {
-    lv_obj_t *lbl = makeLabel(scr, &lv_font_montserrat_14, color);
+    lv_obj_t *lbl = makeLabel(scr, menuFont(&lv_font_montserrat_14), color);
     lv_obj_set_width(lbl, kWidth - 10);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 5, y);
@@ -1454,9 +1454,9 @@ void buildGpsInfoMenu()
     APRS_SERVICE_GetGpsInfo(&gps);
 
     char line[80];
-    snprintf(line, sizeof(line), "UART:%s  NMEA:%s",
-             gps.uart_enabled ? "ON" : "OFF",
-             gps.connected ? "OK" : "--");
+    snprintf(line, sizeof(line), menuText("UART:%s  NMEA:%s", "串口:%s  NMEA:%s"),
+             gps.uart_enabled ? menuText("ON", "开") : menuText("OFF", "关"),
+             gps.connected ? menuText("OK", "正常") : "--");
     gpsInfoLine(scr, 25, line, gps.connected ? kColorGood : kColorApWarn);
 
     char sat_used[8] = "--";
@@ -1473,34 +1473,34 @@ void buildGpsInfoMenu()
         snprintf(gsv_age, sizeof(gsv_age), "%.1fs",
                  static_cast<double>(gps.gsv_age_ms) / 1000.0);
     }
-    snprintf(line, sizeof(line), "FIX:%s Q:%u SAT:%s/%s",
-             gps.has_fix ? "YES" : "NO",
+    snprintf(line, sizeof(line), menuText("FIX:%s Q:%u SAT:%s/%s", "定位:%s 质量:%u 卫星:%s/%s"),
+             gps.has_fix ? menuText("YES", "是") : menuText("NO", "否"),
              static_cast<unsigned>(gps.fix_quality), sat_used, sat_visible);
     gpsInfoLine(scr, 43, line, gps.has_fix ? kColorGood : kColorApWarn);
 
     if (!isnan(gps.hdop)) {
-        snprintf(line, sizeof(line), "HDOP:%.1f  GSV:%s",
+        snprintf(line, sizeof(line), menuText("HDOP:%.1f  GSV:%s", "精度:%.1f  GSV:%s"),
                  static_cast<double>(gps.hdop), gsv_age);
     } else {
-        snprintf(line, sizeof(line), "HDOP:--  GSV:%s", gsv_age);
+        snprintf(line, sizeof(line), menuText("HDOP:--  GSV:%s", "精度:--  GSV:%s"), gsv_age);
     }
     gpsInfoLine(scr, 61, line, kColorSub);
 
     if (gps.has_fix) {
-        snprintf(line, sizeof(line), "LAT: %.6f", gps.latitude);
+        snprintf(line, sizeof(line), menuText("LAT: %.6f", "纬度: %.6f"), gps.latitude);
         gpsInfoLine(scr, 79, line, kColorCallIdle);
-        snprintf(line, sizeof(line), "LON: %.6f", gps.longitude);
+        snprintf(line, sizeof(line), menuText("LON: %.6f", "经度: %.6f"), gps.longitude);
         gpsInfoLine(scr, 97, line, kColorCallIdle);
     } else {
-        gpsInfoLine(scr, 79, "LAT: --", kColorWeak);
-        gpsInfoLine(scr, 97, "LON: --", kColorWeak);
+        gpsInfoLine(scr, 79, menuText("LAT: --", "纬度: --"), kColorWeak);
+        gpsInfoLine(scr, 97, menuText("LON: --", "经度: --"), kColorWeak);
     }
 
     if (gps.has_fix && !isnan(gps.altitude_m)) {
-        snprintf(line, sizeof(line), "ALT:%.1fm SPD:%.1fkm/h",
+        snprintf(line, sizeof(line), menuText("ALT:%.1fm SPD:%.1fkm/h", "海拔:%.1fm 速度:%.1fkm/h"),
                  gps.altitude_m, static_cast<double>(gps.speed_kmh));
     } else {
-        snprintf(line, sizeof(line), "ALT:-- SPD:--");
+        snprintf(line, sizeof(line), "%s", menuText("ALT:-- SPD:--", "海拔:-- 速度:--"));
     }
     gpsInfoLine(scr, 115, line, kColorSub);
 
@@ -1510,12 +1510,12 @@ void buildGpsInfoMenu()
                  static_cast<double>(gps.age_ms) / 1000.0);
     }
     if (gps.course_valid) {
-        snprintf(line, sizeof(line), "CRS:%u AGE:%s SIG:%u",
+        snprintf(line, sizeof(line), menuText("CRS:%u AGE:%s SIG:%u", "航向:%u 更新:%s 信号:%u"),
                  static_cast<unsigned>(gps.course_deg), nmea_age,
                  static_cast<unsigned>(gps.satellite_detail_count));
     } else {
-        snprintf(line, sizeof(line), "CRS:-- AGE:%s SIG:%u", nmea_age,
-                 static_cast<unsigned>(gps.satellite_detail_count));
+        snprintf(line, sizeof(line), menuText("CRS:-- AGE:%s SIG:%u", "航向:-- 更新:%s 信号:%u"),
+                 nmea_age, static_cast<unsigned>(gps.satellite_detail_count));
     }
     gpsInfoLine(scr, 133, line, kColorSub);
     menuFooter(scr, menuText("PTT BACK", "PTT返回"));

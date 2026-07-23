@@ -2,6 +2,7 @@
 #include "wifi_config_portal_view.h"
 #include "wifi_portal_assets.generated.h"
 #include "nrl_audio_bridge.h"
+#include "nrl_at_commands.h"
 #include "nrl_captive_dns.h"
 #include "nrl_net_compat.h"
 #include "nrl_version.h"
@@ -2868,6 +2869,52 @@ static esp_err_t handlePing(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Machine-readable local AT endpoint used by the mini program. This avoids
+// scraping the device's HTML UI and executes the same command parser as the
+// USB serial console. LAN access is intentionally equivalent to opening the
+// unauthenticated configuration portal, so it should only be used on a
+// trusted local network.
+static esp_err_t handleLocalAt(httpd_req_t *req)
+{
+    if (!s_server.bindPost(req)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form parse failed");
+        return ESP_OK;
+    }
+    const std::string command = s_server.arg("command");
+    if (command.empty() || command.size() > 255u || command.rfind("AT+", 0u) != 0u) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid AT command");
+        return ESP_OK;
+    }
+
+    uint8_t payload[257] = {};
+    payload[0] = 0x01u;
+    memcpy(payload + 1u, command.data(), command.size());
+    NrlAtCommandResult result = {};
+    NRL_AT_HandlePayload(payload, command.size() + 1u,
+                         NRL_AT_SOURCE_SERIAL, &result);
+
+    if (result.restart_wifi || result.restart_udp) {
+        NRLAudioBridge_ApplyConfig(result.restart_wifi, result.restart_udp);
+    }
+    if (result.reboot) {
+        s_update_reboot_pending = true;
+        s_update_reboot_at_ms = nowMsCfg() + 500UL;
+    }
+
+    std::string reply;
+    if (result.should_reply && result.payload_size > 1u) {
+        reply.assign(reinterpret_cast<const char *>(result.payload + 1u),
+                     result.payload_size - 1u);
+    }
+    const std::string body = std::string("{\"ok\":") +
+        (result.should_reply ? "true" : "false") +
+        ",\"reply\":\"" + jsonEscape(reply) + "\"}";
+    s_server.sendHeader("Cache-Control", "no-store");
+    s_server.send(result.should_reply ? 200 : 400,
+                  "application/json; charset=utf-8", body.c_str());
+    return ESP_OK;
+}
+
 static esp_err_t handleCaptiveRedirect(httpd_req_t *req)
 {
     s_server.bind(req);
@@ -2943,6 +2990,7 @@ static void ensureServerRunning()
         { "/update.css",           HTTP_GET,  handleUpdateCss },
         { "/update.js",            HTTP_GET,  handleUpdateJs },
         { "/ping",                 HTTP_GET,  handlePing },
+        { "/api/at",               HTTP_POST, handleLocalAt },
         { "/favicon.ico",          HTTP_GET,  handleFavicon },
         { "/generate_204",         HTTP_GET,  handleCaptiveRedirect },
         { "/hotspot-detect.html",  HTTP_GET,  handleCaptiveRedirect },

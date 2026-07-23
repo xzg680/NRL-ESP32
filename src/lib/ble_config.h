@@ -9,6 +9,11 @@ void BLEConfig_Poll(void);
 // while a provisioning client is connected and advertising is paused).
 bool BLEConfig_IsReady(void);
 
+// Report the result of the lightweight boot-time WiFi connection attempt to
+// a provisioning client. No-op when no transactional BLE provisioning is in
+// progress. On success the notification includes the acquired IPv4 address.
+void BLEConfig_ReportWifiResult(bool connected);
+
 // Tear the BLE stack fully down (advertising, host, BT controller) so the
 // shared radio is freed for WiFi-only operation -- BT/WiFi coexistence
 // otherwise time-slices the single antenna and batches outbound voice
