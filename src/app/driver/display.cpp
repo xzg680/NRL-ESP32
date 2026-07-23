@@ -300,6 +300,10 @@ void buildProvisioningUi();
 void buildHomeContent();
 void buildMenuUi();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
+void menuTouchPressed(lv_event_t *event);
+void menuTouchReleased(lv_event_t *event);
+#endif
+#if NRL_BOARD == NRL_BOARD_BI4UMD
 void buildBi4umdMusicContent();
 void buildBi4umdMusicListContent();
 void buildBi4umdSettingsContent();
@@ -1069,6 +1073,11 @@ lv_obj_t *prepareContent()
         lv_obj_set_style_bg_color(s_content, lv_color_hex(kColorBg), 0);
         lv_obj_set_style_bg_opa(s_content, LV_OPA_COVER, 0);
         lv_obj_remove_flag(s_content, LV_OBJ_FLAG_SCROLLABLE);
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+        lv_obj_add_flag(s_content, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(s_content, menuTouchPressed, LV_EVENT_PRESSED, nullptr);
+        lv_obj_add_event_cb(s_content, menuTouchReleased, LV_EVENT_RELEASED, nullptr);
+#endif
     } else {
         lv_obj_clean(s_content);
     }
@@ -1077,12 +1086,44 @@ lv_obj_t *prepareContent()
 }
 
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-void menuRowTap(lv_event_t *event)
+struct MenuRowInfo { int y; int item_index; };
+constexpr size_t kMaxMenuRows = 12;
+MenuRowInfo s_menu_rows[kMaxMenuRows];
+size_t s_menu_row_count = 0;
+int s_menu_touch_start_y = 0;
+bool s_menu_touch_active = false;
+
+void menuTouchPressed(lv_event_t *)
 {
-    const size_t index = static_cast<size_t>(
-        reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
-    s_menu_index = index;
-    Display_MenuConfirm();
+    lv_indev_t *indev = lv_indev_active();
+    if (indev == nullptr) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    s_menu_touch_start_y = p.y;
+    s_menu_touch_active = true;
+}
+
+void menuTouchReleased(lv_event_t *)
+{
+    if (!s_menu_touch_active) return;
+    s_menu_touch_active = false;
+    lv_indev_t *indev = lv_indev_active();
+    if (indev == nullptr) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    const int delta_y = p.y - s_menu_touch_start_y;
+    if (delta_y > 30 || delta_y < -30) {
+        Display_MenuNavigate(delta_y > 0 ? 1 : -1);
+    } else {
+        const int rel_y = p.y - kContentY;
+        for (size_t i = 0; i < s_menu_row_count; ++i) {
+            if (rel_y >= s_menu_rows[i].y && rel_y < s_menu_rows[i].y + 22) {
+                s_menu_index = static_cast<size_t>(s_menu_rows[i].item_index);
+                Display_MenuConfirm();
+                break;
+            }
+        }
+    }
 }
 #endif
 
@@ -1100,11 +1141,11 @@ void menuRow(lv_obj_t *scr, int y, const char *text, bool selected,
     lv_obj_set_style_radius(row, 4, 0);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 #if NRL_BOARD == NRL_BOARD_BI4UMD
-    if (item_index >= 0) {
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x087A82), LV_STATE_PRESSED);
-        lv_obj_add_event_cb(row, menuRowTap, LV_EVENT_CLICKED,
-                            reinterpret_cast<void *>(static_cast<uintptr_t>(item_index)));
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    if (item_index >= 0 && s_menu_row_count < kMaxMenuRows) {
+        s_menu_rows[s_menu_row_count].y = y;
+        s_menu_rows[s_menu_row_count].item_index = item_index;
+        ++s_menu_row_count;
     }
 #endif
 
@@ -1611,19 +1652,11 @@ void buildProtocolMenu(bool mdc)
     menuStatusFooter(scr, footer);
 }
 
-#if NRL_BOARD == NRL_BOARD_BI4UMD
-void menuGesture(lv_event_t *event)
-{
-    lv_indev_t *indev = lv_indev_active();
-    if (indev == nullptr) return;
-    const lv_dir_t dir = lv_indev_get_gesture_dir(indev);
-    if (dir == LV_DIR_TOP) Display_MenuNavigate(-1);
-    else if (dir == LV_DIR_BOTTOM) Display_MenuNavigate(1);
-}
-#endif
-
 void buildMenuUi()
 {
+#if NRL_BOARD == NRL_BOARD_BI4UMD
+    s_menu_row_count = 0;
+#endif
     if (s_menu_page == MenuPage::Language) buildLanguageMenu();
     else if (s_menu_page == MenuPage::About) buildAboutMenu();
     else if (s_menu_page == MenuPage::Ota) buildOtaMenu();
@@ -1638,9 +1671,6 @@ void buildMenuUi()
     else buildMainMenu();
 #if NRL_BOARD == NRL_BOARD_BI4UMD
     addBi4umdMenuButtons();
-    if (s_content != nullptr) {
-        lv_obj_add_event_cb(s_content, menuGesture, LV_EVENT_GESTURE, nullptr);
-    }
 #endif
 }
 
