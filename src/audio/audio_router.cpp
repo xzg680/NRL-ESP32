@@ -25,6 +25,18 @@ static volatile bool s_route_enabled[AUDIO_SRC_COUNT][AUDIO_SINK_COUNT] = {};
 static volatile uint16_t s_route_gain_q8[AUDIO_SRC_COUNT][AUDIO_SINK_COUNT] = {};
 static bool s_rate_warned = false;
 
+// Debug counters: samples actually delivered to each sink, per source. Read
+// and cleared by AudioRouter_TakeSinkSampleCounts (AT+AUDIOSTAT) to expose
+// unexpected sources mixing into a sink (e.g. two network paths at once).
+static uint32_t s_sink_src_samples[AUDIO_SINK_COUNT][AUDIO_SRC_COUNT] = {};
+
+static inline void count_sink_delivery(const uint8_t sink_id, const uint8_t source_id,
+                                       const size_t delivered) {
+    if (sink_id < AUDIO_SINK_COUNT && source_id < AUDIO_SRC_COUNT && delivered > 0u) {
+        s_sink_src_samples[sink_id][source_id] += static_cast<uint32_t>(delivered);
+    }
+}
+
 static inline int16_t saturate16(int32_t value)
 {
     if (value > INT16_MAX) {
@@ -101,6 +113,7 @@ static void deliver_converted(const uint8_t source_id,
                 apply_gain(scratch, out, gain_q8);
             }
             sink.write(source_id, scratch, out, sink.user_data);
+            count_sink_delivery(sink_id, source_id, out);
             offset += take;
         }
         return;
@@ -125,6 +138,7 @@ static void deliver_converted(const uint8_t source_id,
                 apply_gain(scratch, out, gain_q8);
             }
             sink.write(source_id, scratch, out, sink.user_data);
+            count_sink_delivery(sink_id, source_id, out);
             offset += take;
         }
         return;
@@ -206,14 +220,32 @@ extern "C" void AudioRouter_PushFrame(const uint8_t source_id,
                     memcpy(scratch, samples + offset, take * sizeof(int16_t));
                     apply_gain(scratch, take, gain_q8);
                     sink.write(source_id, scratch, take, sink.user_data);
+                    count_sink_delivery(sink_id, source_id, take);
                     offset += take;
                 }
             } else {
                 sink.write(source_id, samples, sample_count, sink.user_data);
+                count_sink_delivery(sink_id, source_id, sample_count);
             }
             continue;
         }
 
         deliver_converted(source_id, sink_id, sink, sample_rate_hz, gain_q8, samples, sample_count);
+    }
+}
+
+extern "C" void AudioRouter_TakeSinkSampleCounts(const uint8_t sink_id,
+                                                 uint32_t *out_counts,
+                                                 const size_t count_capacity)
+{
+    if (out_counts == nullptr) {
+        return;
+    }
+    const size_t n = (count_capacity < AUDIO_SRC_COUNT) ? count_capacity : AUDIO_SRC_COUNT;
+    for (size_t i = 0; i < n; ++i) {
+        out_counts[i] = (sink_id < AUDIO_SINK_COUNT) ? s_sink_src_samples[sink_id][i] : 0u;
+        if (sink_id < AUDIO_SINK_COUNT) {
+            s_sink_src_samples[sink_id][i] = 0u;
+        }
     }
 }

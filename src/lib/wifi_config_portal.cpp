@@ -693,6 +693,7 @@ static std::string savedValueForArg(const ExternalRadioConfig *config, const std
     if (name == "adc_eq_bypass") return config->adc_eq_bypass ? "1" : "0";
     if (name == "adc_hpf") return config->adc_hpf ? "1" : "0";
     if (name == "mic_hpf_enabled") return config->mic_hpf_enabled ? "1" : "0";
+    if (name == "voice_mix") return config->voice_mix_enabled ? "1" : "0";
     if (name == "adceq_b0") return std::to_string(config->adceq_b0);
     if (name == "adceq_a1") return std::to_string(config->adceq_a1);
     if (name == "adceq_a2") return std::to_string(config->adceq_a2);
@@ -787,6 +788,7 @@ static void logChangedFields(const ExternalRadioConfig *before,
     LOG_BOOL(aec_enabled);
     LOG_BOOL(ai_noise_enabled);
     LOG_BOOL(mic_hpf_enabled);
+    LOG_BOOL(voice_mix_enabled);
     LOG_BOOL(drc_enabled);
     LOG_UINT(drc_winsize);
     LOG_UINT(drc_maxlevel);
@@ -1111,7 +1113,7 @@ static void sendSavedFieldsJson(const bool ok)
         static const char *kAudioFields[] = {
             "mic_volume", "mic_pcm_gain", "line_out_volume", "hp_drive_enabled",
             "aec_enabled", "aec_reference_source", "ai_noise_enabled",
-            "mic_hpf_enabled", "drc_enabled", "drc_winsize",
+            "mic_hpf_enabled", "voice_mix", "drc_enabled", "drc_winsize",
             "drc_maxlevel", "drc_minlevel", "dac_ramprate",
             "dac_eq_bypass", "daceq_b0", "daceq_b1", "daceq_a1",
             "adc_dmic_enabled", "adc_linsel", "adc_pga_gain",
@@ -2841,6 +2843,9 @@ static esp_err_t handleSaveNrl(httpd_req_t *req)
 #endif
     if (ok && s_server.hasArg("mic_hpf_enabled_present")) {
         ok = EXTERNAL_RADIO_SetMicHpfEnabled(s_server.hasArg("mic_hpf_enabled"), false);
+    }
+    if (ok && s_server.hasArg("voice_mix_present")) {
+        ok = EXTERNAL_RADIO_SetVoiceMixEnabled(s_server.hasArg("voice_mix"), false);
     }
     if (ok && s_server.hasArg("drc_present")) {
         ok = EXTERNAL_RADIO_SetDrcEnabled(s_server.hasArg("drc_enabled"), false);

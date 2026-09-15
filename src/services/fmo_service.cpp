@@ -1,4 +1,5 @@
 #include "services/fmo_service.h"
+#include "app/driver/audio_passthrough.h"
 
 #include "audio/audio_router.h"
 #include "app/driver/external_radio.h"

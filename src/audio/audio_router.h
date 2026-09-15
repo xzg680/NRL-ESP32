@@ -94,6 +94,13 @@ void AudioRouter_PushFrame(uint8_t source_id,
                            const int16_t *samples,
                            size_t sample_count);
 
+// Debug: copy the per-source "samples delivered to sink" counters and zero
+// them, so successive calls reveal which sources are actively feeding a sink
+// (AT+AUDIOSTAT uses this to catch two network paths mixing into the speaker).
+void AudioRouter_TakeSinkSampleCounts(uint8_t sink_id,
+                                      uint32_t *out_counts,
+                                      size_t count_capacity);
+
 #ifdef __cplusplus
 }
 #endif

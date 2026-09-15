@@ -1,5 +1,6 @@
 #include "nrl_at_commands.h"
 
+#include "audio/audio_router.h"
 #include "heap_report.h"
 #include "nrl_audio_bridge.h"
 #include "nrl_net_compat.h"
@@ -1349,6 +1350,126 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                            ok ? "ES8311DUMP" : "ERR", ok ? dump : "ES8311DUMP");
         return;
+    }
+
+    // Debug: speaker-path health. OUTQ reports playback-queue fill, underruns
+    // (pops that ran dry mid-playback) and dropped producer samples. SPKSRC
+    // lists the sources that actually fed the speaker sink since the previous
+    // AUDIOSTAT call -- exactly one network source should ever appear; two at
+    // once means duplicated audio is mixing into the speaker (comb filtering).
+    if (stringEqualsIgnoreCase(command.command, "AUDIOSTAT")) {
+        size_t queued = 0u;
+        uint32_t underruns = 0u;
+        uint32_t short_writes = 0u;
+        uint32_t rx_timeouts = 0u;
+        uint32_t tx_timeouts = 0u;
+        AUDIO_GetOutputQueueDebug(&queued, &underruns, &short_writes, &rx_timeouts, &tx_timeouts);
+        char line[128];
+        snprintf(line, sizeof(line), "queued=%u underrun=%lu dropped=%lu rx_to=%lu tx_to=%lu",
+                 static_cast<unsigned>(queued),
+                 static_cast<unsigned long>(underruns),
+                 static_cast<unsigned long>(short_writes),
+                 static_cast<unsigned long>(rx_timeouts),
+                 static_cast<unsigned long>(tx_timeouts));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "OUTQ", line);
+
+        static const char *const kSrcNames[AUDIO_SRC_COUNT] = {
+            "MIC", "NRL", "FMO", "BTMIC", "ESPNOW", "AI", "APRS",
+            "MDC_N", "MDC_S", "DTMF_N", "DTMF_S", "CW_N", "CW_S",
+            "SSTV_N", "SSTV_S",
+        };
+        uint32_t counts[AUDIO_SRC_COUNT] = {};
+        AudioRouter_TakeSinkSampleCounts(AUDIO_SINK_SPEAKER, counts, AUDIO_SRC_COUNT);
+        char srcs[160];
+        size_t used = 0u;
+        srcs[0] = '\0';
+        for (size_t i = 0; i < AUDIO_SRC_COUNT; ++i) {
+            if (counts[i] == 0u) {
+                continue;
+            }
+            const int w = snprintf(srcs + used, sizeof(srcs) - used, "%s%s:%lu",
+                                   used > 0u ? " " : "", kSrcNames[i],
+                                   static_cast<unsigned long>(counts[i]));
+            if (w < 0 || static_cast<size_t>(w) >= sizeof(srcs) - used) {
+                break;
+            }
+            used += static_cast<size_t>(w);
+        }
+        if (used == 0u) {
+            snprintf(srcs, sizeof(srcs), "(none)");
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "SPKSRC", srcs);
+        return;
+    }
+
+    // Debug: rebuild the I2S TX channel (no codec writes). If this clears a
+    // hoarse/hollow speaker output that codec register writes could not fix,
+    // the corruption lives in the ESP32-side I2S/DMA state, and a self-heal
+    // hook can reset the path automatically after deep underruns.
+    if (stringEqualsIgnoreCase(command.command, "I2SRESET")) {
+        const bool ok = AUDIO_ResetOutputPath();
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           ok ? "I2SRESET" : "ERR", ok ? "OK" : "I2SRESET");
+        return;
+    }
+
+    // Debug: DAC digital loopback check. Switches ES8311 ASDOUT to carry the
+    // DAC's looped-back input (REG44 0x68), samples ~1.2 s of the captured
+    // stream, then restores the mic route (0x08). bigdiff% is the fraction of
+    // samples with a >20000 sample-to-sample jump: real audio is ~0%, a
+    // byte-desynced PCM stream sits at 25-50%. Clean loopback + bad speaker
+    // sound = the fault is downstream of the digital link (codec DAC/PA).
+    if (stringEqualsIgnoreCase(command.command, "LOOPCHECK")) {
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
+        if (!ES8311_IsReady()) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "LOOPCHECK");
+            return;
+        }
+        AUDIO_LoopStatsBegin();
+        (void)ES8311_WriteReg(0x44u, 0x68u);
+        vTaskDelay(pdMS_TO_TICKS(1200));
+        (void)ES8311_WriteReg(0x44u, 0x08u);
+        uint32_t frames = 0u, bigdiff = 0u, maxdiff = 0u, rms = 0u;
+        AUDIO_LoopStatsEnd(&frames, &bigdiff, &maxdiff, &rms);
+        char line[128];
+        const uint64_t samples = static_cast<uint64_t>(frames) * 159u;
+        const unsigned pct = samples > 0u
+            ? static_cast<unsigned>((static_cast<uint64_t>(bigdiff) * 1000u) / samples)
+            : 0u;
+        snprintf(line, sizeof(line), "frames=%lu bigdiff=%lu (%u.%u%%) maxdiff=%lu rms=%lu",
+                 static_cast<unsigned long>(frames),
+                 static_cast<unsigned long>(bigdiff),
+                 pct / 10u, pct % 10u,
+                 static_cast<unsigned long>(maxdiff),
+                 static_cast<unsigned long>(rms));
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "LOOPCHECK", line);
+        return;
+#else
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "LOOPCHECK");
+        return;
+#endif
+    }
+
+    // Debug: power-cycle the speaker PA only (AT+PACYCLE=<off_ms>, default
+    // 500 ms). The last untested thing a full reboot does: if hoarse audio
+    // clears after this while codec re-init and I2S reset did nothing, the
+    // latched fault is in the FM8002E / its supply, not in firmware.
+    if (stringEqualsIgnoreCase(command.command, "PACYCLE")) {
+#if defined(NRL_AUDIO_CODEC_ES8311) && NRL_AUDIO_CODEC_ES8311
+        unsigned long off_ms = 500UL;
+        if (!is_query) {
+            (void)parseUnsignedValue(command.value, &off_ms);
+        }
+        if (off_ms > 5000UL || !ES8311_PaPowerCycle(static_cast<uint32_t>(off_ms))) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "PACYCLE");
+            return;
+        }
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "PACYCLE", "OK");
+        return;
+#else
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "PACYCLE");
+        return;
+#endif
     }
 
     // Debug: raw ES8311 register write, hex "RR,VV" (e.g. AT+ES8311WRITE=16,24).
@@ -3169,6 +3290,27 @@ void NRL_AT_HandlePayload(const uint8_t *payload,
         appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
                            is_query ? "UART0" : "ERR",
                            is_query ? "RESERVED(LOG/AT)" : "UART0_RESERVED");
+        return;
+    }
+
+    // Speaker policy when several network voice streams (NRL/FMO/ESP-NOW/AI)
+    // are live at once: OFF = arbitration (priority ESPNOW>AI>NRL>FMO, 300 ms
+    // tail holdoff), ON = sample-sum mix. Default OFF.
+    if (stringEqualsIgnoreCase(command.command, "VOICEMIX")) {
+        if (is_query) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                               "VOICEMIX", config->voice_mix_enabled ? "ON" : "OFF");
+            return;
+        }
+        bool enabled = false;
+        if (!parseBoolValue(command.value, &enabled) ||
+            !EXTERNAL_RADIO_SetVoiceMixEnabled(enabled, true)) {
+            appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size, "ERR", "VOICEMIX");
+            return;
+        }
+        const ExternalRadioConfig *updated = EXTERNAL_RADIO_GetConfig();
+        appendKeyValueLine(result->payload, sizeof(result->payload), &result->payload_size,
+                           "VOICEMIX", updated->voice_mix_enabled ? "ON" : "OFF");
         return;
     }
 

@@ -1,4 +1,5 @@
 #include "services/server_list_store.h"
+#include "app/driver/audio_passthrough.h"
 
 #include "esp_heap_caps.h"
 #include "esp_crt_bundle.h"

@@ -1088,8 +1088,8 @@ void bi4umdMusicAdjustVolume(const int delta)
     }
 }
 
-void bi4umdMusicVolumeDown(lv_event_t *) { bi4umdMusicAdjustVolume(-16); }
-void bi4umdMusicVolumeUp(lv_event_t *) { bi4umdMusicAdjustVolume(16); }
+void bi4umdMusicVolumeDown(lv_event_t *) { bi4umdMusicAdjustVolume(-3); }
+void bi4umdMusicVolumeUp(lv_event_t *) { bi4umdMusicAdjustVolume(3); }
 
 void refreshBi4umdSettingsValues()
 {
@@ -1123,12 +1123,12 @@ void bi4umdSettingsMicDown(lv_event_t *) { bi4umdSettingsAdjustMic(-16); }
 void bi4umdSettingsMicUp(lv_event_t *) { bi4umdSettingsAdjustMic(16); }
 void bi4umdSettingsVolumeDown(lv_event_t *)
 {
-    bi4umdMusicAdjustVolume(-16);
+    bi4umdMusicAdjustVolume(-3);
     refreshBi4umdSettingsValues();
 }
 void bi4umdSettingsVolumeUp(lv_event_t *)
 {
-    bi4umdMusicAdjustVolume(16);
+    bi4umdMusicAdjustVolume(3);
     refreshBi4umdSettingsValues();
 }
 
@@ -1365,9 +1365,9 @@ void onTouchButton(lv_event_t *event)
 {
     const intptr_t id = reinterpret_cast<intptr_t>(lv_event_get_user_data(event));
     if (id < 0) {
-        adjustTouchVolume(-16);
+        adjustTouchVolume(-3);
     } else if (id > 0) {
-        adjustTouchVolume(16);
+        adjustTouchVolume(3);
     } else {
         ESP_LOGI(TAG, "[LCD] config touch action");
     }
@@ -3549,6 +3549,10 @@ lv_obj_t *makeTouchButton(lv_obj_t *parent, int x, int y, int w, int h,
     lv_obj_set_style_border_color(btn, lv_color_hex(0x29445E), 0);
     lv_obj_set_style_border_width(btn, 1, 0);
     lv_obj_add_event_cb(btn, onTouchButton, LV_EVENT_CLICKED, reinterpret_cast<void *>(id));
+    if (id != 0) {
+        // Hold-to-repeat: LVGL keeps firing LONG_PRESSED_REPEAT while held.
+        lv_obj_add_event_cb(btn, onTouchButton, LV_EVENT_LONG_PRESSED_REPEAT, reinterpret_cast<void *>(id));
+    }
 
     lv_obj_t *label = makeLabel(btn, &lv_font_montserrat_20, kColorCallIdle);
     lv_obj_center(label);
@@ -3643,6 +3647,7 @@ lv_obj_t *makeBi4umdMusicButton(lv_obj_t *parent, int x, const char *text,
     lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
     lv_obj_set_style_border_width(button, 1, 0);
     lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
     lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
     lv_label_set_text(label, text);
     lv_obj_center(label);
@@ -4023,6 +4028,7 @@ void buildBi4umdDebugContent()
         lv_obj_set_style_border_color(button, lv_color_hex(0x1C6B73), 0);
         lv_obj_set_style_border_width(button, 1, 0);
         lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
         lv_obj_t *label = makeLabel(button, &lv_font_montserrat_16, kColorCallIdle);
         lv_label_set_text(label, text);
         lv_obj_center(label);

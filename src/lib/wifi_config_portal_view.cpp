@@ -532,6 +532,7 @@ std::string WifiConfigPortalView_BuildAudioSections(const ExternalRadioConfig *c
     replaceToken(html, "{{ADC_HPF_CHECKED}}", checkedAttr(config->adc_hpf));
     replaceToken(html, "{{ADC_HPF_VALUE}}", boolValue(config->adc_hpf));
     replaceToken(html, "{{MIC_HPF_CHECKED}}", checkedAttr(config->mic_hpf_enabled));
+    replaceToken(html, "{{VOICE_MIX_CHECKED}}", checkedAttr(config->voice_mix_enabled));
     replaceToken(html, "{{ADCEQ_B0_SLIDER}}", buildDacEqSlider("adceq_b0", "ADCEQ B0 (REG1D-20)", "adceqB0", config->adceq_b0));
     replaceToken(html, "{{ADCEQ_A1_SLIDER}}", buildDacEqSlider("adceq_a1", "ADCEQ A1 (REG21-24)", "adceqA1", config->adceq_a1));
     replaceToken(html, "{{ADCEQ_A2_SLIDER}}", buildDacEqSlider("adceq_a2", "ADCEQ A2 (REG25-28)", "adceqA2", config->adceq_a2));

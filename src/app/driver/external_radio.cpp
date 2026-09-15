@@ -20,6 +20,7 @@
 #include <driver/gpio.h>
 #include <esp_log.h>
 #include <esp_rom_crc.h>
+#include <esp_timer.h>
 #include <nvs.h>
 
 #include <ctype.h>
@@ -450,6 +451,7 @@ static void applyDefaultAudioConfig(void)
     s_config.aec_reference_source = defaultAecReferenceSource();
     s_config.ai_noise_enabled = false;
     s_config.mic_hpf_enabled = true;
+    s_config.voice_mix_enabled = false;
     s_config.bt_enabled = false;
     s_config.wifi_enabled = true;
     s_config.vox_enabled = false;
@@ -730,6 +732,34 @@ static void normalizeConfig(void)
 
 static bool savePersistedConfig(void);
 
+// Deferred NVS persist for hot paths (rotary-encoder / touch volume sweeps
+// used to commit flash on every single step). Each NVS commit stalls the
+// MSPI bus for milliseconds and erases can take far longer; collapsing a
+// sweep into one commit 2 s after the last change removes both the flash
+// wear and the repeated stalls during audio playback.
+static esp_timer_handle_t s_deferred_save_timer = nullptr;
+
+static void deferredSaveTimerCb(void *) {
+    (void)savePersistedConfig();
+}
+
+static bool savePersistedConfigDebounced(void) {
+    if (s_deferred_save_timer == nullptr) {
+        const esp_timer_create_args_t args = {
+            .callback = deferredSaveTimerCb,
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "cfg_save",
+            .skip_unhandled_events = true,
+        };
+        if (esp_timer_create(&args, &s_deferred_save_timer) != ESP_OK) {
+            return savePersistedConfig();
+        }
+    }
+    (void)esp_timer_stop(s_deferred_save_timer);
+    return esp_timer_start_once(s_deferred_save_timer, 2000ULL * 1000ULL) == ESP_OK;
+}
+
 static bool loadPersistedConfig(void)
 {
     PersistedExternalRadioConfig persisted = {};
@@ -859,6 +889,9 @@ static bool loadPersistedConfig(void)
         // reserved3[5] holds the master Wi-Fi enable flag. Defaults ON, so an
         // unwritten 0 (old configs) must read as true -- match the "off" sentinel.
         s_config.wifi_enabled = persisted.reserved3[5] != kPersistedFlagOff;
+        // reserved3[6] holds the voice-mix flag. Defaults OFF (arbitration), so
+        // an unwritten 0 reads as false -- same sentinel pattern as BT above.
+        s_config.voice_mix_enabled = persisted.reserved3[6] == kPersistedFlagOn;
         if (persisted.reserved3[3] == kPersistedAecRefMic) {
             s_config.aec_reference_source = EXTERNAL_RADIO_AEC_REF_MIC;
         } else if (persisted.reserved3[3] == kPersistedAecRefNetwork) {
@@ -991,6 +1024,7 @@ static bool savePersistedConfig(void)
     persisted.reserved3[2] = s_config.ai_noise_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[4] = s_config.bt_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[5] = s_config.wifi_enabled ? kPersistedFlagOn : kPersistedFlagOff;
+    persisted.reserved3[6] = s_config.voice_mix_enabled ? kPersistedFlagOn : kPersistedFlagOff;
     persisted.reserved3[3] = (s_config.aec_reference_source == EXTERNAL_RADIO_AEC_REF_MIC)
                                  ? kPersistedAecRefMic
                                  : kPersistedAecRefNetwork;
@@ -1418,7 +1452,7 @@ bool EXTERNAL_RADIO_SetLineOutVolume(const uint8_t value, const bool persist)
     s_config.line_out_volume = value;
     applyAudioConfigToCodec();
     if (persist) {
-        return savePersistedConfig();
+        return savePersistedConfigDebounced();
     }
     return true;
 }
@@ -1769,6 +1803,16 @@ bool EXTERNAL_RADIO_SetMicHpfEnabled(const bool enabled, const bool persist)
     EXTERNAL_RADIO_Init();
     s_config.mic_hpf_enabled = enabled;
     AUDIO_SetMicHpfEnabled(enabled);
+    if (persist) {
+        return savePersistedConfig();
+    }
+    return true;
+}
+
+bool EXTERNAL_RADIO_SetVoiceMixEnabled(const bool enabled, const bool persist)
+{
+    EXTERNAL_RADIO_Init();
+    s_config.voice_mix_enabled = enabled;
     if (persist) {
         return savePersistedConfig();
     }

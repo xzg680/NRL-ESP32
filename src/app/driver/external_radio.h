@@ -96,6 +96,10 @@ struct ExternalRadioConfig {
     // ~200 Hz cutoff at 8 kHz). Strips DC offset and low-frequency rumble
     // before AEC / network uplink. See AUDIO_SetMicHpfEnabled().
     bool mic_hpf_enabled;
+    // false = arbitration (priority + 300 ms tail holdoff: one network voice
+    // source owns the speaker at a time); true = sample-sum mix of NRL/FMO/
+    // ESP-NOW/AI voice streams.
+    bool voice_mix_enabled;
     // Route the project's voice through a Bluetooth headset (HFP). S31 only.
     bool bt_enabled;
     // Master Wi-Fi enable. Off = free the shared 2.4 GHz radio for Bluetooth
@@ -184,6 +188,9 @@ bool EXTERNAL_RADIO_SetAiNoiseEnabled(bool enabled, bool persist);
 // Software microphone high-pass filter (~200 Hz cutoff). Takes effect
 // immediately on the running passthrough task; no codec restart needed.
 bool EXTERNAL_RADIO_SetMicHpfEnabled(bool enabled, bool persist);
+// Speaker policy when several network voice streams (NRL/FMO/ESP-NOW/AI) are
+// live at once: false = arbitration (priority + tail holdoff), true = mix.
+bool EXTERNAL_RADIO_SetVoiceMixEnabled(bool enabled, bool persist);
 // Enable/disable the Bluetooth-headset (HFP) voice link. Persists the choice and
 // brings the BT stack up/down immediately. No-op on non-S31 boards.
 bool EXTERNAL_RADIO_SetBtEnabled(bool enabled, bool persist);

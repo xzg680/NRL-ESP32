@@ -2,6 +2,7 @@
 
 #include "audio/audio_router.h"
 #include "driver/board_pins.h"
+#include "driver/es8311.h"
 #include "driver/external_radio.h"
 #include "driver/vox.h"
 #include "lib/nrl_psram.h"
@@ -90,6 +91,76 @@ static size_t s_output_queue_prime_samples = 0;
 static bool s_output_queue_playing = false;
 static SemaphoreHandle_t s_output_queue_mutex = nullptr;
 static uint32_t s_last_output_queue_log_ms = 0;
+// Debug counters for AT+AUDIOSTAT: pops that ran dry mid-playback (audible
+// gaps) and producer samples dropped because the queue was full.
+static uint32_t s_out_underrun_frames = 0;
+static uint32_t s_out_short_write_samples = 0;
+// Flash-stall evidence: ESP_ERR_TIMEOUT from i2s read/write (retried in
+// place). Bursts of these correlate with NVS/flash writes on the MSPI bus.
+static uint32_t s_i2s_rx_timeouts = 0;
+static uint32_t s_i2s_tx_timeouts = 0;
+static uint32_t s_i2s_timeout_log_ms = 0;
+// Set by any TX write timeout (flash/MSPI stall long enough to starve the
+// 30 ms DMA ring). Cleared by maybe_i2s_path_heal() once the TX clocking
+// has been rebuilt during a natural playback gap.
+static volatile bool s_i2s_path_heal_pending = false;
+
+
+// DAC loopback monitor (AT+LOOPCHECK): while enabled, the captured "mic"
+// frame actually carries the ES8311's looped-back DAC input (REG44=0x68).
+// A byte-desynced PCM stream produces huge sample-to-sample jumps on nearly
+// every sample; real audio almost never does. bigdiff ratio is the verdict.
+static volatile bool s_loop_stats_enabled = false;
+// Written only by the passthrough task while enabled; read after the window
+// closes. Plain (non-volatile) storage keeps -Werror=volatile happy.
+static uint32_t s_loop_frames = 0;
+static uint32_t s_loop_bigdiff = 0;
+static uint32_t s_loop_maxdiff = 0;
+static uint64_t s_loop_sum_sq = 0;
+
+static void loop_stats_feed(const int16_t *frame, const size_t count) {
+    if (!s_loop_stats_enabled || frame == nullptr || count < 2u) {
+        return;
+    }
+    uint32_t big = 0;
+    uint32_t maxd = 0;
+    uint64_t sum_sq = 0;
+    int32_t prev = frame[0];
+    for (size_t i = 1u; i < count; ++i) {
+        const int32_t cur = frame[i];
+        const int32_t d = (cur > prev) ? (cur - prev) : (prev - cur);
+        if (d > 20000) {
+            ++big;
+        }
+        if (static_cast<uint32_t>(d) > maxd) {
+            maxd = static_cast<uint32_t>(d);
+        }
+        sum_sq += static_cast<uint64_t>(cur * cur);
+        prev = cur;
+    }
+    s_loop_bigdiff += big;
+    s_loop_sum_sq += sum_sq;
+    if (maxd > s_loop_maxdiff) {
+        s_loop_maxdiff = maxd;
+    }
+    ++s_loop_frames;
+}
+
+static void i2s_timeout_note(const char *dir) {
+    if (dir != nullptr && dir[0] == 't') {
+        ++s_i2s_tx_timeouts;
+        s_i2s_path_heal_pending = true;
+    } else {
+        ++s_i2s_rx_timeouts;
+    }
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    if (now - s_i2s_timeout_log_ms >= 1000u) {
+        s_i2s_timeout_log_ms = now;
+        ESP_LOGW(TAG, "i2s %s timeout (flash/NVS stall?) rx_to=%lu tx_to=%lu", dir,
+                 static_cast<unsigned long>(s_i2s_rx_timeouts),
+                 static_cast<unsigned long>(s_i2s_tx_timeouts));
+    }
+}
 static volatile uint8_t s_aec_reference_source = 0; // 0=network playback, 1=second mic
 static constexpr size_t kAecNetworkRefDelayFrames = 12; // ~120 ms at 160 samples/frame
 NRL_PSRAM_BSS static int16_t s_aec_network_ref[kFrameSamples * kAecNetworkRefDelayFrames];
@@ -327,11 +398,30 @@ static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
     size_t bytes_in_frame = 0;
     while (bytes_in_frame < kI2sFrameBytes) {
         size_t bytes_read = 0;
-        if (i2s_channel_read(s_i2s_rx,
-                             reinterpret_cast<uint8_t *>(raw) + bytes_in_frame,
-                             kI2sFrameBytes - bytes_in_frame,
-                             &bytes_read,
-                             kI2sWaitMs) != ESP_OK) {
+        const esp_err_t err = i2s_channel_read(s_i2s_rx,
+                                               reinterpret_cast<uint8_t *>(raw) + bytes_in_frame,
+                                               kI2sFrameBytes - bytes_in_frame,
+                                               &bytes_read,
+                                               kI2sWaitMs);
+        bytes_in_frame += bytes_read;
+        if (err == ESP_ERR_TIMEOUT) {
+            // A flash/NVS write stalls the whole MSPI bus for longer than
+            // kI2sWaitMs. Newer IDF returns ESP_ERR_TIMEOUT here (older IDF
+            // returned ESP_OK with a partial count). The partial bytes are
+            // committed at dma.rw_pos, so retry the REMAINDER: returning
+            // false here would abandon the frame tail and shift every
+            // following byte, permanently desyncing the PCM stream until
+            // the next DMA clear. Must keep honoring the stop request:
+            // an unbounded retry would outlast AUDIO_StopPassthrough()'s
+            // grace period and get the task force-deleted inside
+            // i2s_channel_read, leaking the channel's binary semaphore.
+            if (!s_passthrough_running) {
+                return false;
+            }
+            i2s_timeout_note("rx");
+            continue;
+        }
+        if (err != ESP_OK) {
             return false;
         }
 
@@ -339,8 +429,6 @@ static bool i2s_read_frame(int16_t *dst, int16_t *dst_ref = nullptr) {
             vTaskDelay(1);
             continue;
         }
-
-        bytes_in_frame += bytes_read;
     }
 
 #if AUDIO_ENABLE_MIC_DEBUG_LOG
@@ -406,11 +494,23 @@ static bool i2s_write_frame(const int16_t *src) {
     size_t bytes_out_frame = 0;
     while (bytes_out_frame < kI2sFrameBytes) {
         size_t bytes_written = 0;
-        if (i2s_channel_write(s_i2s_tx,
-                              reinterpret_cast<const uint8_t *>(raw) + bytes_out_frame,
-                              kI2sFrameBytes - bytes_out_frame,
-                              &bytes_written,
-                              kI2sWaitMs) != ESP_OK) {
+        const esp_err_t err = i2s_channel_write(s_i2s_tx,
+                                                reinterpret_cast<const uint8_t *>(raw) + bytes_out_frame,
+                                                kI2sFrameBytes - bytes_out_frame,
+                                                &bytes_written,
+                                                kI2sWaitMs);
+        bytes_out_frame += bytes_written;
+        if (err == ESP_ERR_TIMEOUT) {
+            // Same flash-stall contract as i2s_read_frame: retry the
+            // remainder, never abandon a partially written frame. Keep
+            // honoring the stop request for the same semaphore-leak reason.
+            if (!s_passthrough_running) {
+                return false;
+            }
+            i2s_timeout_note("tx");
+            continue;
+        }
+        if (err != ESP_OK) {
             return false;
         }
 
@@ -418,10 +518,38 @@ static bool i2s_write_frame(const int16_t *src) {
             vTaskDelay(1);
             continue;
         }
-
-        bytes_out_frame += bytes_written;
     }
     return true;
+}
+
+// TX path self-heal: a flash/MSPI stall long enough to starve the shallow
+// DMA ring can leave the codec DAC latched in a distorted state even though
+// the PCM stream itself stays intact (field-proven: AT+I2SRESET restores
+// clean audio instantly). Rebuild the TX clocking inline at the next
+// natural playback gap so the brief channel hiccup is inaudible.
+static void maybe_i2s_path_heal(void) {
+    if (!s_i2s_path_heal_pending || s_output_queue_playing ||
+        s_i2s_tx == nullptr || !s_i2s_tx_enabled) {
+        return;
+    }
+    static uint32_t s_last_i2s_heal_ms = 0;
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    if (now - s_last_i2s_heal_ms < 10000u) {
+        return;
+    }
+    s_last_i2s_heal_ms = now;
+    s_i2s_path_heal_pending = false;
+    ESP_LOGW(TAG, "i2s tx path heal: rebuilding clocking after stall");
+    (void)i2s_channel_disable(s_i2s_tx);
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(s_i2s_output_rate_hz);
+    clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    const esp_err_t err = i2s_channel_reconfig_std_clock(s_i2s_tx, &clk_cfg);
+    if (err == ESP_OK && i2s_channel_enable(s_i2s_tx) == ESP_OK) {
+        i2s_clear_dma();
+        ESP_LOGW(TAG, "i2s tx path heal done");
+    } else {
+        ESP_LOGE(TAG, "i2s tx path heal failed: %s", esp_err_to_name(err));
+    }
 }
 
 static void output_queue_init(void) {
@@ -499,6 +627,17 @@ static size_t output_queue_push(const int16_t *samples, size_t sample_count) {
         s_output_queue_tail = (s_output_queue_tail + 1u) % kOutputQueueSamples;
         ++s_output_queue_count;
     }
+    // Cap playback latency: after a producer burst or an MSPI bus stall the
+    // backlog would otherwise persist forever (the consumer is realtime-paced)
+    // until the queue overflows and drops the NEWEST samples. Skipping the
+    // oldest audio beyond 400 ms keeps latency bounded and self-healing.
+    constexpr size_t kOutputQueueCapSamples = kFrameSamples * 40u; // 400 ms
+    if (s_output_queue_count > kOutputQueueCapSamples) {
+        const size_t drop = s_output_queue_count - kOutputQueueCapSamples;
+        s_output_queue_head = (s_output_queue_head + drop) % kOutputQueueSamples;
+        s_output_queue_count = kOutputQueueCapSamples;
+        s_out_short_write_samples += static_cast<uint32_t>(drop);
+    }
 
     xSemaphoreGive(s_output_queue_mutex);
     return written;
@@ -537,7 +676,12 @@ static size_t output_queue_pop_frame(int16_t *dst, const size_t sample_count) {
         s_output_queue_head = (s_output_queue_head + 1u) % kOutputQueueSamples;
         --s_output_queue_count;
     }
-    if (read < sample_count) s_output_queue_playing = false;
+    if (read < sample_count) {
+        if (s_output_queue_playing) {
+            ++s_out_underrun_frames;
+        }
+        s_output_queue_playing = false;
+    }
 
     xSemaphoreGive(s_output_queue_mutex);
 
@@ -624,15 +768,148 @@ static void audio_log_mic_frame_stats(const int16_t *frame) {
 // The playback queue doubles as the router's speaker sink; whichever source
 // is routed here (NRL downlink today, media/beacon later) lands in the same
 // 8 kHz queue the passthrough task drains to the DAC.
+
+// ---- Speaker voice-source policy (arbitration / mix) -------------------
+// The router does not mix (audio_router.h): when several network voice
+// streams (NRL / FMO / ESP-NOW / AI) are live simultaneously their frames
+// interleave into the playback queue, and the combined delivery rate (2x
+// realtime) overflows it into random sample drops. Audible result: garbled,
+// hollow "hoarse" output until one stream stops -- field-confirmed via
+// AT+AUDIOSTAT showing NRL+FMO delivering together with the queue flooding.
+//
+// Config voice_mix_enabled selects the policy:
+//   arbitration (default): priority ESPNOW > AI > NRL > FMO with a 300 ms
+//     tail holdoff -- while a same/higher-priority stream is live, frames
+//     from other voice sources are dropped. Locally generated tones/sidetones
+//     always pass.
+//   mix: each voice source feeds its own FIFO (drop-oldest on overflow, so
+//     per-source latency stays bounded) and the FIFOs are sample-summed into
+//     the playback frame on pop.
+
+constexpr size_t kVoiceFifoSamples = kFrameSamples * 12u; // 120 ms per source
+constexpr size_t kVoiceFifoPrimeSamples = kFrameSamples * 2u; // 20 ms
+NRL_PSRAM_BSS static int16_t s_voice_fifo[4][kVoiceFifoSamples];
+static uint16_t s_voice_fifo_head[4];
+static uint16_t s_voice_fifo_count[4];
+static uint32_t s_voice_last_active_ms[4];
+static uint32_t s_arb_log_ms = 0;
+static SemaphoreHandle_t s_voice_fifo_mutex = nullptr;
+
+// FIFO index by source: NRL, FMO, ESPNOW, AI. Priority: ESPNOW > AI > NRL > FMO.
+static int voice_source_index(const uint8_t source_id) {
+    switch (source_id) {
+        case AUDIO_SRC_NRL_DOWNLINK: return 0;
+        case AUDIO_SRC_FMO_DOWNLINK: return 1;
+        case AUDIO_SRC_ESPNOW:      return 2;
+        case AUDIO_SRC_AI:          return 3;
+        default:                    return -1;
+    }
+}
+static const uint8_t kVoicePrio[4] = {1u, 0u, 3u, 2u};
+
+static bool voice_mix_enabled(void) {
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    return cfg != nullptr && cfg->voice_mix_enabled;
+}
+
+static bool speaker_voice_arbitrate(const int idx) {
+    const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    for (int v = 0; v < 4; ++v) {
+        if (v == idx || kVoicePrio[v] < kVoicePrio[idx]) {
+            continue;
+        }
+        if (static_cast<uint32_t>(now - s_voice_last_active_ms[v]) < 300u) {
+            if (now - s_arb_log_ms >= 2000u) {
+                s_arb_log_ms = now;
+                ESP_LOGI(TAG, "speaker: voice src %d dropped (src %d owns)", idx, v);
+            }
+            return false;
+        }
+    }
+    s_voice_last_active_ms[idx] = now;
+    return true;
+}
+
+static void voice_fifo_push(const int idx, const int16_t *samples, size_t count) {
+    if (s_voice_fifo_mutex == nullptr) {
+        s_voice_fifo_mutex = xSemaphoreCreateMutex();
+    }
+    if (s_voice_fifo_mutex == nullptr ||
+        xSemaphoreTake(s_voice_fifo_mutex, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return;
+    }
+    int16_t *fifo = s_voice_fifo[idx];
+    // Drop-oldest on overflow so one fast source caps at 120 ms of latency
+    // instead of flooding the mix.
+    if (count > kVoiceFifoSamples) {
+        samples += count - kVoiceFifoSamples;
+        count = kVoiceFifoSamples;
+    }
+    size_t room = kVoiceFifoSamples - s_voice_fifo_count[idx];
+    if (count > room) {
+        const size_t drop = count - room;
+        s_voice_fifo_head[idx] = static_cast<uint16_t>((s_voice_fifo_head[idx] + drop) % kVoiceFifoSamples);
+        s_voice_fifo_count[idx] -= static_cast<uint16_t>(drop);
+    }
+    size_t tail = (s_voice_fifo_head[idx] + s_voice_fifo_count[idx]) % kVoiceFifoSamples;
+    for (size_t i = 0; i < count; ++i) {
+        fifo[tail] = samples[i];
+        tail = (tail + 1u) % kVoiceFifoSamples;
+    }
+    s_voice_fifo_count[idx] += static_cast<uint16_t>(count);
+    s_voice_last_active_ms[idx] = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    xSemaphoreGive(s_voice_fifo_mutex);
+}
+
+// Pop up to `count` samples from one voice FIFO into dst; returns the count.
+// With fewer than the prime threshold buffered, report zero (jitter gap).
+static size_t voice_fifo_pop(const int idx, int16_t *dst, const size_t count) {
+    if (s_voice_fifo_mutex == nullptr ||
+        xSemaphoreTake(s_voice_fifo_mutex, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return 0;
+    }
+    size_t n = 0;
+    if (s_voice_fifo_count[idx] >= kVoiceFifoPrimeSamples) {
+        n = s_voice_fifo_count[idx] < count ? s_voice_fifo_count[idx] : count;
+        const int16_t *fifo = s_voice_fifo[idx];
+        size_t head = s_voice_fifo_head[idx];
+        for (size_t i = 0; i < n; ++i) {
+            dst[i] = fifo[head];
+            head = (head + 1u) % kVoiceFifoSamples;
+        }
+        s_voice_fifo_head[idx] = static_cast<uint16_t>(head);
+        s_voice_fifo_count[idx] -= static_cast<uint16_t>(n);
+    }
+    xSemaphoreGive(s_voice_fifo_mutex);
+    return n;
+}
+
+static void voice_mix_accumulate(int16_t *frame, const size_t count) {
+    int16_t tmp[kFrameSamples];
+    for (int v = 0; v < 4; ++v) {
+        const size_t n = voice_fifo_pop(v, tmp, count);
+        for (size_t i = 0; i < n; ++i) {
+            const int32_t sum = static_cast<int32_t>(frame[i]) + tmp[i];
+            frame[i] = sum > 32767 ? 32767 : (sum < -32768 ? -32768 : static_cast<int16_t>(sum));
+        }
+    }
+}
+
 static void speaker_sink_write(uint8_t source_id,
                                const int16_t *samples,
                                size_t sample_count,
                                void *) {
-    const bool network_voice = source_id == AUDIO_SRC_NRL_DOWNLINK ||
-                               source_id == AUDIO_SRC_FMO_DOWNLINK ||
-                               source_id == AUDIO_SRC_ESPNOW ||
-                               source_id == AUDIO_SRC_AI;
-    output_queue_set_prime(network_voice ? kNetworkVoicePrimeSamples : 0u);
+    const int voice_idx = voice_source_index(source_id);
+    if (voice_idx >= 0) {
+        if (voice_mix_enabled()) {
+            voice_fifo_push(voice_idx, samples, sample_count);
+            return;
+        }
+        if (!speaker_voice_arbitrate(voice_idx)) {
+            return;
+        }
+    }
+    output_queue_set_prime(voice_idx >= 0 ? kNetworkVoicePrimeSamples : 0u);
     (void)AUDIO_QueueOutputSamples(samples, sample_count);
 }
 
@@ -672,6 +949,7 @@ static void audio_passthrough_task(void *) {
             continue;
         }
 
+        loop_stats_feed(frame, kFrameSamples);
         audio_log_mic_frame_stats(frame);
         SIGNALING_FeedRawMic(frame, kFrameSamples);
         SSTV_SERVICE_FeedRawMic(frame, kFrameSamples);
@@ -713,6 +991,7 @@ static void audio_passthrough_task(void *) {
             continue;
         }
 
+        loop_stats_feed(frame, kFrameSamples);
         audio_log_mic_frame_stats(frame);
         SIGNALING_FeedRawMic(frame, kFrameSamples);
         SSTV_SERVICE_FeedRawMic(frame, kFrameSamples);
@@ -724,14 +1003,19 @@ static void audio_passthrough_task(void *) {
 
         // RX mode: DAC plays whatever is in the output queue (16 kHz voice
         // domain; the router upsampled any 8 kHz source at delivery). If the
-        // queue is empty, write silence so the DAC stays at VMID.
-        const size_t popped = output_queue_pop_frame(playback_frame, kFrameSamples);
-        (void)popped;
+        // queue is empty, write silence so the DAC stays at VMID. In mix mode
+        // the four network-voice FIFOs are sample-summed on top (tones and
+        // sidetones still come through the main queue).
+        (void)output_queue_pop_frame(playback_frame, kFrameSamples);
+        if (voice_mix_enabled()) {
+            voice_mix_accumulate(playback_frame, kFrameSamples);
+        }
         aec_network_ref_push(playback_frame, kFrameSamples);
         if (!i2s_write_frame(playback_frame)) {
             vTaskDelay(pdMS_TO_TICKS(2));
             continue;
         }
+        maybe_i2s_path_heal();
         taskYIELD();
     }
 
@@ -823,6 +1107,25 @@ extern "C" bool AUDIO_ReconfigureOutput(const uint32_t sample_rate_hz,
     return false;
 }
 
+// Debug/self-heal: rebuild the I2S TX channel without touching the codec.
+// NVS/flash writes stall the whole MSPI bus far longer than the shallow DMA
+// ring covers, which can leave the TX path in a persistently bad state;
+// re-initialising the channel clears it (AT+I2SRESET).
+extern "C" bool AUDIO_ResetOutputPath(void) {
+    if (!s_i2s_ready) {
+        return false;
+    }
+    const bool was_running = s_passthrough_task != nullptr;
+    if (was_running) {
+        AUDIO_StopPassthrough();
+    }
+    const bool ok = AUDIO_ReconfigureOutput(kSampleRate, 16u);
+    if (was_running && !AUDIO_StartPassthrough()) {
+        return false;
+    }
+    return ok;
+}
+
 extern "C" bool AUDIO_WriteOutput(const void *pcm, const size_t bytes) {
     if (!s_i2s_ready || s_i2s_tx == nullptr || !s_i2s_tx_enabled ||
         pcm == nullptr || bytes == 0u) {
@@ -838,6 +1141,13 @@ extern "C" bool AUDIO_WriteOutput(const void *pcm, const size_t bytes) {
             bytes - written_total,
             &written,
             pdMS_TO_TICKS(100));
+        written_total += written;
+        if (err == ESP_ERR_TIMEOUT) {
+            // Same flash-stall contract as the passthrough pump: retry the
+            // remainder; partial bytes are already committed at dma.rw_pos.
+            i2s_timeout_note("tx");
+            continue;
+        }
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "media: I2S write failed: %s", esp_err_to_name(err));
             return false;
@@ -846,7 +1156,6 @@ extern "C" bool AUDIO_WriteOutput(const void *pcm, const size_t bytes) {
             vTaskDelay(1);
             continue;
         }
-        written_total += written;
     }
     return true;
 }
@@ -983,6 +1292,9 @@ extern "C" AUDIO_Mode_t AUDIO_GetMode(void) {
 
 extern "C" size_t AUDIO_QueueOutputSamples(const int16_t *samples, size_t sample_count) {
     const size_t written = output_queue_push(samples, sample_count);
+    if (written < sample_count) {
+        s_out_short_write_samples += static_cast<uint32_t>(sample_count - written);
+    }
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (written != sample_count && (now - s_last_output_queue_log_ms) >= 1000u) {
         s_last_output_queue_log_ms = now;
@@ -995,6 +1307,52 @@ extern "C" size_t AUDIO_QueueOutputSamples(const int16_t *samples, size_t sample
 
 extern "C" void AUDIO_ClearOutputQueue(void) {
     output_queue_clear();
+}
+
+extern "C" void AUDIO_LoopStatsBegin(void) {
+    s_loop_frames = 0;
+    s_loop_bigdiff = 0;
+    s_loop_maxdiff = 0;
+    s_loop_sum_sq = 0;
+    s_loop_stats_enabled = true;
+}
+
+extern "C" void AUDIO_LoopStatsEnd(uint32_t *frames,
+                                   uint32_t *bigdiff,
+                                   uint32_t *maxdiff,
+                                   uint32_t *rms) {
+    s_loop_stats_enabled = false;
+    const uint32_t n_frames = s_loop_frames;
+    if (frames != nullptr) *frames = n_frames;
+    if (bigdiff != nullptr) *bigdiff = s_loop_bigdiff;
+    if (maxdiff != nullptr) *maxdiff = s_loop_maxdiff;
+    if (rms != nullptr) {
+        const uint64_t samples = static_cast<uint64_t>(n_frames) * (kFrameSamples - 1u);
+        *rms = (samples > 0u)
+            ? static_cast<uint32_t>(sqrt(static_cast<double>(s_loop_sum_sq) /
+                                         static_cast<double>(samples)))
+            : 0u;
+    }
+}
+
+
+extern "C" void AUDIO_GetOutputQueueDebug(size_t *queued_samples,
+                                          uint32_t *underrun_frames,
+                                          uint32_t *short_write_samples,
+                                          uint32_t *rx_timeouts,
+                                          uint32_t *tx_timeouts) {
+    output_queue_init();
+    size_t count = 0;
+    if (s_output_queue_mutex != nullptr &&
+        xSemaphoreTake(s_output_queue_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        count = s_output_queue_count;
+        xSemaphoreGive(s_output_queue_mutex);
+    }
+    if (queued_samples != nullptr) *queued_samples = count;
+    if (underrun_frames != nullptr) *underrun_frames = s_out_underrun_frames;
+    if (short_write_samples != nullptr) *short_write_samples = s_out_short_write_samples;
+    if (rx_timeouts != nullptr) *rx_timeouts = s_i2s_rx_timeouts;
+    if (tx_timeouts != nullptr) *tx_timeouts = s_i2s_tx_timeouts;
 }
 
 extern "C" void AUDIO_SetAecReferenceSource(const uint8_t source) {

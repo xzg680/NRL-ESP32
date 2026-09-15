@@ -15,9 +15,9 @@ endif()
 # The vendored gmf_core overrides the registry copy: it carries the NRL patch
 # for the zero-copy payload leak in esp_gmf_io_acquire_read (every decode input
 # cycle orphaned a freshly realloc'd payload buffer, ~100 KB/s of PSRAM).
-if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/vendor/espressif__gmf_core/CMakeLists.txt")
-    list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/vendor/espressif__gmf_core")
-endif()
+# NOTE: an EXTRA_COMPONENT_DIRS append does NOT win over a same-named managed
+# component (the registry copy gets compiled instead, silently dropping the
+# patch), so the override lives in src/idf_component.yml via override_path.
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp/CMakeLists.txt")
     list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/vendor/h2zero__esp-nimble-cpp")
 endif()

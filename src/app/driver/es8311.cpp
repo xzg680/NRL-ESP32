@@ -8,6 +8,7 @@
 
 #include <driver/gpio.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <stdbool.h>
@@ -137,6 +138,10 @@ static bool s_es8311_ready = false;
 // requests arriving from NRL voice during this interval must not restart the
 // 16 kHz passthrough underneath the media task.
 static volatile bool s_hifi_active = false;
+// Set while HifiAcquire/HifiRelease rewrite the I2S + codec clocks with
+// the DAC core stopped; the deferred heal must not fire inside that
+// window (it would restart the core onto half-written dividers).
+static volatile bool s_clock_transition = false;
 constexpr size_t kHifiMixSamples = 64u * 1024u;
 NRL_PSRAM_BSS static int16_t s_hifi_mix_storage[kHifiMixSamples];
 static int16_t *s_hifi_mix_buffer = s_hifi_mix_storage;
@@ -402,13 +407,18 @@ static uint8_t es8311_output_drive_reg(void) {
 }
 
 static uint8_t es8311_drc_reg34(void) {
-    return static_cast<uint8_t>((s_drc_enabled ? 0x80u : 0x00u) |
-                                (s_drc_winsize & 0x0Fu));
+    // When DRC is off, write the whole register as the chip default 0x00
+    // (matching the known-good 0.6.x firmware) instead of leaving the
+    // winsize field nonzero: a nonzero winsize with DRC disabled
+    // correlated with latched DAC distortion in the field.
+    return s_drc_enabled ? static_cast<uint8_t>(0x80u | (s_drc_winsize & 0x0Fu))
+                         : 0x00u;
 }
 
 static uint8_t es8311_drc_reg35(void) {
-    return static_cast<uint8_t>(((s_drc_maxlevel & 0x0Fu) << 4) |
-                                (s_drc_minlevel & 0x0Fu));
+    return s_drc_enabled ? static_cast<uint8_t>(((s_drc_maxlevel & 0x0Fu) << 4) |
+                                                 (s_drc_minlevel & 0x0Fu))
+                         : 0x00u;
 }
 
 static uint8_t es8311_dac_reg37(void) {
@@ -753,6 +763,19 @@ extern "C" bool ES8311_IsReady(void) {
     return s_es8311_ready;
 }
 
+// Debug: power-cycle the external PA (FM8002E) via its enable pin without
+// touching the codec or rebooting (AT+PACYCLE). If a hoarse speaker output
+// clears right after this, the latched fault lives in the PA itself.
+extern "C" bool ES8311_PaPowerCycle(const uint32_t off_ms) {
+    if (kPinPaEn < 0) {
+        return false;
+    }
+    gpio_set_level((gpio_num_t)kPinPaEn, !kPinPaEnActiveLevel);
+    vTaskDelay(pdMS_TO_TICKS(off_ms == 0u ? 1u : off_ms));
+    gpio_set_level((gpio_num_t)kPinPaEn, kPinPaEnActiveLevel);
+    return true;
+}
+
 extern "C" bool ES8311_ReadReg(const uint8_t reg, uint8_t *value) {
     return es8311_read_reg(reg, value);
 }
@@ -805,6 +828,14 @@ extern "C" bool ES8311_HifiAcquire(const uint32_t sample_rate_hz,
     AUDIO_StopPassthrough();
     AUDIO_ClearOutputQueue();
     (void)es8311_set_dac_mute(true);
+    // The reference driver (es8311_stop in esp_codec_dev) halts the DAC
+    // core via REG00 bit0 BEFORE touching the clock manager. Rewriting
+    // REG01-08 while the interpolation filter / delta-sigma modulator
+    // keep clocking can latch the DSP into a distorted state that only a
+    // core restart clears. I2S MCLK glitching mid-transition is likewise
+    // only safe with the core stopped.
+    s_clock_transition = true;
+    (void)es8311_write_reg(ES8311_REG00_RESET, 0x81u); // stop DAC core
 
     const bool configured =
         AUDIO_ReconfigureOutput(sample_rate_hz, bits_per_sample) &&
@@ -816,12 +847,19 @@ extern "C" bool ES8311_HifiAcquire(const uint32_t sample_rate_hz,
                  static_cast<unsigned>(channels));
         (void)AUDIO_ReconfigureOutput(kVoiceSampleRate, 16u);
         (void)es8311_apply_sample_format(kVoiceSampleRate, 16u);
+        (void)es8311_write_reg(ES8311_REG00_RESET, 0x80u);
+        s_clock_transition = false;
         (void)es8311_set_dac_mute(false);
         s_hifi_active = false;
         (void)AUDIO_StartPassthrough();
         return false;
     }
 
+    // Restart the core on the new clocks and let the dividers settle
+    // (reference es8311_start sleeps 50 ms after releasing the reset).
+    (void)es8311_write_reg(ES8311_REG00_RESET, 0x80u);
+    s_clock_transition = false;
+    vTaskDelay(pdMS_TO_TICKS(20));
     (void)es8311_set_dac_mute(false);
     ESP_LOGI(TAG, "hifi: acquired %luHz/%ubit/%uch (mono DAC downmix)",
              static_cast<unsigned long>(sample_rate_hz),
@@ -835,6 +873,7 @@ extern "C" bool ES8311_HifiWrite(const void *pcm, const size_t bytes) {
         (bytes % (2u * sizeof(int16_t))) != 0u) {
         return false;
     }
+
 
     const int16_t *stereo = static_cast<const int16_t *>(pcm);
     const size_t frames = bytes / (2u * sizeof(int16_t));
@@ -862,8 +901,13 @@ extern "C" bool ES8311_HifiRelease(void) {
     }
 
     (void)es8311_set_dac_mute(true);
+    s_clock_transition = true;
+    (void)es8311_write_reg(ES8311_REG00_RESET, 0x81u); // stop DAC core
     const bool output_restored = AUDIO_ReconfigureOutput(kVoiceSampleRate, 16u);
     const bool codec_restored = es8311_apply_sample_format(kVoiceSampleRate, 16u);
+    (void)es8311_write_reg(ES8311_REG00_RESET, 0x80u);
+    s_clock_transition = false;
+    vTaskDelay(pdMS_TO_TICKS(20));
     (void)es8311_set_dac_mute(false);
     s_hifi_active = false;
     const bool restarted = AUDIO_StartPassthrough();

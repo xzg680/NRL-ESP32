@@ -181,3 +181,8 @@ CONFIG_MQTT_PROTOCOL_5=y
 # Keep the full 64-hex-char ELF SHA-256 (the Kconfig default truncates to
 # 9 chars); the FMO device activation reports it as firmwareHash.
 CONFIG_APP_RETRIEVE_LEN_ELF_SHA=64
+
+# Keep the I2S DMA ISR in IRAM: flash erase/write stalls would otherwise
+# starve the 30ms DMA ring and leave the codec DAC in a latched bad state
+# (hollow/hoarse speaker output until the I2S channel is reinitialised).
+CONFIG_I2S_ISR_IRAM_SAFE=y

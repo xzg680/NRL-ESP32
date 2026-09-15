@@ -1,4 +1,5 @@
 #include "services/radio_favorites.h"
+#include "app/driver/audio_passthrough.h"
 
 #include "services/config_notify.h"
 #include "services/music_player.h"

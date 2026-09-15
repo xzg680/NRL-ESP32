@@ -58,6 +58,28 @@ AUDIO_Mode_t AUDIO_GetMode(void);
 size_t AUDIO_QueueOutputSamples(const int16_t *samples, size_t sample_count);
 void AUDIO_ClearOutputQueue(void);
 
+// Debug snapshot for AT+AUDIOSTAT: current queue fill, pops that ran dry
+// mid-playback (audible gaps), producer samples dropped on a full queue,
+// and I2S read/write timeouts (ESP_ERR_TIMEOUT, e.g. from NVS/flash stalls).
+void AUDIO_GetOutputQueueDebug(size_t *queued_samples,
+                               uint32_t *underrun_frames,
+                               uint32_t *short_write_samples,
+                               uint32_t *rx_timeouts,
+                               uint32_t *tx_timeouts);
+
+// Debug/self-heal: rebuild the I2S TX channel without touching codec
+// registers (AT+I2SRESET). Used to prove/fix flash-stall-induced corruption
+// of the ESP32-side output path.
+bool AUDIO_ResetOutputPath(void);
+
+// DAC loopback monitor helpers (AT+LOOPCHECK): begin/end a sampling window
+// over the captured frames (with ES8311 REG44=0x68 those frames carry the
+// DAC's looped-back digital input). End reports frames seen, count of
+// sample-to-sample jumps > 20000 (byte desync signature), max jump, and RMS.
+void AUDIO_LoopStatsBegin(void);
+void AUDIO_LoopStatsEnd(uint32_t *frames, uint32_t *bigdiff,
+                        uint32_t *maxdiff, uint32_t *rms);
+
 // AEC reference source: 0 = delayed network playback, 1 = second I2S input
 // channel. Takes effect immediately while the resident AFE keeps running.
 void AUDIO_SetAecReferenceSource(uint8_t source);

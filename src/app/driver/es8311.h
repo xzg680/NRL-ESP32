@@ -19,6 +19,11 @@ bool ES8311_Init(void);
 // True if the codec initialization sequence already succeeded.
 bool ES8311_IsReady(void);
 
+// Debug: power-cycle the external PA via its enable pin for off_ms
+// (AT+PACYCLE), without touching codec registers or rebooting.
+bool ES8311_PaPowerCycle(uint32_t off_ms);
+
+
 // Debug/diagnostics: raw register read over the shared I2C bus. Returns false
 // when the bus transaction fails (e.g. no codec at 0x18 on this board).
 bool ES8311_ReadReg(uint8_t reg, uint8_t *value);

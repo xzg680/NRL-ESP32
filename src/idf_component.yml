@@ -27,6 +27,13 @@ dependencies:
   # (esp_ae_rate_cvt/ch_cvt) to replace the hand-written resamplers.
   espressif/gmf_core:
     version: "^1.0"
+    # Use the vendored copy instead of the registry download: it carries the NRL
+    # patch for the zero-copy payload leak in esp_gmf_io_acquire_read (every
+    # decode input cycle orphaned a freshly realloc'd payload buffer, ~100 KB/s
+    # of PSRAM -- espressif/esp-gmf#59). EXTRA_COMPONENT_DIRS cannot override a
+    # same-named managed component (the registry copy silently wins), so the
+    # override must happen here at the component-manager level.
+    override_path: "../vendor/espressif__gmf_core"
   espressif/gmf_io:
     version: "^1.0"
   espressif/gmf_audio:
