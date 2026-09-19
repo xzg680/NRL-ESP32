@@ -7,7 +7,7 @@
 #endif
 
 #if NRL_BOARD_IS_GEZIPAI_FAMILY || NRL_BOARD == NRL_BOARD_S31_KORVO || \
-    NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+    NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD || NRL_BOARD == NRL_BOARD_ESP_MOSAICO
 #include "external_radio.h"
 #include "es8311.h"
 #include "../../lib/nrl_bt_hfp.h"  // route the volume keys to a connected headset
@@ -39,7 +39,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #if NRL_BOARD_IS_GEZIPAI_FAMILY || NRL_BOARD == NRL_BOARD_S31_KORVO || \
-    NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+    NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD || NRL_BOARD == NRL_BOARD_ESP_MOSAICO
 #include <freertos/semphr.h>
 #endif
 
@@ -108,7 +108,7 @@ bool ledSelftestActive(const unsigned long now_ms)
 } // namespace
 
 #if NRL_BOARD_IS_GEZIPAI_FAMILY || NRL_BOARD == NRL_BOARD_S31_KORVO || \
-    NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
+    NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD || NRL_BOARD == NRL_BOARD_ESP_MOSAICO
 
 // ============================================================
 // 格子派: 3 push buttons (volume +/-, physical PTT) + 3 LEDs.
@@ -202,6 +202,10 @@ bool s_rf_sql_active = false;
 #endif
 
 unsigned long s_ptt_press_ms = 0UL;  // press-down time of the current press
+
+#if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
+unsigned long s_motor_off_ms = 0UL;
+#endif
 
 #if defined(NRL_HAS_ADC_BUTTONS) && NRL_HAS_ADC_BUTTONS
 adc_oneshot_unit_handle_t s_button_adc = nullptr;
@@ -703,6 +707,9 @@ static void updatePtt(const unsigned long now)
         // press down
         s_ptt_press_ms = now;
         s_tx_suppressed = false;
+#if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
+        STATUS_IO_Vibrate(30);
+#endif
     } else if (!is_pressed && was_pressed) {
         // release
         const unsigned long held = now - s_ptt_press_ms;
@@ -713,6 +720,10 @@ static void updatePtt(const unsigned long now)
 #else
         if (!s_tx_suppressed && held < kPttLongPressMs) {
             s_tx_latched = !s_tx_latched;  // short press toggles the latch
+#if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
+            // Haptic confirm: longer buzz when transmit latches on, short on off.
+            STATUS_IO_Vibrate(s_tx_latched ? 60 : 20);
+#endif
         } else {
             s_tx_latched = false;  // a long press always ends transmit
         }
@@ -788,6 +799,11 @@ extern "C" void STATUS_IO_Init(void)
     writeLed(NRL_PIN_LED_PTT,   false);
     writeLed(NRL_PIN_LED_AUDIO, false);
     writeLed(NRL_PIN_LED_NET,   false);
+
+#if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
+    initOutputPin(NRL_PIN_VIBRATION_MOTOR);
+    gpio_set_level((gpio_num_t)NRL_PIN_VIBRATION_MOTOR, 0);
+#endif
 
 #if NRL_BOARD == NRL_BOARD_S31_KORVO
     // The S31 has a single addressable WS2812 on GPIO37 instead of the three
@@ -1006,6 +1022,20 @@ extern "C" void STATUS_IO_Poll(void)
     }
 #endif
 
+#if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+    // FMO incoming call ring: pulse the vibration motor (150 ms every second)
+    // so an incoming call is felt even with the volume down.
+    static unsigned long s_last_ring_buzz_ms = 0UL;
+    if (FMO_QSO_IncomingRing()) {
+        if (now - s_last_ring_buzz_ms >= 1000UL) {
+            s_last_ring_buzz_ms = now;
+            STATUS_IO_Vibrate(150);
+        }
+    } else {
+        s_last_ring_buzz_ms = 0UL;
+    }
+#endif
+
     // Persist the volume only after the user stops adjusting, so a burst of
     // button taps does not hammer the EEPROM.
 #if !defined(NRL_HAS_USER_BUTTONS) || NRL_HAS_USER_BUTTONS
@@ -1013,6 +1043,13 @@ extern "C" void STATUS_IO_Poll(void)
         s_volume_dirty = false;
         EXTERNAL_RADIO_SaveConfig();
         ESP_LOGI(TAG, "line_out_volume saved");
+    }
+#endif
+
+#if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
+    if (s_motor_off_ms != 0UL && (long)(now - s_motor_off_ms) >= 0) {
+        s_motor_off_ms = 0UL;
+        gpio_set_level((gpio_num_t)NRL_PIN_VIBRATION_MOTOR, 0);
     }
 #endif
 
@@ -1178,3 +1215,16 @@ extern "C" void STATUS_IO_Poll(void)
 }
 
 #endif // NRL_BOARD
+
+extern "C" void STATUS_IO_Vibrate(const uint32_t ms)
+{
+#if defined(NRL_PIN_VIBRATION_MOTOR) && NRL_PIN_VIBRATION_MOTOR >= 0
+    if (ms == 0u) {
+        return;
+    }
+    gpio_set_level((gpio_num_t)NRL_PIN_VIBRATION_MOTOR, 1);
+    s_motor_off_ms = nrl_millis_now() + ms;
+#else
+    (void)ms;
+#endif
+}

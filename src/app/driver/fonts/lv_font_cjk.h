@@ -7,7 +7,8 @@
 
 #include "driver/board_pins.h"
 
-#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD_IS_GEZIPAI_FAMILY
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD_IS_GEZIPAI_FAMILY || \
+    NRL_BOARD == NRL_BOARD_ESP_MOSAICO
 
 #include <lvgl.h>
 
@@ -16,7 +17,7 @@ extern "C" {
 #endif
 
 extern const lv_font_t lv_font_cjk_16;
-#if NRL_BOARD == NRL_BOARD_S31_KORVO
+#if NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD == NRL_BOARD_ESP_MOSAICO
 extern const lv_font_t lv_font_cjk_20;
 #endif
 

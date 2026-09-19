@@ -50,6 +50,7 @@
 #include "driver/external_radio.h"
 #include "driver/status_io.h"
 #include "driver/environment_sensors.h"
+#include "driver/mosaico_sensors.h"
 #include "driver/i2c_device_discovery.h"
 #include "driver/sr110u.h"
 #include "main_loop_profile.h"
@@ -331,6 +332,13 @@ static bool initFullApp()
     // disabled) and pushes frequency/CTCSS/squelch/etc. to the module.
     if (!RADIO_CONFIG_ApplyToModule()) {
         ESP_LOGE(TAG, "SR-110U configuration failed.");
+    }
+#endif
+
+#if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+    // BMI270/BMM150/BQ27220 sensor worker; retries failed sensors itself.
+    if (!MOSAICO_SENSORS_Init()) {
+        ESP_LOGE(TAG, "ESP-Mosaico sensor worker initialization failed.");
     }
 #endif
 

@@ -2,6 +2,7 @@
 #define DRIVER_STATUS_IO_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +21,9 @@ bool STATUS_IO_NrlServerLinked(void);
 // Hold-to-talk from a touch UI region (S31): true = key up (transmit), false =
 // release. No-op on boards whose STATUS_IO build doesn't implement it.
 void STATUS_IO_SetSoftPtt(bool held);
+// Pulse the vibration motor for `ms` milliseconds (ESP-Mosaico; no-op on
+// boards without one). Non-blocking: Poll() turns the motor off.
+void STATUS_IO_Vibrate(uint32_t ms);
 bool STATUS_IO_IsSqlActive(void);
 bool STATUS_IO_IsPttActive(void);
 

@@ -73,6 +73,12 @@ jobs:
             sdkconfig: sdkconfig.s31_function_coreboard.defaults
             lvgl: "false"
             extra_args: ""
+          - board: esp_mosaico
+            target: esp32s31
+            board_macro: NRL_BOARD_ESP_MOSAICO
+            sdkconfig: sdkconfig.esp_mosaico.defaults
+            lvgl: "true"
+            extra_args: ""
 
     steps:
       - name: Checkout

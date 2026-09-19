@@ -125,7 +125,11 @@ if(IDF_TARGET STREQUAL "esp32s31")
         # (CONFIG_LV_USE_FREETYPE, S31 only) needs the freetype component's headers
         # and library, so wire them up here instead of patching the vendored tree.
         idf_component_get_property(lvgl_lib lvgl COMPONENT_LIB)
-        idf_component_get_property(freetype_lib espressif__freetype COMPONENT_LIB)
+        # FreeType enters the build through the Korvo BSP's manifest; boards
+        # without that BSP (ESP-Mosaico) have no such component to query.
+        if(NRL_BOARD_ID STREQUAL "NRL_BOARD_S31_KORVO")
+            idf_component_get_property(freetype_lib espressif__freetype COMPONENT_LIB)
+        endif()
         idf_component_get_property(ppa_lib esp_driver_ppa COMPONENT_LIB)
         idf_component_get_property(esp_mm_lib esp_mm COMPONENT_LIB)
 

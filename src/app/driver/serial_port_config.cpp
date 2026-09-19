@@ -143,6 +143,17 @@ extern "C" bool SERIAL_PORT_CONFIG_IsAllowedPin(const int gpio)
 #elif NRL_BOARD == NRL_BOARD_S31_KORVO
     // The DVP camera is unused by this firmware and exposes these GPIOs.
     return gpio >= 46 && gpio <= 57;
+#elif NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+    // Free GPIOs on the two 2x10P expansion headers (via the BTB connector).
+    switch (gpio) {
+        case 4: case 5:
+        case 10: case 11: case 12: case 13: case 14: case 15: case 16:
+        case 17: case 18: case 19:
+        case 38: case 39: case 46: case 47: case 48: case 53: case 55:
+            return true;
+        default:
+            return false;
+    }
 #else
     (void)gpio;
     return false;

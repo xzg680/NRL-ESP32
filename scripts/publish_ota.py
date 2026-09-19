@@ -3,7 +3,7 @@
 
 Each upload contains every image listed by build/<board>/flasher_args.json.
 The server stores the complete package for flashing and registers its app image
-as the device OTA release. With no board arguments, all six boards are
+as the device OTA release. With no board arguments, all seven boards are
 published in one run.
 
 Required environment: OTA_SERVER_URL, OTA_UPLOAD_TOKEN.
@@ -30,6 +30,7 @@ CHIP_FAMILY = {
     "bh4tdv": "ESP32-S3",
     "s31_korvo": "ESP32-S31",
     "s31_function_coreboard": "ESP32-S31",
+    "esp_mosaico": "ESP32-S31",
 }
 BOARDS = tuple(CHIP_FAMILY)
 

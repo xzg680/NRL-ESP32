@@ -1,0 +1,1859 @@
+// ESP-Mosaico display UI: 480x480 QSPI AMOLED (CO5300) + CST9220 touch.
+//
+// LVGL port (no esp_lvgl_port, same pattern as display_s31.cpp): two PSRAM
+// draw buffers in PARTIAL render mode, flush pushes dirty areas to the panel
+// over QSPI. On top of that sits the square-portrait multi-page touch UI
+// (Home / Radio / Music / Sensors / Settings) in the "AMOLED Dark" theme.
+
+#include "board_pins.h"
+
+#if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+
+#include "display.h"
+#include "display_mosaico_panel.h"
+#include "external_radio.h"
+#include "i2c1.h"
+#include "mosaico_sensors.h"
+#include "status_io.h"
+
+#include "../../lib/nrl_net_compat.h"
+#include "../../lib/nrl_version.h"
+#include "../../lib/wifi_config_portal.h"
+#include "../../services/music_player.h"
+#include "../../services/time_sync_service.h"
+
+#include <driver/gpio.h>
+#include <esp_heap_caps.h>
+#include <esp_idf_version.h>
+#include <esp_lcd_touch_cst9220.h>
+#include <esp_log.h>
+#include <esp_timer.h>
+#include <esp_wifi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <lvgl.h>
+#include <nvs.h>
+#include <cmath>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+// Generated CJK bitmap fonts (GB2312 level-1), compiled for this board from
+// src/app/driver/fonts/. Weak references keep this file self-contained.
+extern "C" {
+extern const lv_font_t lv_font_cjk_16 __attribute__((weak));
+extern const lv_font_t lv_font_cjk_20 __attribute__((weak));
+}
+
+namespace {
+
+const char *kTag = "MOSAICO_DISP";
+
+constexpr int kWidth = NRL_DISPLAY_WIDTH;
+constexpr int kHeight = NRL_DISPLAY_HEIGHT;
+// Draw-buffer height in lines (two buffers, PSRAM): 480x60 RGB565 x2 = 112 KB.
+constexpr int kDrawBufLines = 60;
+
+// ---- AMOLED Dark theme -----------------------------------------------------
+// Pure-black background (AMOLED pixels emit directly: black is free and deep);
+// vibrant accents tuned for the high-contrast panel.
+constexpr uint32_t kColorBg       = 0x000000;  // pure black
+constexpr uint32_t kColorCard     = 0x12151B;  // rounded card fill
+constexpr uint32_t kColorBorder   = 0x232A35;
+constexpr uint32_t kColorAccent   = 0x22D3EE;  // electric cyan (primary)
+constexpr uint32_t kColorViolet   = 0xA78BFA;  // secondary
+constexpr uint32_t kColorText     = 0xF2F6FA;
+constexpr uint32_t kColorSub      = 0x8A97A8;
+constexpr uint32_t kColorGood     = 0x4ADE80;
+constexpr uint32_t kColorWarn     = 0xF5B453;
+constexpr uint32_t kColorBad      = 0xF87171;
+constexpr uint32_t kColorTabOnBg  = 0x0E2A33;  // active-tab cyan tint
+constexpr uint32_t kColorPttTxBg  = 0x2A0F12;  // PTT transmitting fill
+constexpr uint32_t kColorBtnPress = 0x1B2A33;
+
+// ---- Layout grid (8 px grid, 16 px outer margins) --------------------------
+constexpr int kMargin      = 16;
+constexpr int kBarH        = 48;   // top status bar
+constexpr int kDockH       = 64;   // bottom nav dock
+constexpr int kContentY    = 56;
+constexpr int kContentH    = 352;  // y 56..408
+constexpr int kCardW       = (kWidth - 2 * kMargin - 8) / 2;  // 220
+
+constexpr uint32_t kBarRefreshMs     = 500u;
+constexpr uint32_t kSensorsRefreshMs = 250u;  // ~4 Hz live sensors
+constexpr uint32_t kVolumeSaveDelayMs = 2000u;
+
+esp_lcd_panel_handle_t s_panel = nullptr;
+esp_lcd_touch_handle_t s_touch = nullptr;
+lv_display_t *s_disp = nullptr;
+lv_indev_t *s_touch_indev = nullptr;
+bool s_ready = false;
+bool s_provisioning_mode = false;
+int s_rotation = 0;  // applied panel rotation: 0/90/180/270 (MADCTL)
+
+uint32_t millis()
+{
+    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+}
+
+uint32_t lvglTick()
+{
+    return millis();
+}
+
+void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    esp_lcd_panel_handle_t panel =
+        static_cast<esp_lcd_panel_handle_t>(lv_display_get_user_data(disp));
+    const int32_t w = area->x2 - area->x1 + 1;
+    const int32_t h = area->y2 - area->y1 + 1;
+    // LVGL RGB565 is little-endian in memory; the CO5300 wants big-endian.
+    lv_draw_sw_rgb565_swap(px_map, w * h);
+    esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1,
+                              area->y2 + 1, px_map);
+    lv_display_flush_ready(disp);
+}
+
+bool initLvgl()
+{
+    lv_init();
+
+    s_disp = lv_display_create(kWidth, kHeight);
+    if (s_disp == nullptr) {
+        ESP_LOGE(kTag, "display create failed");
+        return false;
+    }
+    lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_user_data(s_disp, s_panel);
+    lv_display_set_flush_cb(s_disp, lvglFlush);
+
+    const size_t buf_bytes = static_cast<size_t>(kWidth) * kDrawBufLines * 2u;
+    void *buf0 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *buf1 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf0 == nullptr || buf1 == nullptr) {
+        ESP_LOGE(kTag, "draw buffer alloc failed");
+        return false;
+    }
+    lv_display_set_buffers(s_disp, buf0, buf1, buf_bytes,
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_tick_set_cb(lvglTick);
+    return true;
+}
+
+void touchRead(lv_indev_t *, lv_indev_data_t *data)
+{
+    if (s_touch == nullptr || data == nullptr) {
+        return;
+    }
+    esp_lcd_touch_point_data_t points[1] = {};
+    uint8_t count = 0;
+    esp_lcd_touch_read_data(s_touch);
+    if (esp_lcd_touch_get_data(s_touch, points, &count, 1) == ESP_OK && count > 0) {
+        // The touch controller does not follow the panel's MADCTL rotation;
+        // remap native coordinates into the rotated logical frame.
+        const int tx = static_cast<int>(points[0].x);
+        const int ty = static_cast<int>(points[0].y);
+        int x = tx;
+        int y = ty;
+        switch (s_rotation) {
+            case 90:  x = kWidth - 1 - ty;  y = tx; break;
+            case 180: x = kWidth - 1 - tx;  y = kHeight - 1 - ty; break;
+            case 270: x = ty;               y = kHeight - 1 - tx; break;
+            default: break;
+        }
+        data->point.x = static_cast<int16_t>(x);
+        data->point.y = static_cast<int16_t>(y);
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
+bool initTouch()
+{
+    i2c_master_bus_handle_t bus = nullptr;
+    if (!I2C_MasterGetBus(&bus)) {
+        ESP_LOGW(kTag, "touch I2C unavailable");
+        return false;
+    }
+
+    // NOTE: the CST9220 reset shares GPIO42 with LCD_RST and was already
+    // pulsed by the panel reset; the panel init sequence (>100 ms) doubles
+    // as the touch controller's post-reset wait.
+    esp_lcd_panel_io_i2c_config_t io_cfg = {};
+    io_cfg.dev_addr = ESP_LCD_TOUCH_IO_I2C_CST9220_ADDRESS;
+    io_cfg.scl_speed_hz = 400000;
+    esp_lcd_panel_io_handle_t touch_io = nullptr;
+    if (esp_lcd_new_panel_io_i2c(bus, &io_cfg, &touch_io) != ESP_OK) {
+        ESP_LOGW(kTag, "touch IO create failed");
+        return false;
+    }
+
+    esp_lcd_touch_config_t touch_cfg = {};
+    touch_cfg.x_max = kWidth;
+    touch_cfg.y_max = kHeight;
+    touch_cfg.rst_gpio_num = GPIO_NUM_NC;
+    touch_cfg.int_gpio_num = GPIO_NUM_NC;
+    touch_cfg.levels.reset = 0;
+    touch_cfg.levels.interrupt = 0;
+    if (esp_lcd_touch_new_i2c_cst9220(touch_io, &touch_cfg, &s_touch) != ESP_OK) {
+        ESP_LOGW(kTag, "CST9220 create failed");
+        return false;
+    }
+
+    s_touch_indev = lv_indev_create();
+    if (s_touch_indev == nullptr) {
+        return false;
+    }
+    lv_indev_set_type(s_touch_indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_display(s_touch_indev, s_disp);
+    lv_indev_set_read_cb(s_touch_indev, touchRead);
+    ESP_LOGI(kTag, "CST9220 touch ready");
+    return true;
+}
+
+// ---- UI language (i18n) -----------------------------------------------------
+// Compact equivalent of the Korvo tr(): English source strings, Chinese lookup
+// when 中文 is active, passthrough for anything untranslated. Persisted in NVS
+// ("ui"/"lang"); switching rebuilds the UI.
+
+int s_lang = 0; // 0 = English, 1 = 中文
+
+struct TrEntry {
+    const char *en;
+    const char *zh;
+};
+
+const TrEntry kTr[] = {
+    // Tabs
+    {"Home", "主页"},
+    {"Radio", "对讲"},
+    {"Music", "音乐"},
+    {"Sensors", "传感器"},
+    {"Settings", "设置"},
+    // Status / common
+    {"Linked", "已连接"},
+    {"Offline", "离线"},
+    {"Charging", "充电中"},
+    {"AP mode", "热点模式"},
+    {"Close", "关闭"},
+    // Home cards
+    {"SERVER", "服务器"},
+    {"WIFI", "无线网络"},
+    {"BATTERY", "电池"},
+    {"HEADING", "航向"},
+    {"No gauge", "无电量计"},
+    // Radio page
+    {"READY", "就绪"},
+    {"TRANSMITTING", "发射中"},
+    {"HOLD", "按住"},
+    {"Push-to-talk on the NRL network", "通过 NRL 网络按住讲话"},
+    {"TX auto-off: %u s", "发射超时自动关闭: %u 秒"},
+    {"TX auto-off: off", "发射超时: 无"},
+    // Music page
+    {"NET RADIO", "网络电台"},
+    {"Play", "播放"},
+    {"Stop", "停止"},
+    {"Playing", "播放中"},
+    {"Stopped", "已停止"},
+    {"No station", "无电台"},
+    {"Set a station URL in the web portal first.", "请先在 Web 配置页设置电台地址。"},
+    {"Tuning in...", "正在连接电台..."},
+    {"Play failed.", "播放失败。"},
+    {"Volume %d%%", "音量 %d%%"},
+    {"Local library requires NAND storage (coming soon)",
+     "本地曲库需要 NAND 存储（即将支持）"},
+    // Sensors page
+    {"ACCEL (g)", "加速度 (g)"},
+    {"GYRO (dps)", "陀螺仪 (dps)"},
+    {"MAGNETOMETER (uT)", "磁力计 (uT)"},
+    {"Interference", "磁场干扰"},
+    {"sensor absent", "传感器缺席"},
+    // Settings page
+    {"BRIGHTNESS", "亮度"},
+    {"Language", "语言"},
+    {"Auto-rotate", "自动旋转"},
+    {"WiFi Setup", "WiFi 设置"},
+    {"Hotspot Info", "热点信息"},
+    {"ABOUT", "关于"},
+    {"Board", "板卡"},
+    {"Firmware", "固件"},
+    // Provisioning overlay / screen
+    {"WiFi Provisioning", "WiFi 配网"},
+    {"1. Connect phone/PC to hotspot:", "1. 手机/电脑连接热点:"},
+    {"2. Open in a browser:", "2. 浏览器打开:"},
+    {"Or use WeChat mini program「NRL互联」via Bluetooth.",
+     "或通过微信小程序「NRL互联」蓝牙配网。"},
+};
+
+const char *tr(const char *text)
+{
+    if (s_lang == 0 || text == nullptr) {
+        return text;
+    }
+    for (size_t i = 0; i < sizeof(kTr) / sizeof(kTr[0]); ++i) {
+        if (strcmp(kTr[i].en, text) == 0) {
+            return kTr[i].zh;
+        }
+    }
+    return text;
+}
+
+const char *weekdayName(int wday)
+{
+    static const char *kEn[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    static const char *kZh[7] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+    if (wday < 0 || wday > 6) {
+        wday = 0;
+    }
+    return (s_lang == 1) ? kZh[wday] : kEn[wday];
+}
+
+// 8-point compass label from a 0-360 heading.
+const char *compassPoint(float deg)
+{
+    static const char *kEn[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    static const char *kZh[8] = {"北", "东北", "东", "东南", "南", "西南", "西", "西北"};
+    while (deg < 0.0f) {
+        deg += 360.0f;
+    }
+    const int idx = (static_cast<int>(deg + 22.5f) / 45) & 7;
+    return (s_lang == 1) ? kZh[idx] : kEn[idx];
+}
+
+void loadUiLang()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("ui", NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    uint8_t lang = 0;
+    if (nvs_get_u8(nvs, "lang", &lang) == ESP_OK && lang <= 1u) {
+        s_lang = lang;
+    }
+    nvs_close(nvs);
+}
+
+void setUiLang(const int lang)
+{
+    s_lang = (lang != 0) ? 1 : 0;
+    nvs_handle_t nvs;
+    if (nvs_open("ui", NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "lang", static_cast<uint8_t>(s_lang));
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+// ---- Brightness (CO5300 0x51, persisted in NVS "mosaico"/"bright") ---------
+
+uint8_t s_brightness = 255u;
+
+void applyBrightness()
+{
+    (void)MosaicoPanel_SetBrightness(s_brightness);
+}
+
+void loadBrightness()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("mosaico", NVS_READONLY, &nvs) == ESP_OK) {
+        uint8_t value = 0;
+        if (nvs_get_u8(nvs, "bright", &value) == ESP_OK) {
+            s_brightness = value;
+        }
+        nvs_close(nvs);
+    }
+    applyBrightness();
+}
+
+void saveBrightness()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("mosaico", NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "bright", s_brightness);
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+// ---- Auto-rotate (BMI270 gravity -> CO5300 MADCTL hardware rotation) --------
+// The panel is square, so LVGL geometry never changes; the panel's MADCTL
+// does the rotation and touch coordinates are remapped in touchRead().
+// Persisted in NVS "mosaico"/"autorot" (default on).
+
+bool sensorSnapshot(MosaicoSensorSnapshot *out);  // defined below
+
+bool s_auto_rotate = true;
+int s_rot_candidate = 0;
+uint32_t s_rot_candidate_ms = 0;
+uint32_t s_last_rotate_check_ms = 0;
+
+constexpr uint32_t kRotateCheckMs = 300u;
+constexpr uint32_t kRotateHoldMs = 500u;   // candidate must persist this long
+constexpr float kFlatG2 = 0.64f;           // az^2 above this: lying flat, keep
+
+void applyRotation(int rot)
+{
+    if (s_panel == nullptr || rot == s_rotation) {
+        return;
+    }
+    esp_lcd_panel_swap_xy(s_panel, rot == 90 || rot == 270);
+    esp_lcd_panel_mirror(s_panel, rot == 90 || rot == 180, rot == 180 || rot == 270);
+    s_rotation = rot;
+    lv_obj_invalidate(lv_screen_active());
+    ESP_LOGI(kTag, "rotation %d", rot);
+}
+
+void loadAutoRotate()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("mosaico", NVS_READONLY, &nvs) == ESP_OK) {
+        uint8_t value = 1;
+        if (nvs_get_u8(nvs, "autorot", &value) == ESP_OK) {
+            s_auto_rotate = value != 0u;
+        }
+        nvs_close(nvs);
+    }
+}
+
+void saveAutoRotate()
+{
+    nvs_handle_t nvs;
+    if (nvs_open("mosaico", NVS_READWRITE, &nvs) == ESP_OK) {
+        (void)nvs_set_u8(nvs, "autorot", s_auto_rotate ? 1u : 0u);
+        (void)nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+void setAutoRotate(bool enabled)
+{
+    s_auto_rotate = enabled;
+    saveAutoRotate();
+    if (!enabled) {
+        applyRotation(0);  // predictable upright UI when the feature is off
+    }
+}
+
+// NOTE: accel axis signs assume the BMI270's PCB orientation; if rotation
+// lands 90/270-swapped or 180-flipped on real hardware, fix the mapping here.
+void pollAutoRotate(uint32_t now)
+{
+    if (!s_auto_rotate) {
+        return;
+    }
+    if (s_last_rotate_check_ms != 0u && (now - s_last_rotate_check_ms) < kRotateCheckMs) {
+        return;
+    }
+    s_last_rotate_check_ms = now;
+
+    MosaicoSensorSnapshot snap = {};
+    if (!sensorSnapshot(&snap) || !snap.imu_valid) {
+        return;
+    }
+    const float ax = snap.accel_x_g;
+    const float ay = snap.accel_y_g;
+    const float az = snap.accel_z_g;
+    if (az * az > kFlatG2) {
+        return;  // lying flat on a table: keep the current orientation
+    }
+    int candidate;
+    if (fabsf(ay) >= fabsf(ax)) {
+        candidate = (ay > 0.0f) ? 0 : 180;
+    } else {
+        candidate = (ax > 0.0f) ? 90 : 270;
+    }
+    if (candidate == s_rotation) {
+        s_rot_candidate = candidate;
+        return;
+    }
+    if (candidate != s_rot_candidate) {
+        s_rot_candidate = candidate;
+        s_rot_candidate_ms = now;
+        return;
+    }
+    if ((now - s_rot_candidate_ms) >= kRotateHoldMs) {
+        applyRotation(candidate);
+    }
+}
+
+// ---- Fonts (Montserrat primary + optional CJK fallback) ---------------------
+
+lv_font_t s_font_ui_16;
+lv_font_t s_font_ui_20;
+
+void initFonts()
+{
+    s_font_ui_16 = lv_font_montserrat_16;
+    s_font_ui_20 = lv_font_montserrat_20;
+    if (&lv_font_cjk_16 != nullptr) {
+        s_font_ui_16.fallback = &lv_font_cjk_16;
+    }
+    if (&lv_font_cjk_20 != nullptr) {
+        s_font_ui_20.fallback = &lv_font_cjk_20;
+    }
+}
+
+// ---- UI state ---------------------------------------------------------------
+
+enum class Page : int {
+    Home = 0,
+    Radio,
+    Music,
+    Sensors,
+    Settings,
+    Count,
+};
+
+Page s_page = Page::Home;
+bool s_time_sync_started = false;
+uint32_t s_last_bar_ms = 0u;
+uint32_t s_last_page_ms = 0u;
+bool s_volume_dirty = false;
+uint32_t s_volume_change_ms = 0u;
+
+// Persistent chrome.
+lv_obj_t *s_content = nullptr;
+lv_obj_t *s_tab_btns[static_cast<int>(Page::Count)] = {};
+lv_obj_t *s_tab_labels[static_cast<int>(Page::Count)] = {};
+
+// Status-bar labels.
+lv_obj_t *s_lbl_clock = nullptr;
+lv_obj_t *s_lbl_callsign_top = nullptr;
+lv_obj_t *s_lbl_wifi = nullptr;
+lv_obj_t *s_lbl_link = nullptr;
+lv_obj_t *s_lbl_batt = nullptr;
+
+// Change-detection caches (keep Display_Poll cheap: no redraw when unchanged).
+char s_shown_clock[16] = {};
+char s_shown_callsign[16] = {};
+char s_shown_wifi[16] = {};
+char s_shown_batt[16] = {};
+char s_shown_home_clock[16] = {};
+
+// Home page.
+lv_obj_t *s_home_clock = nullptr;
+lv_obj_t *s_home_date = nullptr;
+lv_obj_t *s_home_callsign = nullptr;
+lv_obj_t *s_home_server = nullptr;
+lv_obj_t *s_home_wifi = nullptr;
+lv_obj_t *s_home_wifi_sub = nullptr;
+lv_obj_t *s_home_batt = nullptr;
+lv_obj_t *s_home_batt_sub = nullptr;
+lv_obj_t *s_home_heading = nullptr;
+
+// Radio page.
+lv_obj_t *s_ptt_btn = nullptr;
+lv_obj_t *s_ptt_label = nullptr;
+lv_obj_t *s_radio_state = nullptr;
+lv_obj_t *s_radio_hint = nullptr;
+bool s_ptt_tx_visual = false;
+
+// Music page.
+lv_obj_t *s_music_track = nullptr;
+lv_obj_t *s_music_state = nullptr;
+lv_obj_t *s_music_url = nullptr;
+lv_obj_t *s_music_play_label = nullptr;
+lv_obj_t *s_music_vol = nullptr;
+
+// Sensors page.
+lv_obj_t *s_sens_accel = nullptr;
+lv_obj_t *s_sens_gyro = nullptr;
+lv_obj_t *s_sens_heading = nullptr;
+lv_obj_t *s_sens_heading_sub = nullptr;
+lv_obj_t *s_sens_batt = nullptr;
+lv_obj_t *s_sens_mag = nullptr;
+lv_obj_t *s_sens_mag_warn = nullptr;
+
+// Settings page.
+lv_obj_t *s_settings_bright_label = nullptr;
+lv_obj_t *s_settings_lang_btn_label = nullptr;
+
+// Provisioning screen / overlay.
+lv_obj_t *s_prov_ssid = nullptr;
+lv_obj_t *s_prov_ip = nullptr;
+lv_obj_t *s_overlay = nullptr;
+
+// ---- Widget helpers ---------------------------------------------------------
+
+lv_obj_t *makeCard(lv_obj_t *parent, int x, int y, int w, int h, int pad = 16)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_set_pos(card, x, y);
+    lv_obj_set_size(card, w, h);
+    lv_obj_set_style_bg_color(card, lv_color_hex(kColorCard), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_radius(card, 16, 0);
+    lv_obj_set_style_pad_all(card, pad, 0);
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    // Let left/right swipes on cards reach the content container.
+    lv_obj_add_flag(card, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    return card;
+}
+
+lv_obj_t *makeLabel(lv_obj_t *parent, const char *text, const lv_font_t *font,
+                    uint32_t color)
+{
+    // Route Montserrat 16/20 through their CJK-fallback twins so translated
+    // text renders; pure-ASCII output is unaffected.
+    if (font == &lv_font_montserrat_16) {
+        font = &s_font_ui_16;
+    } else if (font == &lv_font_montserrat_20) {
+        font = &s_font_ui_20;
+    }
+    lv_obj_t *label = lv_label_create(parent);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+    return label;
+}
+
+// Set a label only when the text changed (cheap Poll: no needless redraws).
+// Returns true when the label was updated.
+bool setLabel(lv_obj_t *label, char *cache, size_t cache_size, const char *text)
+{
+    if (label == nullptr) {
+        return false;
+    }
+    if (cache != nullptr && strncmp(cache, text, cache_size) == 0) {
+        return false;
+    }
+    lv_label_set_text(label, text);
+    if (cache != nullptr) {
+        size_t n = strlen(text);
+        if (n >= cache_size) {
+            n = cache_size - 1;
+        }
+        memcpy(cache, text, n);
+        cache[n] = '\0';
+    }
+    return true;
+}
+
+lv_obj_t *makeButton(lv_obj_t *parent, int x, int y, int w, int h,
+                     const char *text, lv_event_cb_t cb, void *user_data)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_set_style_radius(btn, 12, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(kColorCard), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(kColorBtnPress), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(btn, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    if (cb != nullptr) {
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
+    }
+    lv_obj_t *txt = makeLabel(btn, text, &lv_font_montserrat_20, kColorText);
+    lv_obj_center(txt);
+    return btn;
+}
+
+lv_obj_t *cardCaption(lv_obj_t *card, const char *text)
+{
+    lv_obj_t *caption = makeLabel(card, tr(text), &lv_font_montserrat_14, kColorSub);
+    lv_obj_set_pos(caption, 0, 0);
+    return caption;
+}
+
+// ---- Service queries --------------------------------------------------------
+
+void formatCallsign(char *out, size_t out_size)
+{
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr || cfg->callsign[0] == '\0') {
+        snprintf(out, out_size, "----------");
+        return;
+    }
+    snprintf(out, out_size, "%s-%u", cfg->callsign,
+             static_cast<unsigned>(cfg->callsign_ssid));
+}
+
+void formatClock(char *out, size_t out_size, struct tm *out_tm)
+{
+    time_t now = time(nullptr);
+    struct tm tm_now = {};
+    localtime_r(&now, &tm_now);
+    if (out_tm != nullptr) {
+        *out_tm = tm_now;
+    }
+    if (tm_now.tm_year + 1900 >= 2024) {
+        snprintf(out, out_size, "%02d:%02d", tm_now.tm_hour, tm_now.tm_min);
+    } else {
+        snprintf(out, out_size, "--:--");
+    }
+}
+
+bool sensorSnapshot(MosaicoSensorSnapshot *out)
+{
+    return MOSAICO_SENSORS_GetSnapshot(out);
+}
+
+int batteryMvRaw()
+{
+    MosaicoSensorSnapshot snap = {};
+    if (!sensorSnapshot(&snap) || !snap.gauge_present) {
+        return 0;
+    }
+    return static_cast<int>(snap.battery_mv);
+}
+
+// ---- Status bar -------------------------------------------------------------
+
+void buildStatusBar(lv_obj_t *scr)
+{
+    lv_obj_t *bar = lv_obj_create(scr);
+    lv_obj_set_pos(bar, 0, 0);
+    lv_obj_set_size(bar, kWidth, kBarH);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(kColorBg), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(bar, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(bar, 1, 0);
+    lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_radius(bar, 0, 0);
+    lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_lbl_clock = makeLabel(bar, "--:--", &lv_font_montserrat_20, kColorText);
+    lv_obj_set_width(s_lbl_clock, 90);
+    lv_obj_set_style_text_align(s_lbl_clock, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(s_lbl_clock, LV_ALIGN_LEFT_MID, kMargin, 0);
+
+    s_lbl_callsign_top = makeLabel(bar, "----------", &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_width(s_lbl_callsign_top, 200);
+    lv_obj_set_style_text_align(s_lbl_callsign_top, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_lbl_callsign_top, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_lbl_callsign_top, LV_ALIGN_CENTER, 0, 0);
+
+    s_lbl_wifi = makeLabel(bar, LV_SYMBOL_WIFI, &lv_font_montserrat_16, kColorSub);
+    lv_obj_align(s_lbl_wifi, LV_ALIGN_RIGHT_MID, -118, 0);
+
+    s_lbl_link = makeLabel(bar, "\xE2\x97\x8F", &lv_font_montserrat_16, kColorSub); // ●
+    lv_obj_align(s_lbl_link, LV_ALIGN_RIGHT_MID, -88, 0);
+
+    s_lbl_batt = makeLabel(bar, "--", &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_lbl_batt, 72);
+    lv_obj_set_style_text_align(s_lbl_batt, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(s_lbl_batt, LV_ALIGN_RIGHT_MID, -kMargin, 0);
+}
+
+void refreshStatusBar()
+{
+    if (s_lbl_clock == nullptr) {
+        return;
+    }
+    if (!s_time_sync_started && nrlWifiStaConnected()) {
+        (void)TIME_SYNC_StartIfNeeded();
+        s_time_sync_started = true;
+    }
+
+    char text[24];
+    formatClock(text, sizeof(text), nullptr);
+    setLabel(s_lbl_clock, s_shown_clock, sizeof(s_shown_clock), text);
+
+    char callsign[16];
+    formatCallsign(callsign, sizeof(callsign));
+    setLabel(s_lbl_callsign_top, s_shown_callsign, sizeof(s_shown_callsign), callsign);
+
+    // WiFi glyph colored by RSSI (or amber in AP/config mode).
+    uint32_t wifi_color = kColorSub;
+    char wifi_text[16];
+    if (nrlWifiStaConnected()) {
+        wifi_ap_record_t ap = {};
+        const bool have_ap = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+        const int rssi = have_ap ? ap.rssi : 0;
+        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "%d", rssi);
+        wifi_color = (rssi >= -65) ? kColorGood : ((rssi >= -78) ? kColorWarn : kColorBad);
+    } else {
+        snprintf(wifi_text, sizeof(wifi_text), LV_SYMBOL_WIFI "AP");
+        wifi_color = kColorWarn;
+    }
+    if (setLabel(s_lbl_wifi, s_shown_wifi, sizeof(s_shown_wifi), wifi_text)) {
+        lv_obj_set_style_text_color(s_lbl_wifi, lv_color_hex(wifi_color), 0);
+    }
+
+    const bool linked = STATUS_IO_NrlServerLinked();
+    lv_obj_set_style_text_color(s_lbl_link,
+                                lv_color_hex(linked ? kColorGood : kColorSub), 0);
+
+    MosaicoSensorSnapshot snap = {};
+    char batt[16];
+    if (sensorSnapshot(&snap) && snap.gauge_present) {
+        snprintf(batt, sizeof(batt), "%s%u%%",
+                 snap.battery_charging ? LV_SYMBOL_CHARGE : "",
+                 static_cast<unsigned>(snap.battery_soc_percent));
+    } else {
+        snprintf(batt, sizeof(batt), "--");
+    }
+    setLabel(s_lbl_batt, s_shown_batt, sizeof(s_shown_batt), batt);
+}
+
+// ---- Bottom nav dock --------------------------------------------------------
+
+constexpr int kTabW = 84;
+constexpr int kTabStep = 91;  // 84 + 7 gap, 5 tabs span 448 px
+
+void switchTab(int index);
+
+void tabEvent(lv_event_t *event)
+{
+    const int index = static_cast<int>(reinterpret_cast<intptr_t>(
+        lv_event_get_user_data(event)));
+    switchTab(index);
+}
+
+void buildDock(lv_obj_t *scr)
+{
+    lv_obj_t *dock = lv_obj_create(scr);
+    lv_obj_set_pos(dock, 0, kHeight - kDockH);
+    lv_obj_set_size(dock, kWidth, kDockH);
+    lv_obj_set_style_bg_color(dock, lv_color_hex(kColorBg), 0);
+    lv_obj_set_style_bg_opa(dock, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(dock, lv_color_hex(kColorBorder), 0);
+    lv_obj_set_style_border_width(dock, 1, 0);
+    lv_obj_set_style_border_side(dock, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_radius(dock, 0, 0);
+    lv_obj_set_style_pad_all(dock, 0, 0);
+    lv_obj_remove_flag(dock, LV_OBJ_FLAG_SCROLLABLE);
+
+    const char *icons[5] = {LV_SYMBOL_HOME, LV_SYMBOL_CALL, LV_SYMBOL_AUDIO,
+                            LV_SYMBOL_GPS, LV_SYMBOL_SETTINGS};
+    const char *names[5] = {"Home", "Radio", "Music", "Sensors", "Settings"};
+    for (int i = 0; i < 5; ++i) {
+        lv_obj_t *btn = lv_button_create(dock);
+        lv_obj_set_pos(btn, kMargin + i * kTabStep, 4);
+        lv_obj_set_size(btn, kTabW, 56);
+        lv_obj_set_style_radius(btn, 12, 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_add_event_cb(btn, tabEvent, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        char text[48];
+        snprintf(text, sizeof(text), "%s\n%s", icons[i], tr(names[i]));
+        lv_obj_t *label = makeLabel(btn, text, &lv_font_montserrat_14, kColorSub);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(label);
+        s_tab_btns[i] = btn;
+        s_tab_labels[i] = label;
+    }
+}
+
+void updateTabHighlight()
+{
+    const int active = static_cast<int>(s_page);
+    for (int i = 0; i < 5; ++i) {
+        if (s_tab_btns[i] == nullptr) {
+            continue;
+        }
+        const bool on = (i == active);
+        lv_obj_set_style_bg_color(s_tab_btns[i],
+                                  lv_color_hex(on ? kColorTabOnBg : kColorBg), 0);
+        lv_obj_set_style_bg_opa(s_tab_btns[i], on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_text_color(s_tab_labels[i],
+                                    lv_color_hex(on ? kColorAccent : kColorSub), 0);
+    }
+}
+
+// ---- Page builders (into s_content, content coords: 0..479 x 0..351) --------
+
+void buildHomePage();
+void buildRadioPage();
+void buildMusicPage();
+void buildSensorsPage();
+void buildSettingsPage();
+
+void buildPage()
+{
+    if (s_content == nullptr) {
+        return;
+    }
+    s_home_clock = nullptr;
+    s_home_date = nullptr;
+    s_home_callsign = nullptr;
+    s_home_server = nullptr;
+    s_home_wifi = nullptr;
+    s_home_wifi_sub = nullptr;
+    s_home_batt = nullptr;
+    s_home_batt_sub = nullptr;
+    s_home_heading = nullptr;
+    s_ptt_btn = nullptr;
+    s_ptt_label = nullptr;
+    s_radio_state = nullptr;
+    s_radio_hint = nullptr;
+    s_music_track = nullptr;
+    s_music_state = nullptr;
+    s_music_url = nullptr;
+    s_music_play_label = nullptr;
+    s_music_vol = nullptr;
+    s_sens_accel = nullptr;
+    s_sens_gyro = nullptr;
+    s_sens_heading = nullptr;
+    s_sens_heading_sub = nullptr;
+    s_sens_batt = nullptr;
+    s_sens_mag = nullptr;
+    s_sens_mag_warn = nullptr;
+    s_settings_bright_label = nullptr;
+    s_settings_lang_btn_label = nullptr;
+    lv_obj_clean(s_content);
+    switch (s_page) {
+        case Page::Home: buildHomePage(); break;
+        case Page::Radio: buildRadioPage(); break;
+        case Page::Music: buildMusicPage(); break;
+        case Page::Sensors: buildSensorsPage(); break;
+        case Page::Settings: buildSettingsPage(); break;
+        default: break;
+    }
+    s_last_page_ms = 0u; // force an immediate live refresh
+}
+
+void switchTab(int index)
+{
+    if (index < 0 || index >= static_cast<int>(Page::Count)) {
+        return;
+    }
+    if (s_overlay != nullptr) {
+        lv_obj_delete(s_overlay);
+        s_overlay = nullptr;
+    }
+    const bool changed = (s_page != static_cast<Page>(index));
+    s_page = static_cast<Page>(index);
+    if (changed) {
+        STATUS_IO_Vibrate(30);
+        if (s_ptt_tx_visual) {
+            // Leaving the Radio page mid-transmission releases the soft key.
+            STATUS_IO_SetSoftPtt(false);
+            s_ptt_tx_visual = false;
+        }
+    }
+    buildPage();
+    updateTabHighlight();
+}
+
+void contentGestureEvent(lv_event_t *)
+{
+    const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+    const int current = static_cast<int>(s_page);
+    if (dir == LV_DIR_LEFT) {
+        switchTab((current + 1) % static_cast<int>(Page::Count));
+    } else if (dir == LV_DIR_RIGHT) {
+        switchTab((current + static_cast<int>(Page::Count) - 1) %
+                  static_cast<int>(Page::Count));
+    }
+}
+
+// ---- Home page ----------------------------------------------------------------
+
+void buildHomePage()
+{
+    lv_obj_t *hero = makeCard(s_content, kMargin, 8, kWidth - 2 * kMargin, 156, 12);
+
+    s_home_clock = makeLabel(hero, "--:--", &lv_font_montserrat_48, kColorText);
+    lv_obj_align(s_home_clock, LV_ALIGN_CENTER, 0, -32);
+
+    s_home_date = makeLabel(hero, "", &lv_font_montserrat_20, kColorSub);
+    lv_obj_align(s_home_date, LV_ALIGN_CENTER, 0, 12);
+
+    s_home_callsign = makeLabel(hero, "----------", &lv_font_montserrat_28, kColorAccent);
+    lv_obj_align(s_home_callsign, LV_ALIGN_CENTER, 0, 50);
+
+    // 2x2 status grid: y 172 / 264, h 84 (content coords).
+    const int row1 = 172;
+    const int row2 = 264;
+    const int col2 = kMargin + kCardW + 8;
+
+    lv_obj_t *server = makeCard(s_content, kMargin, row1, kCardW, 84, 10);
+    cardCaption(server, "SERVER");
+    s_home_server = makeLabel(server, "--", &lv_font_montserrat_20, kColorText);
+    lv_obj_set_pos(s_home_server, 0, 22);
+
+    lv_obj_t *wifi = makeCard(s_content, col2, row1, kCardW, 84, 10);
+    cardCaption(wifi, "WIFI");
+    s_home_wifi = makeLabel(wifi, "--", &lv_font_montserrat_20, kColorText);
+    lv_obj_set_pos(s_home_wifi, 0, 22);
+    s_home_wifi_sub = makeLabel(wifi, "", &lv_font_montserrat_14, kColorSub);
+    lv_obj_set_pos(s_home_wifi_sub, 0, 48);
+
+    lv_obj_t *batt = makeCard(s_content, kMargin, row2, kCardW, 84, 10);
+    cardCaption(batt, "BATTERY");
+    s_home_batt = makeLabel(batt, "--", &lv_font_montserrat_20, kColorText);
+    lv_obj_set_pos(s_home_batt, 0, 22);
+    s_home_batt_sub = makeLabel(batt, "", &lv_font_montserrat_14, kColorSub);
+    lv_obj_set_pos(s_home_batt_sub, 0, 48);
+
+    lv_obj_t *heading = makeCard(s_content, col2, row2, kCardW, 84, 10);
+    cardCaption(heading, "HEADING");
+    s_home_heading = makeLabel(heading, "--", &lv_font_montserrat_20, kColorViolet);
+    lv_obj_set_pos(s_home_heading, 0, 22);
+}
+
+void refreshHomePage()
+{
+    if (s_home_clock == nullptr) {
+        return;
+    }
+    char text[48];
+    struct tm tm_now = {};
+    formatClock(text, sizeof(text), &tm_now);
+    setLabel(s_home_clock, s_shown_home_clock, sizeof(s_shown_home_clock), text);
+
+    if (tm_now.tm_year + 1900 >= 2024) {
+        snprintf(text, sizeof(text), "%04d-%02d-%02d %s", tm_now.tm_year + 1900,
+                 tm_now.tm_mon + 1, tm_now.tm_mday, weekdayName(tm_now.tm_wday));
+    } else {
+        snprintf(text, sizeof(text), "----");
+    }
+    lv_label_set_text(s_home_date, text);
+
+    char callsign[16];
+    formatCallsign(callsign, sizeof(callsign));
+    lv_label_set_text(s_home_callsign, callsign);
+
+    const bool linked = STATUS_IO_NrlServerLinked();
+    lv_label_set_text(s_home_server, tr(linked ? "Linked" : "Offline"));
+    lv_obj_set_style_text_color(s_home_server,
+                                lv_color_hex(linked ? kColorGood : kColorSub), 0);
+
+    if (nrlWifiStaConnected()) {
+        wifi_ap_record_t ap = {};
+        const int rssi =
+            (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : 0;
+        snprintf(text, sizeof(text), "%d dBm", rssi);
+        lv_label_set_text(s_home_wifi, text);
+        char ip[20] = {};
+        nrlIpToString(nrlWifiStaIp(), ip, sizeof(ip));
+        lv_label_set_text(s_home_wifi_sub, ip);
+    } else {
+        lv_label_set_text(s_home_wifi, tr("AP mode"));
+        lv_label_set_text(s_home_wifi_sub, "");
+    }
+
+    MosaicoSensorSnapshot snap = {};
+    if (sensorSnapshot(&snap) && snap.gauge_present) {
+        snprintf(text, sizeof(text), "%u%%  %u.%02uV",
+                 static_cast<unsigned>(snap.battery_soc_percent),
+                 static_cast<unsigned>(snap.battery_mv / 1000u),
+                 static_cast<unsigned>((snap.battery_mv % 1000u) / 10u));
+        lv_label_set_text(s_home_batt, text);
+        lv_label_set_text(s_home_batt_sub,
+                          snap.battery_charging ? tr("Charging") : "");
+    } else {
+        lv_label_set_text(s_home_batt, tr("No gauge"));
+        lv_label_set_text(s_home_batt_sub, "");
+    }
+
+    if (sensorSnapshot(&snap) && snap.mag2_valid) {
+        snprintf(text, sizeof(text), "%.0f\xC2\xB0 %s", static_cast<double>(snap.heading_deg),
+                 compassPoint(snap.heading_deg));
+        lv_label_set_text(s_home_heading, text);
+    } else {
+        lv_label_set_text(s_home_heading, "--");
+    }
+}
+
+// ---- Radio page (walkie-talkie core) -------------------------------------------
+
+void setPttVisual(bool tx)
+{
+    s_ptt_tx_visual = tx;
+    if (s_ptt_btn == nullptr || s_ptt_label == nullptr) {
+        return;
+    }
+    lv_obj_set_style_bg_color(s_ptt_btn,
+                              lv_color_hex(tx ? kColorPttTxBg : kColorCard), 0);
+    lv_obj_set_style_border_color(s_ptt_btn,
+                                  lv_color_hex(tx ? kColorBad : kColorAccent), 0);
+    lv_obj_set_style_text_color(s_ptt_label,
+                                lv_color_hex(tx ? kColorBad : kColorAccent), 0);
+    char text[24];
+    snprintf(text, sizeof(text), "PTT\n%s", tx ? "TX" : tr("HOLD"));
+    lv_label_set_text(s_ptt_label, text);
+}
+
+void pttEvent(lv_event_t *event)
+{
+    switch (lv_event_get_code(event)) {
+        case LV_EVENT_PRESSED:
+            STATUS_IO_SetSoftPtt(true);
+            STATUS_IO_Vibrate(30);
+            setPttVisual(true);
+            break;
+        case LV_EVENT_RELEASED:
+        case LV_EVENT_PRESS_LOST:
+            STATUS_IO_SetSoftPtt(false);
+            setPttVisual(false);
+            break;
+        default:
+            break;
+    }
+}
+
+void buildRadioPage()
+{
+    s_radio_state = makeLabel(s_content, "", &lv_font_montserrat_20, kColorSub);
+    lv_obj_set_width(s_radio_state, kWidth - 2 * kMargin);
+    lv_obj_set_style_text_align(s_radio_state, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_radio_state, kMargin, 8);
+
+    // Big round press-and-hold PTT (208 px > the 48 px touch minimum).
+    s_ptt_btn = lv_button_create(s_content);
+    lv_obj_set_size(s_ptt_btn, 208, 208);
+    lv_obj_set_pos(s_ptt_btn, (kWidth - 208) / 2, 48);
+    lv_obj_set_style_radius(s_ptt_btn, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_ptt_btn, 3, 0);
+    lv_obj_set_style_bg_color(s_ptt_btn, lv_color_hex(kColorBtnPress), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(s_ptt_btn, pttEvent, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(s_ptt_btn, pttEvent, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(s_ptt_btn, pttEvent, LV_EVENT_PRESS_LOST, nullptr);
+
+    s_ptt_label = makeLabel(s_ptt_btn, "PTT", &lv_font_montserrat_28, kColorAccent);
+    lv_obj_set_style_text_align(s_ptt_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(s_ptt_label);
+    setPttVisual(STATUS_IO_IsPttActive());
+
+    s_radio_hint = makeLabel(s_content, "", &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_radio_hint, kWidth - 2 * kMargin);
+    lv_obj_set_style_text_align(s_radio_hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_radio_hint, kMargin, 272);
+
+    lv_obj_t *hint2 = makeLabel(s_content, tr("Push-to-talk on the NRL network"),
+                                &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(hint2, kWidth - 2 * kMargin);
+    lv_obj_set_style_text_align(hint2, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(hint2, kMargin, 300);
+}
+
+void refreshRadioPage()
+{
+    if (s_radio_state == nullptr) {
+        return;
+    }
+    const bool linked = STATUS_IO_NrlServerLinked();
+    const bool tx = STATUS_IO_IsPttActive();
+    if (tx != s_ptt_tx_visual) {
+        setPttVisual(tx); // an external PTT source changed the state
+    }
+    char text[64];
+    if (tx) {
+        snprintf(text, sizeof(text), "%s", tr("TRANSMITTING"));
+    } else {
+        snprintf(text, sizeof(text), "%s  ·  %s",
+                 tr(linked ? "Linked" : "Offline"), tr("READY"));
+    }
+    lv_label_set_text(s_radio_state, text);
+    lv_obj_set_style_text_color(s_radio_state,
+                                lv_color_hex(tx ? kColorBad
+                                                : (linked ? kColorGood : kColorWarn)),
+                                0);
+
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    const unsigned timeout = (cfg != nullptr) ? cfg->ptt_timeout_s : 0u;
+    if (timeout > 0u) {
+        snprintf(text, sizeof(text), tr("TX auto-off: %u s"), timeout);
+    } else {
+        snprintf(text, sizeof(text), "%s", tr("TX auto-off: off"));
+    }
+    lv_label_set_text(s_radio_hint, text);
+}
+
+// ---- Music page (net radio; local library needs NAND) ---------------------------
+
+void refreshMusicPage();
+
+void musicPlayEvent(lv_event_t *)
+{
+    if (MUSIC_IsPlaying()) {
+        MUSIC_Stop();
+    } else {
+        char url[128] = {};
+        MUSIC_GetRadioUrl(url, sizeof(url));
+        if (url[0] != '\0') {
+            (void)MUSIC_PlayFile(url);
+        }
+    }
+    refreshMusicPage();
+}
+
+void musicVolumeEvent(lv_event_t *event)
+{
+    const int delta = static_cast<int>(
+        reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    if (cfg == nullptr) {
+        return;
+    }
+    int pct = (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255 + delta;
+    if (pct < 0) {
+        pct = 0;
+    } else if (pct > 100) {
+        pct = 100;
+    }
+    const int volume = (pct * 255 + 50) / 100;
+    if (volume != static_cast<int>(cfg->line_out_volume)) {
+        EXTERNAL_RADIO_SetLineOutVolume(static_cast<uint8_t>(volume), false);
+        s_volume_dirty = true;
+        s_volume_change_ms = millis();
+        refreshMusicPage();
+    }
+}
+
+void buildMusicPage()
+{
+    lv_obj_t *card = makeCard(s_content, kMargin, 8, kWidth - 2 * kMargin, 116, 12);
+    cardCaption(card, "NET RADIO");
+    s_music_track = makeLabel(card, tr("No station"), &lv_font_montserrat_20, kColorText);
+    lv_obj_set_width(s_music_track, kWidth - 2 * kMargin - 24);
+    lv_obj_set_pos(s_music_track, 0, 20);
+    lv_label_set_long_mode(s_music_track, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    s_music_state = makeLabel(card, "", &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_music_state, 0, 52);
+    s_music_url = makeLabel(card, "", &lv_font_montserrat_14, kColorSub);
+    lv_obj_set_width(s_music_url, kWidth - 2 * kMargin - 24);
+    lv_label_set_long_mode(s_music_url, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(s_music_url, 0, 76);
+
+    lv_obj_t *play = makeButton(s_content, kMargin, 140, 216, 64, "", musicPlayEvent, nullptr);
+    s_music_play_label = lv_obj_get_child(play, 0);
+    makeButton(s_content, 240, 140, 104, 64, LV_SYMBOL_MINUS, musicVolumeEvent,
+               reinterpret_cast<void *>(static_cast<intptr_t>(-5)));
+    makeButton(s_content, 352, 140, 112, 64, LV_SYMBOL_PLUS, musicVolumeEvent,
+               reinterpret_cast<void *>(static_cast<intptr_t>(5)));
+
+    s_music_vol = makeLabel(s_content, "", &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(s_music_vol, kWidth - 2 * kMargin);
+    lv_obj_set_style_text_align(s_music_vol, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_music_vol, kMargin, 216);
+
+    // No SD/USB host on this board: local file playback is unavailable until
+    // the NAND storage lands.
+    lv_obj_t *note = makeCard(s_content, kMargin, 248, kWidth - 2 * kMargin, 56, 12);
+    lv_obj_set_style_bg_color(note, lv_color_hex(0x0D1014), 0);
+    lv_obj_t *note_text = makeLabel(note, tr("Local library requires NAND storage (coming soon)"),
+                                    &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(note_text, kWidth - 2 * kMargin - 24);
+    lv_obj_set_style_text_align(note_text, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(note_text);
+
+    refreshMusicPage();
+}
+
+void refreshMusicPage()
+{
+    if (s_music_track == nullptr) {
+        return;
+    }
+    const bool playing = MUSIC_IsPlaying();
+    const char *path = MUSIC_CurrentPath();
+    const MediaTrackInfo *info = MUSIC_GetTrackInfo();
+
+    char text[160];
+    if (playing && info != nullptr && info->title[0] != '\0') {
+        snprintf(text, sizeof(text), "%s", info->title);
+    } else if (playing && path != nullptr && path[0] != '\0') {
+        snprintf(text, sizeof(text), "%s", path);
+    } else {
+        snprintf(text, sizeof(text), "%s", tr("No station"));
+    }
+    lv_label_set_text(s_music_track, text);
+
+    snprintf(text, sizeof(text), "%s", tr(playing ? "Playing" : "Stopped"));
+    lv_label_set_text(s_music_state, text);
+    lv_obj_set_style_text_color(s_music_state,
+                                lv_color_hex(playing ? kColorGood : kColorSub), 0);
+
+    char url[128] = {};
+    MUSIC_GetRadioUrl(url, sizeof(url));
+    lv_label_set_text(s_music_url, url);
+
+    snprintf(text, sizeof(text), "%s %s",
+             playing ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY,
+             tr(playing ? "Stop" : "Play"));
+    lv_label_set_text(s_music_play_label, text);
+    lv_obj_set_style_text_color(s_music_play_label,
+                                lv_color_hex(playing ? kColorBad : kColorAccent), 0);
+
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    const int pct = (cfg != nullptr)
+                        ? (static_cast<int>(cfg->line_out_volume) * 100 + 127) / 255
+                        : 0;
+    snprintf(text, sizeof(text), tr("Volume %d%%"), pct);
+    lv_label_set_text(s_music_vol, text);
+}
+
+// ---- Sensors page (live, ~4 Hz) -------------------------------------------------
+
+void buildSensorsPage()
+{
+    // Scrollable page body: the magnetometer card sits below the 2x2 grid.
+    lv_obj_t *page = lv_obj_create(s_content);
+    lv_obj_set_pos(page, 0, 0);
+    lv_obj_set_size(page, kWidth, kContentH);
+    lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(page, 0, 0);
+    lv_obj_set_style_radius(page, 0, 0);
+    lv_obj_set_style_pad_all(page, 0, 0);
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    lv_obj_add_flag(page, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    const int row2 = 180;
+    const int col2 = kMargin + kCardW + 8;
+
+    lv_obj_t *accel = makeCard(page, kMargin, 8, kCardW, 164, 12);
+    cardCaption(accel, "ACCEL (g)");
+    s_sens_accel = makeLabel(accel, "--", &lv_font_montserrat_16, kColorText);
+    lv_obj_set_pos(s_sens_accel, 0, 24);
+
+    lv_obj_t *gyro = makeCard(page, col2, 8, kCardW, 164, 12);
+    cardCaption(gyro, "GYRO (dps)");
+    s_sens_gyro = makeLabel(gyro, "--", &lv_font_montserrat_16, kColorText);
+    lv_obj_set_pos(s_sens_gyro, 0, 24);
+
+    lv_obj_t *heading = makeCard(page, kMargin, row2, kCardW, 164, 12);
+    cardCaption(heading, "HEADING");
+    s_sens_heading = makeLabel(heading, "--", &lv_font_montserrat_28, kColorViolet);
+    lv_obj_set_pos(s_sens_heading, 0, 28);
+    s_sens_heading_sub = makeLabel(heading, "", &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(s_sens_heading_sub, 0, 76);
+
+    lv_obj_t *batt = makeCard(page, col2, row2, kCardW, 164, 12);
+    cardCaption(batt, "BATTERY");
+    s_sens_batt = makeLabel(batt, "--", &lv_font_montserrat_16, kColorText);
+    lv_obj_set_pos(s_sens_batt, 0, 24);
+
+    // Dual BMM150 raw fields. The two sensors sit at different spots on the
+    // board, so a large difference means local magnetic interference (speaker
+    // magnet, metal) rather than the geomagnetic field.
+    lv_obj_t *mag = makeCard(page, kMargin, 352, kWidth - 2 * kMargin, 128, 12);
+    cardCaption(mag, "MAGNETOMETER (uT)");
+    s_sens_mag = makeLabel(mag, "--", &lv_font_montserrat_16, kColorText);
+    lv_obj_set_pos(s_sens_mag, 0, 24);
+    s_sens_mag_warn = makeLabel(mag, "", &lv_font_montserrat_16, kColorWarn);
+    lv_obj_set_pos(s_sens_mag_warn, 0, 92);
+}
+
+void refreshSensorsPage()
+{
+    if (s_sens_accel == nullptr) {
+        return;
+    }
+    MosaicoSensorSnapshot snap = {};
+    const bool ok = sensorSnapshot(&snap);
+    char text[128];
+
+    if (ok && snap.imu_valid) {
+        snprintf(text, sizeof(text), "X %+.2f\nY %+.2f\nZ %+.2f",
+                 static_cast<double>(snap.accel_x_g),
+                 static_cast<double>(snap.accel_y_g),
+                 static_cast<double>(snap.accel_z_g));
+    } else {
+        snprintf(text, sizeof(text), "%s", tr("sensor absent"));
+    }
+    lv_label_set_text(s_sens_accel, text);
+
+    if (ok && snap.imu_valid) {
+        snprintf(text, sizeof(text), "X %+.1f\nY %+.1f\nZ %+.1f",
+                 static_cast<double>(snap.gyro_x_dps),
+                 static_cast<double>(snap.gyro_y_dps),
+                 static_cast<double>(snap.gyro_z_dps));
+    } else {
+        snprintf(text, sizeof(text), "%s", tr("sensor absent"));
+    }
+    lv_label_set_text(s_sens_gyro, text);
+
+    if (ok && snap.mag2_valid) {
+        snprintf(text, sizeof(text), "%.0f\xC2\xB0", static_cast<double>(snap.heading_deg));
+        lv_label_set_text(s_sens_heading, text);
+        snprintf(text, sizeof(text), "%s%s", compassPoint(snap.heading_deg),
+                 snap.mag3_valid ? "  ·2" : "");
+        lv_label_set_text(s_sens_heading_sub, text);
+    } else {
+        lv_label_set_text(s_sens_heading, "--");
+        lv_label_set_text(s_sens_heading_sub, tr("sensor absent"));
+    }
+
+    if (ok && snap.gauge_present) {
+        char charge[24] = {};
+        if (snap.battery_charging) {
+            snprintf(charge, sizeof(charge), " %s", tr("Charging"));
+        }
+        snprintf(text, sizeof(text), "%u mV\n%+d mA\n%u%%%s",
+                 static_cast<unsigned>(snap.battery_mv),
+                 static_cast<int>(snap.battery_current_ma),
+                 static_cast<unsigned>(snap.battery_soc_percent), charge);
+        lv_label_set_text(s_sens_batt, text);
+    } else {
+        lv_label_set_text(s_sens_batt, tr("No gauge"));
+    }
+
+    if (ok && (snap.mag2_valid || snap.mag3_valid)) {
+        snprintf(text, sizeof(text), "#2 X %+.1f Y %+.1f Z %+.1f\n#3 X %+.1f Y %+.1f Z %+.1f",
+                 static_cast<double>(snap.mag2_x_ut), static_cast<double>(snap.mag2_y_ut),
+                 static_cast<double>(snap.mag2_z_ut),
+                 static_cast<double>(snap.mag3_x_ut), static_cast<double>(snap.mag3_y_ut),
+                 static_cast<double>(snap.mag3_z_ut));
+        lv_label_set_text(s_sens_mag, text);
+        // Vector difference between the two sensors -> local interference level.
+        const float dx = snap.mag2_x_ut - snap.mag3_x_ut;
+        const float dy = snap.mag2_y_ut - snap.mag3_y_ut;
+        const float dz = snap.mag2_z_ut - snap.mag3_z_ut;
+        const float diff = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (snap.mag2_valid && snap.mag3_valid && diff > 15.0f) {
+            snprintf(text, sizeof(text), "%s %.0f uT", tr("Interference"),
+                     static_cast<double>(diff));
+            lv_label_set_text(s_sens_mag_warn, text);
+        } else {
+            lv_label_set_text(s_sens_mag_warn, "");
+        }
+    } else {
+        lv_label_set_text(s_sens_mag, tr("sensor absent"));
+        lv_label_set_text(s_sens_mag_warn, "");
+    }
+}
+
+// ---- Settings page -----------------------------------------------------------
+
+void brightnessEvent(lv_event_t *event)
+{
+    lv_obj_t *slider = static_cast<lv_obj_t *>(lv_event_get_target(event));
+    const lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_VALUE_CHANGED) {
+        s_brightness = static_cast<uint8_t>(lv_slider_get_value(slider));
+        applyBrightness();
+        if (s_settings_bright_label != nullptr) {
+            char text[8];
+            snprintf(text, sizeof(text), "%u", static_cast<unsigned>(s_brightness));
+            lv_label_set_text(s_settings_bright_label, text);
+        }
+    } else if (code == LV_EVENT_RELEASED) {
+        saveBrightness();
+    }
+}
+
+void rebuildMainUi();
+
+void langEvent(lv_event_t *)
+{
+    setUiLang(s_lang == 0 ? 1 : 0);
+    rebuildMainUi(); // switching the language rebuilds the active page
+}
+
+void closeOverlayEvent(lv_event_t *)
+{
+    if (s_overlay != nullptr) {
+        lv_obj_delete(s_overlay);
+        s_overlay = nullptr;
+    }
+}
+
+void showProvisioningOverlay()
+{
+    if (s_overlay != nullptr) {
+        return;
+    }
+    lv_obj_t *scr = lv_screen_active();
+    s_overlay = makeCard(scr, 24, 96, kWidth - 48, 288, 16);
+
+    lv_obj_t *title = makeLabel(s_overlay, tr("WiFi Provisioning"),
+                                &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_width(title, kWidth - 80);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t *step1 = makeLabel(s_overlay, tr("1. Connect phone/PC to hotspot:"),
+                                &lv_font_montserrat_16, kColorText);
+    lv_obj_align(step1, LV_ALIGN_TOP_LEFT, 0, 44);
+
+    char ssid[40] = {};
+    WifiConfigPortal_GetApSsid(ssid, sizeof(ssid));
+    lv_obj_t *ssid_label = makeLabel(s_overlay, ssid, &lv_font_montserrat_20, kColorGood);
+    lv_obj_align(ssid_label, LV_ALIGN_TOP_LEFT, 16, 70);
+
+    lv_obj_t *step2 = makeLabel(s_overlay, tr("2. Open in a browser:"),
+                                &lv_font_montserrat_16, kColorText);
+    lv_obj_align(step2, LV_ALIGN_TOP_LEFT, 0, 108);
+
+    char ip[24] = "192.168.4.1";
+    const uint32_t ap_ip = nrlWifiApIp();
+    if (ap_ip != 0u) {
+        nrlIpToString(ap_ip, ip, sizeof(ip));
+    }
+    char url[48];
+    snprintf(url, sizeof(url), "http://%s/", ip);
+    lv_obj_t *ip_label = makeLabel(s_overlay, url, &lv_font_montserrat_20, kColorGood);
+    lv_obj_align(ip_label, LV_ALIGN_TOP_LEFT, 16, 134);
+
+    lv_obj_t *ble = makeLabel(s_overlay, tr("Or use WeChat mini program「NRL互联」via Bluetooth."),
+                              &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(ble, kWidth - 80);
+    lv_obj_align(ble, LV_ALIGN_TOP_LEFT, 0, 172);
+
+    lv_obj_t *close = makeButton(s_overlay, (kWidth - 48 - 32 - 140) / 2, 214, 140, 52,
+                                 tr("Close"), closeOverlayEvent, nullptr);
+    (void)close;
+}
+
+void provisioningInfoEvent(lv_event_t *)
+{
+    showProvisioningOverlay();
+}
+
+void autoRotateEvent(lv_event_t *event)
+{
+    lv_obj_t *sw = static_cast<lv_obj_t *>(lv_event_get_target(event));
+    setAutoRotate(lv_obj_has_state(sw, LV_STATE_CHECKED));
+}
+
+void buildSettingsPage()
+{
+    // Scrollable page body: the cards below exceed the 352 px content height.
+    lv_obj_t *page = lv_obj_create(s_content);
+    lv_obj_set_pos(page, 0, 0);
+    lv_obj_set_size(page, kWidth, kContentH);
+    lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(page, 0, 0);
+    lv_obj_set_style_radius(page, 0, 0);
+    lv_obj_set_style_pad_all(page, 0, 0);
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    // Vertical scroll stays here; horizontal swipes bubble up to switch tabs.
+    lv_obj_add_flag(page, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    // Brightness.
+    lv_obj_t *bright = makeCard(page, kMargin, 8, kWidth - 2 * kMargin, 92, 12);
+    cardCaption(bright, "BRIGHTNESS");
+    lv_obj_t *slider = lv_slider_create(bright);
+    lv_obj_set_pos(slider, 0, 44);
+    lv_obj_set_size(slider, kWidth - 2 * kMargin - 24 - 88, 16);
+    lv_slider_set_range(slider, 0, 255);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(kColorBorder), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(kColorText), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(slider, 0, LV_PART_KNOB);
+    lv_slider_set_value(slider, s_brightness, LV_ANIM_OFF);
+    lv_obj_add_event_cb(slider, brightnessEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_add_event_cb(slider, brightnessEvent, LV_EVENT_RELEASED, nullptr);
+
+    char text[64];
+    snprintf(text, sizeof(text), "%u", static_cast<unsigned>(s_brightness));
+    s_settings_bright_label = makeLabel(bright, text, &lv_font_montserrat_20, kColorAccent);
+    lv_obj_set_pos(s_settings_bright_label, kWidth - 2 * kMargin - 24 - 76, 38);
+    lv_obj_set_width(s_settings_bright_label, 76);
+    lv_obj_set_style_text_align(s_settings_bright_label, LV_TEXT_ALIGN_RIGHT, 0);
+
+    // Language.
+    lv_obj_t *lang = makeCard(page, kMargin, 108, kWidth - 2 * kMargin, 64, 12);
+    lv_obj_t *lang_label = makeLabel(lang, tr("Language"), &lv_font_montserrat_20, kColorText);
+    lv_obj_align(lang_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t *lang_btn = makeButton(lang, 0, 0, 140, 40, "", langEvent, nullptr);
+    lv_obj_align(lang_btn, LV_ALIGN_RIGHT_MID, 0, 0);
+    s_settings_lang_btn_label = lv_obj_get_child(lang_btn, 0);
+    lv_label_set_text(s_settings_lang_btn_label, s_lang == 0 ? "English" : "中文");
+
+    // IMU auto-rotate toggle.
+    lv_obj_t *rot = makeCard(page, kMargin, 180, kWidth - 2 * kMargin, 64, 12);
+    lv_obj_t *rot_label = makeLabel(rot, tr("Auto-rotate"), &lv_font_montserrat_20, kColorText);
+    lv_obj_align(rot_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t *rot_sw = lv_switch_create(rot);
+    lv_obj_set_size(rot_sw, 56, 32);
+    lv_obj_align(rot_sw, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(rot_sw, lv_color_hex(kColorAccent), LV_PART_INDICATOR);
+    if (s_auto_rotate) {
+        lv_obj_add_state(rot_sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(rot_sw, autoRotateEvent, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // WiFi provisioning entry (SoftAP portal info).
+    lv_obj_t *wifi = makeCard(page, kMargin, 252, kWidth - 2 * kMargin, 64, 12);
+    lv_obj_t *wifi_label = makeLabel(wifi, tr("WiFi Setup"), &lv_font_montserrat_20, kColorText);
+    lv_obj_align(wifi_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t *wifi_btn = makeButton(wifi, 0, 0, 160, 40, tr("Hotspot Info"),
+                                    provisioningInfoEvent, nullptr);
+    lv_obj_align(wifi_btn, LV_ALIGN_RIGHT_MID, 0, 0);
+
+    // About.
+    lv_obj_t *about = makeCard(page, kMargin, 324, kWidth - 2 * kMargin, 92, 12);
+    cardCaption(about, "ABOUT");
+    snprintf(text, sizeof(text), "%s %s", tr("Firmware"), "v" NRL_FIRMWARE_VERSION);
+    lv_obj_t *fw = makeLabel(about, text, &lv_font_montserrat_16, kColorText);
+    lv_obj_set_pos(fw, 0, 22);
+    snprintf(text, sizeof(text), "%s ESP-Mosaico  ·  IDF %s", tr("Board"),
+             esp_get_idf_version());
+    lv_obj_t *board = makeLabel(about, text, &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_pos(board, 0, 48);
+}
+
+// ---- Provisioning screen (services not yet started) ----------------------------
+
+void buildProvisioning()
+{
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_clean(scr);
+    s_content = nullptr;
+    s_lbl_clock = nullptr;
+    s_overlay = nullptr;
+    for (int i = 0; i < 5; ++i) {
+        s_tab_btns[i] = nullptr;
+        s_tab_labels[i] = nullptr;
+    }
+    lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
+
+    lv_obj_t *title = makeLabel(scr, "WiFi Setup / 设备配网", &lv_font_montserrat_28,
+                                kColorAccent);
+    lv_obj_set_width(title, kWidth - 32);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(title, kMargin, 40);
+
+    lv_obj_t *box = makeCard(scr, 24, 110, kWidth - 48, 260, 16);
+
+    lv_obj_t *wait = makeLabel(box, "正在等待网络设置 / Waiting for WiFi setup",
+                               &lv_font_montserrat_16, kColorWarn);
+    lv_obj_set_width(wait, kWidth - 80);
+    lv_obj_set_style_text_align(wait, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(wait, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t *step1 = makeLabel(box, "1. 连接设备热点 / Connect to hotspot:",
+                                &lv_font_montserrat_16, kColorText);
+    lv_obj_align(step1, LV_ALIGN_TOP_LEFT, 0, 48);
+
+    s_prov_ssid = makeLabel(box, "NRL-ESP32-XXXXXX", &lv_font_montserrat_20, kColorGood);
+    lv_obj_align(s_prov_ssid, LV_ALIGN_TOP_LEFT, 16, 76);
+
+    lv_obj_t *step2 = makeLabel(box, "2. 浏览器打开 / Open in a browser:",
+                                &lv_font_montserrat_16, kColorText);
+    lv_obj_align(step2, LV_ALIGN_TOP_LEFT, 0, 116);
+
+    s_prov_ip = makeLabel(box, "http://192.168.4.1/", &lv_font_montserrat_20, kColorGood);
+    lv_obj_align(s_prov_ip, LV_ALIGN_TOP_LEFT, 16, 144);
+
+    lv_obj_t *ble = makeLabel(box, "或通过微信小程序「NRL互联」蓝牙配网 / BLE via WeChat「NRL互联」",
+                              &lv_font_montserrat_16, kColorSub);
+    lv_obj_set_width(ble, kWidth - 80);
+    lv_obj_align(ble, LV_ALIGN_TOP_LEFT, 0, 192);
+}
+
+void refreshProvisioning()
+{
+    if (s_prov_ssid == nullptr || s_prov_ip == nullptr) {
+        return;
+    }
+    char ssid[40] = {};
+    WifiConfigPortal_GetApSsid(ssid, sizeof(ssid));
+    lv_label_set_text(s_prov_ssid, ssid);
+    char ip[24] = "192.168.4.1";
+    const uint32_t ap_ip = nrlWifiApIp();
+    if (ap_ip != 0u) {
+        nrlIpToString(ap_ip, ip, sizeof(ip));
+    }
+    char url[48];
+    snprintf(url, sizeof(url), "http://%s/", ip);
+    lv_label_set_text(s_prov_ip, url);
+}
+
+// ---- Screen assembly -----------------------------------------------------------
+
+void buildMainUi()
+{
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(kColorBg), 0);
+    s_overlay = nullptr;
+    s_prov_ssid = nullptr;
+    s_prov_ip = nullptr;
+
+    buildStatusBar(scr);
+    buildDock(scr);
+
+    s_content = lv_obj_create(scr);
+    lv_obj_set_pos(s_content, 0, kContentY);
+    lv_obj_set_size(s_content, kWidth, kContentH);
+    lv_obj_set_style_bg_opa(s_content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_content, 0, 0);
+    lv_obj_set_style_radius(s_content, 0, 0);
+    lv_obj_set_style_pad_all(s_content, 0, 0);
+    lv_obj_remove_flag(s_content, LV_OBJ_FLAG_SCROLLABLE);
+    // Clickable so bare areas receive the swipe gesture; cards bubble theirs up.
+    lv_obj_add_flag(s_content, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_content, contentGestureEvent, LV_EVENT_GESTURE, nullptr);
+
+    buildPage();
+    updateTabHighlight();
+    refreshStatusBar();
+}
+
+void rebuildMainUi()
+{
+    memset(s_shown_clock, 0, sizeof(s_shown_clock));
+    memset(s_shown_callsign, 0, sizeof(s_shown_callsign));
+    memset(s_shown_wifi, 0, sizeof(s_shown_wifi));
+    memset(s_shown_batt, 0, sizeof(s_shown_batt));
+    memset(s_shown_home_clock, 0, sizeof(s_shown_home_clock));
+    buildMainUi();
+}
+
+// Live refresh dispatch: page-specific updates only while the page is active.
+void refreshActivePage()
+{
+    switch (s_page) {
+        case Page::Home: refreshHomePage(); break;
+        case Page::Radio: refreshRadioPage(); break;
+        case Page::Music: refreshMusicPage(); break;
+        case Page::Sensors: refreshSensorsPage(); break;
+        default: break;
+    }
+}
+
+} // namespace
+
+extern "C" void Display_Init(void)
+{
+    if (s_ready) {
+        return;
+    }
+    s_panel = MosaicoPanel_Init();
+    if (s_panel == nullptr) {
+        ESP_LOGE(kTag, "panel init failed");
+        return;
+    }
+    if (!initLvgl()) {
+        return;
+    }
+    initFonts();
+    loadUiLang();   // restore saved language before the first page is built
+    loadBrightness();
+    loadAutoRotate();
+    initTouch();
+    if (s_provisioning_mode) {
+        buildProvisioning();
+        refreshProvisioning();
+    } else {
+        buildMainUi();
+    }
+    lv_refr_now(nullptr);
+    s_ready = true;
+    ESP_LOGI(kTag, "ready: %dx%d QSPI AMOLED", kWidth, kHeight);
+}
+
+extern "C" bool Display_IsReady(void)
+{
+    return s_ready;
+}
+
+extern "C" void Display_SetProvisioningMode(bool enabled)
+{
+    if (s_provisioning_mode == enabled) {
+        return;
+    }
+    s_provisioning_mode = enabled;
+    s_last_bar_ms = 0u;
+    s_last_page_ms = 0u;
+    if (!s_ready) {
+        return;
+    }
+    if (enabled) {
+        buildProvisioning();
+        refreshProvisioning();
+    } else {
+        buildMainUi();
+    }
+    lv_refr_now(nullptr);
+}
+
+extern "C" void Display_Poll(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    const uint32_t now = millis();
+    if (s_provisioning_mode) {
+        if (s_last_bar_ms == 0u || (now - s_last_bar_ms) >= kBarRefreshMs) {
+            s_last_bar_ms = now;
+            refreshProvisioning();
+        }
+        lv_timer_handler();
+        return;
+    }
+    if (s_last_bar_ms == 0u || (now - s_last_bar_ms) >= kBarRefreshMs) {
+        s_last_bar_ms = now;
+        refreshStatusBar();
+    }
+    pollAutoRotate(now);
+    // Sensors run at ~4 Hz; other pages share the 500 ms status cadence.
+    const uint32_t page_interval =
+        (s_page == Page::Sensors) ? kSensorsRefreshMs : kBarRefreshMs;
+    if (s_last_page_ms == 0u || (now - s_last_page_ms) >= page_interval) {
+        s_last_page_ms = now;
+        refreshActivePage();
+    }
+    if (s_volume_dirty && (now - s_volume_change_ms) >= kVolumeSaveDelayMs) {
+        s_volume_dirty = !EXTERNAL_RADIO_SaveConfig();
+    }
+    lv_timer_handler();
+}
+
+extern "C" void Display_MenuOpen(void)
+{
+}
+
+extern "C" bool Display_MenuIsActive(void)
+{
+    return false;
+}
+
+extern "C" void Display_MenuNavigate(int direction)
+{
+    (void)direction;
+}
+
+extern "C" void Display_MenuConfirm(void)
+{
+}
+
+extern "C" void Display_HardwareKeyPress(enum DisplayHardwareKey key)
+{
+    (void)key;
+}
+
+extern "C" bool Display_CwIsActive(void)
+{
+    return false;
+}
+
+extern "C" void Display_CwExit(void)
+{
+}
+
+extern "C" int Display_GetBatteryRawMv(void)
+{
+    return batteryMvRaw();
+}
+
+extern "C" int Display_GetBatteryCalibratedMv(void)
+{
+    const int raw = batteryMvRaw();
+    if (raw <= 0) {
+        return 0;
+    }
+    const ExternalRadioConfig *cfg = EXTERNAL_RADIO_GetConfig();
+    const unsigned scale = (cfg != nullptr && cfg->battery_cal_milli != 0u)
+                               ? cfg->battery_cal_milli
+                               : 1000u;
+    return static_cast<int>((static_cast<long>(raw) * static_cast<long>(scale) + 500L) / 1000L);
+}
+
+extern "C" long Display_FramebufferBenchMBps(void)
+{
+    return -1;
+}
+
+extern "C" bool Display_SetCjkFontEngine(int engine)
+{
+    (void)engine;
+    return false;
+}
+
+extern "C" int Display_GetCjkFontEngine(void)
+{
+    return DISPLAY_CJK_FONT_BITMAP;
+}
+
+#endif // NRL_BOARD == NRL_BOARD_ESP_MOSAICO

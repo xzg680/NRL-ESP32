@@ -88,6 +88,21 @@ dependencies:
     version: ">=2.2.0"
     rules:
       - if: "target != esp32s31"
+  # ESP-Mosaico: 480x480 QSPI AMOLED (CO5300) + CST9220 touch. S31-only board.
+  espressif/esp_lcd_co5300:
+    version: "*"
+    rules:
+      - if: "target == esp32s31"
+  espressif/esp_lcd_touch_cst9220:
+    version: "*"
+    rules:
+      - if: "target == esp32s31"
+  # BMI270 IMU on the ESP-Mosaico sensor bus (low-level driver used by
+  # app/driver/mosaico_sensors.cpp).
+  espressif/bmi270:
+    version: "*"
+    rules:
+      - if: "target == esp32s31"
   # LVGL (gezipai ST7789 LCD UI) is vendored at components/lvgl/ by
   # scripts/fetch_lvgl.py at build time. It is deliberately NOT listed here
   # because the IDF component manager would (a) overwrite it from the

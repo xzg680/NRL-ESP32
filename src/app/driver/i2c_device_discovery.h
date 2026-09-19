@@ -13,6 +13,9 @@ enum class I2CDeviceModel : uint8_t {
     Qmc5883l,
     Bh1750,
     Pca9555OrBh1750,
+    Bmi270,
+    Bmm150,
+    Bq27220,
 };
 
 struct I2CDiscoveredDevice {

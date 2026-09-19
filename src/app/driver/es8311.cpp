@@ -18,7 +18,12 @@ static const char *TAG = "ES8311";
 
 namespace {
 
-constexpr uint8_t kEs8311Addr = 0x18; // 7-bit I2C address
+// 7-bit I2C address: 0x18 on most boards, 0x19 on ESP-Mosaico.
+#ifndef NRL_ES8311_I2C_ADDR
+#define NRL_ES8311_I2C_ADDR 0x18
+#endif
+constexpr uint8_t kEs8311Addr = NRL_ES8311_I2C_ADDR;
+
 
 constexpr int kPinPaEn = NRL_PIN_PA_EN;
 #ifndef NRL_PIN_PA_EN_ACTIVE_LEVEL
@@ -719,6 +724,16 @@ extern "C" bool ES8311_Init(void) {
     if (s_es8311_ready) {
         return s_hifi_active || AUDIO_StartPassthrough();
     }
+
+#ifdef NRL_PIN_CODEC_PW
+    // Boards with a switched codec LDO (ESP-Mosaico) must power the codec
+    // rail before any I2C traffic; the ES8311 sits behind a level shifter
+    // on CODEC_3V3.
+    gpio_reset_pin((gpio_num_t)NRL_PIN_CODEC_PW);
+    gpio_set_direction((gpio_num_t)NRL_PIN_CODEC_PW, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)NRL_PIN_CODEC_PW, 1);
+    vTaskDelay(pdMS_TO_TICKS(20));
+#endif
 
     AUDIO_SetMode(AUDIO_MODE_RECEIVE);
 

@@ -12,6 +12,7 @@
 #define NRL_BOARD_BI4UMD    5
 #define NRL_BOARD_BH4TDV_RF 6
 // USER CUSTOM END: BI4UMD board identity.
+#define NRL_BOARD_ESP_MOSAICO 7
 
 #ifndef NRL_BOARD
 #define NRL_BOARD NRL_BOARD_GEZIPAI
@@ -40,6 +41,8 @@
 #include "board_pins_s31_korvo.h"
 #elif NRL_BOARD == NRL_BOARD_S31_FUNCTION_COREBOARD
 #include "board_pins_s31_function_coreboard.h"
+#elif NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+#include "board_pins_esp_mosaico.h"
 #else
 #error "Unknown NRL_BOARD: select a supported NRL_BOARD_* value"
 #endif

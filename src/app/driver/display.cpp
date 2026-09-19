@@ -6374,7 +6374,7 @@ extern "C" int Display_GetCjkFontEngine(void) { return DISPLAY_CJK_FONT_BITMAP; 
 // Framebuffer benchmark exists only on the S31 RGB panel.
 extern "C" long Display_FramebufferBenchMBps(void) { return -1; }
 
-#elif NRL_BOARD != NRL_BOARD_S31_KORVO
+#elif NRL_BOARD != NRL_BOARD_S31_KORVO && NRL_BOARD != NRL_BOARD_ESP_MOSAICO
 
 extern "C" void Display_Init(void) {}
 extern "C" bool Display_IsReady(void) { return false; }

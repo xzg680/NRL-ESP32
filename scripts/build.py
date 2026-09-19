@@ -18,7 +18,7 @@ Examples:
     python scripts/build.py all               # build every board, summarize
 
 Boards: gezipai, bi4umd, gezipai_4g, bh4tdv, s31_korvo,
-s31_function_coreboard. If you omit the idf.py args it defaults to `build`.
+s31_function_coreboard, esp_mosaico. If you omit the idf.py args it defaults to `build`.
 The special board name `all` builds every board in sequence (build action
 only); one board failing does not stop the rest, and the exit code is
 non-zero if any board failed.
@@ -88,6 +88,13 @@ BOARDS = {
         macro="NRL_BOARD_S31_FUNCTION_COREBOARD",
         sdkconfig=["sdkconfig.s31_function_coreboard.defaults"],
         lvgl=False,
+        extra=[],
+    ),
+    "esp_mosaico": dict(
+        target="esp32s31",
+        macro="NRL_BOARD_ESP_MOSAICO",
+        sdkconfig=["sdkconfig.esp_mosaico.defaults"],
+        lvgl=True,
         extra=[],
     ),
 }

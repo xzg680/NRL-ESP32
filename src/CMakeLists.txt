@@ -61,6 +61,9 @@ set(app_sources
     app/driver/environment_sensors.cpp
     app/driver/sr110u.cpp
     app/driver/display_s31.cpp
+    app/driver/display_mosaico.cpp
+    app/driver/display_mosaico_panel.cpp
+    app/driver/mosaico_sensors.cpp
     app/driver/es7210.cpp
     app/driver/es8311.cpp
     app/driver/es8389.cpp

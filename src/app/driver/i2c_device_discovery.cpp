@@ -6,10 +6,11 @@
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 
 #include <string.h>
 
-#if NRL_BOARD == NRL_BOARD_BH4TDV_RF
+#if NRL_BOARD == NRL_BOARD_BH4TDV_RF || NRL_BOARD == NRL_BOARD_ESP_MOSAICO
 
 namespace {
 
@@ -52,6 +53,36 @@ I2CDeviceModel identifyDevice(const uint8_t address,
 {
     *identity = 0u;
     *identity_valid = false;
+
+#if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+    if (address == NRL_BMI270_I2C_ADDR) {
+        uint8_t id = 0u;
+        if (readRegisters(address, 0x00u, &id, 1u) && id == 0x24u) {
+            *identity = id;
+            *identity_valid = true;
+            return I2CDeviceModel::Bmi270;
+        }
+    }
+    if (address == NRL_BMM150_I2C_ADDR_2 || address == NRL_BMM150_I2C_ADDR_3) {
+        // The chip-ID register reads 0x00 while the BMM150 is in suspend
+        // mode (its power-on state), so raise the power-control bit first.
+        const uint8_t power_on[2] = {0x4Bu, 0x01u};
+        if (I2C_MasterTransmit(address, power_on, sizeof(power_on), 30)) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            uint8_t id = 0u;
+            if (readRegisters(address, 0x40u, &id, 1u) && id == 0x32u) {
+                *identity = id;
+                *identity_valid = true;
+                return I2CDeviceModel::Bmm150;
+            }
+        }
+    }
+    if (address == NRL_BQ27220_I2C_ADDR) {
+        // The gauge has no chip-ID register; the probe ACK above is the
+        // identification (fixed address, nothing else strapped there).
+        return I2CDeviceModel::Bq27220;
+    }
+#endif
 
     if (address == 0x76u || address == 0x77u) {
         uint8_t id = 0u;
@@ -229,10 +260,18 @@ bool I2C_DEVICE_DISCOVERY_ScanSensors(void)
 {
     if (!takeScanMutex()) return false;
 
-    // The screen, touch, ES8311 and PCA9555 are soldered down with fixed
-    // addresses; only the pluggable sensors are probed. 0x20 is included
-    // purely so resolveAmbiguous() can settle the 0x23 BH1750/PCA9555
-    // collision (a PCA9555 at 0x20 means 0x23 is the BH1750).
+    // The screen, touch and codec are soldered down with fixed addresses;
+    // only the pluggable sensors are probed.
+#if NRL_BOARD == NRL_BOARD_ESP_MOSAICO
+    static const uint8_t kSensorAddresses[] = {
+        NRL_BMM150_I2C_ADDR_2,  // BMM150 magnetometer #2
+        NRL_BMM150_I2C_ADDR_3,  // BMM150 magnetometer #3
+        NRL_BQ27220_I2C_ADDR,   // BQ27220 fuel gauge
+        NRL_BMI270_I2C_ADDR,    // BMI270 IMU
+    };
+#else
+    // 0x20 is included purely so resolveAmbiguous() can settle the 0x23
+    // BH1750/PCA9555 collision (a PCA9555 at 0x20 means 0x23 is the BH1750).
     static const uint8_t kSensorAddresses[] = {
         0x0Du,  // QMC5883L compass
         0x20u,  // on-board PCA9555 (ambiguity reference, not scanned for)
@@ -242,6 +281,7 @@ bool I2C_DEVICE_DISCOVERY_ScanSensors(void)
         0x76u,  // BMP280/BME280 pressure
         0x77u,  // BMP280/BME280 alternate
     };
+#endif
     I2CDiscoveredDevice found[kMaxDevices] = {};
     const size_t count = probeAddresses(kSensorAddresses,
                                         sizeof(kSensorAddresses),
@@ -317,6 +357,9 @@ const char *I2C_DEVICE_DISCOVERY_ModelName(const I2CDeviceModel model)
         case I2CDeviceModel::Bh1750: return "BH1750-compatible";
         case I2CDeviceModel::Pca9555OrBh1750:
             return "BH1750/PCA9555 CONFLICT";
+        case I2CDeviceModel::Bmi270: return "BMI270";
+        case I2CDeviceModel::Bmm150: return "BMM150";
+        case I2CDeviceModel::Bq27220: return "BQ27220";
         case I2CDeviceModel::Unknown:
         default: return "UNKNOWN";
     }

@@ -5,7 +5,8 @@
 #include "board_pins.h"
 
 #if defined(NRL_HAS_DISPLAY) && NRL_HAS_DISPLAY && \
-    (NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD_IS_BI4UMD_FAMILY)
+    (NRL_BOARD == NRL_BOARD_S31_KORVO || NRL_BOARD_IS_BI4UMD_FAMILY || \
+     NRL_BOARD == NRL_BOARD_ESP_MOSAICO)
 
 #include "../lib/nrl_psram.h"
 #include "../lib/nrl_net_compat.h"
